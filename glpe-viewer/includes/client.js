@@ -32,8 +32,14 @@
   function resolveViewUrl(url) {
     if (!url) return url;
     if (typeof url !== 'string') {
-        if (url.toString) url = url.toString();
-        else return url;
+      // Only unwrap genuine URL-like objects; anything else (e.g. a DOM
+      // element such as a submit button named "action" shadowing the
+      // form.action property) must NOT be stringified into a fake URL.
+      if (url instanceof URL || Object.prototype.toString.call(url) === '[object Location]') {
+        url = url.href;
+      } else {
+        return url;
+      }
     }
     var trimmed = url.trim();
     if (trimmed.startsWith('data:') || trimmed.startsWith('blob:') || trimmed.startsWith('javascript:') || trimmed.startsWith('#')) {
@@ -163,18 +169,49 @@
 
   // 4. Intercept dynamic form submits
   if (window.HTMLFormElement) {
+    // Forms containing a control named "action" (e.g. Google sign-in's
+    // <button type="submit" name="action">) shadow the form.action URL
+    // property per the HTMLFormElement named-property rules. Reading the
+    // property directly would return that control element instead of the
+    // URL, so go through the prototype accessor explicitly.
+    var formActionDesc = null;
+    try {
+      formActionDesc = Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'action');
+    } catch (e) {}
+    function realFormAction(form) {
+      try {
+        if (formActionDesc && formActionDesc.get) {
+          var v = formActionDesc.get.call(form);
+          if (typeof v === 'string') return v;
+        }
+      } catch (e) {}
+      return form.getAttribute('action') || '';
+    }
+    function setFormAction(form, val) {
+      try {
+        if (formActionDesc && formActionDesc.set) {
+          formActionDesc.set.call(form, val);
+          return;
+        }
+      } catch (e) {}
+      form.setAttribute('action', val);
+    }
     var originalSubmit = HTMLFormElement.prototype.submit;
     HTMLFormElement.prototype.submit = function() {
-      if (this.action) {
-        this.action = resolveViewUrl(this.action);
+      var actionStr = realFormAction(this);
+      if (actionStr && typeof actionStr === 'string') {
+        setFormAction(this, resolveViewUrl(actionStr));
       }
       return originalSubmit.call(this);
     };
 
     window.addEventListener('submit', function(e) {
       var form = e.target;
-      if (form && form.action && !form.dataset.rewritten) {
-        form.action = resolveViewUrl(form.action);
+      if (form && !form.dataset.rewritten) {
+        var actionStr = realFormAction(form);
+        if (actionStr && typeof actionStr === 'string') {
+          setFormAction(form, resolveViewUrl(actionStr));
+        }
         form.dataset.rewritten = '1';
       }
     }, true);

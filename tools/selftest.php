@@ -58,6 +58,9 @@ $cases = [
     ['//cdn.other.com/lib.js', 'https://example.com/', 'https://cdn.other.com/lib.js'],
     ['https://absolute.com/x', 'https://example.com/', 'https://absolute.com/x'],
     ['#anchor', 'https://example.com/page', 'https://example.com/page#anchor'],
+    // Query values with "//" must never be collapsed (gmail sign-in regression)
+    ['/v3/signin/identifier?continue=https://mail.google.com/mail/u/0/', 'https://accounts.google.com/v3/signin/x', 'https://accounts.google.com/v3/signin/identifier?continue=https://mail.google.com/mail/u/0/'],
+    ['/a/./b/../c?u=https://x.org//y', 'https://accounts.google.com/v3/x', 'https://accounts.google.com/a/c?u=https://x.org//y'],
 ];
 foreach ($cases as $c) {
     check("{$c[0]} @ {$c[1]}", $engine->resolveRelativeUrl($c[0], $c[1]) === $c[2], $engine->resolveRelativeUrl($c[0], $c[1]));
@@ -79,6 +82,12 @@ check('anchor untouched', $engine->makeViewUrl('#sec') === '#sec');
 check('no double wrap', $engine->makeViewUrl('https://site.test/?_glpe=1&l=abc') === 'https://site.test/?_glpe=1&l=abc');
 $s3 = $engine->makeViewUrl('https://x.com', null, ['encodeURL' => true, 'removeScripts' => true, 'showToolbar' => true]);
 check('flags appended', strpos($s3, 'ns=1') !== false && strpos($s3, 'nb=1') !== false, $s3);
+// Attribute values carry HTML entities ("&amp;") — decoding is required so
+// the destination receives real query fields (gmail sign-in regression).
+$s4 = $engine->makeViewUrl('/v3/signin/identifier?continue=https://mail.google.com/mail/u/0/&amp;dsh=S-1:2&amp;flowName=WebLiteSignIn', 'https://accounts.google.com/v3/signin/x', ['encodeURL' => true]);
+check('attribute entities decoded', (bool)preg_match('/l=([^&]+)/', $s4, $m4) && GLPE_Codec::decode($m4[1]) === 'https://accounts.google.com/v3/signin/identifier?continue=https://mail.google.com/mail/u/0/&dsh=S-1:2&flowName=WebLiteSignIn', isset($m4[1]) ? GLPE_Codec::decode($m4[1]) : $s4);
+$s5 = $engine->makeViewUrl('/v3/signin/lookup?u=https://dest.example/p', 'https://accounts.google.com/v3/x', ['encodeURL' => true]);
+check('double slash inside query kept', (bool)preg_match('/l=([^&]+)/', $s5, $m5) && GLPE_Codec::decode($m5[1]) === 'https://accounts.google.com/v3/signin/lookup?u=https://dest.example/p', isset($m5[1]) ? GLPE_Codec::decode($m5[1]) : $s5);
 
 echo "\n== 5. Session store (simulated) ==\n";
 $_SESSION = [];

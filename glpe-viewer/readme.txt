@@ -4,7 +4,7 @@ Tags: viewer, page display, embed, link preview, content
 Requires at least: 5.3
 Tested up to: 6.7
 Requires PHP: 7.2
-Stable tag: 4.3.0
+Stable tag: 4.3.1
 License: MIT
 License URI: https://opensource.org/licenses/MIT
 
@@ -32,6 +32,13 @@ License URI: https://opensource.org/licenses/MIT
 ۴. یا شورت‌کد [glpe_viewer] را در هر برگه یا المنتور قرار دهید.
 
 == Changelog ==
+= 4.3.1 =
+* رفع نهایی فرم ورود gmail.com: فشردن دکمه Next دیگر به صفحه خطا می‌رود؛ فرم داده‌ها را درست به گوگل می‌رساند
+* مشکل کلید 'action' در فرم‌ها: وقتی دکمه ارسال فرم نام "action" دارد (فرم گوگل)، ویژگی form.action در جاوااسکریپت توسط آن کنترل پوشانده می‌شد و نشانی ساختگی [object HTMLButtonElement] ساخته می‌شد — اکنون از accessors اولیه HTMLFormElement استفاده می‌شود
+* علامت &amp; در ویژگی action/href ها قبل از رمزگذاری نشانی رمزگشایی می‌شود — پارامترهای کوئری (مثل dsh و flowName) دیگر به‌صورت amp;dsh به مقصد نمی‌رسند
+* اسلش دوگانه (https://) داخل مقادیر کوئری دیگر فشرده نمی‌شود — حذف قطعات نقطه‌دار فقط روی مسیر اعمال می‌شود (RFC 3986)
+* نکته: گوگل برای نشانی‌های IP دیتاسنتر ممکن است صفحه «Couldn't sign you in» نمایش دهد — این محدودیت سمت گوگل است و به افزونه مربوط نیست
+
 = 4.3.0 =
 * رفع کامل کارنکردن فرم‌ها روی سایت‌های سنگین (مانند gmail.com): ارسال فرم‌ها اکنون داده‌ها را کامل به مقصد می‌رساند
 * هدرهای Origin/Referer خروجی به دامنه مقصد بازنویسی می‌شوند — دیگر توسط بررسی‌های امنیتی مقصد به‌عنوان ارسال خالی رد نمی‌شود

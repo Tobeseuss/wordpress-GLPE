@@ -51,6 +51,16 @@ class GLPE_Engine {
         if (empty($targetUrl)) return $targetUrl;
         $trimmed = trim($targetUrl);
 
+        // Attribute values arrive as raw HTML text where ampersands are
+        // entity-encoded ("&amp;" for "&"). Decode them so the wrapped
+        // reference matches the URL a browser would actually request.
+        if (strpos($trimmed, '&') !== false) {
+            $decoded = html_entity_decode($trimmed, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+            if (is_string($decoded) && $decoded !== '') {
+                $trimmed = $decoded;
+            }
+        }
+
         if (
             strpos($trimmed, 'data:') === 0 ||
             strpos($trimmed, 'blob:') === 0 ||
@@ -108,13 +118,31 @@ class GLPE_Engine {
         $path = isset($path) ? preg_replace('#/[^/]*$#', '', $path) : '';
         if ($rel[0] == '/') $path = '';
 
-        $abs = "$host$path/$rel";
-        $re = array('#(/\.?/)#', '#/(?!\.\.)[^/]+/\.\./#');
+        if ($rel[0] == '/') {
+            $abs = $host . $rel;
+        } else {
+            $abs = $host . $path . '/' . $rel;
+        }
+
+        // Dot-segment removal (RFC 3986 §5.2.4) — query/fragment parts are
+        // split off first: a "//" or "/./" inside a query value (e.g.
+        // "?continue=https://mail.example/x") must never be collapsed.
+        $queryFrag = '';
+        $qpos = strpos($abs, '?');
+        $fpos = strpos($abs, '#');
+        if ($qpos !== false && ($fpos === false || $qpos < $fpos)) {
+            $queryFrag = substr($abs, $qpos);
+            $abs = substr($abs, 0, $qpos);
+        } elseif ($fpos !== false) {
+            $queryFrag = substr($abs, $fpos);
+            $abs = substr($abs, 0, $fpos);
+        }
+        $re = array('#/\./#', '#/(?!\.\.)[^/]+/\.\./#');
         for ($n = 1; $n > 0; $abs = preg_replace($re, '/', $abs, -1, $n)) {}
 
         $scheme = isset($scheme) ? $scheme : 'https';
         $portStr = (isset($port) && $port != 80 && $port != 443) ? ':' . $port : '';
-        return $scheme . '://' . $abs;
+        return $scheme . '://' . $abs . $queryFrag;
     }
 
     /**
