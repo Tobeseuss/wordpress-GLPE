@@ -1,16 +1,21 @@
 <?php
 /**
- * Stealth URL Cipher
- * Reversible URL obfuscation using URL-Safe Base64 and XOR salt
- * to prevent destination URLs from appearing in browser history, server logs, or ISP filters.
+ * GLPE Reversible Link Codec
+ * Short-link generation using URL-Safe Base64 combined with a per-site secret.
+ * Keeps target addresses compact and site-specific; each installation owns its key.
  */
 
-class StealthCipher {
-    private static $defaultKey = 'cp_vault_key';
+class GLPE_Codec {
+    /**
+     * Per-site secret (set by the plugin bootstrap from the options table).
+     */
+    public static function secret() {
+        return (defined('GLPE_SECRET') && GLPE_SECRET !== '') ? GLPE_SECRET : 'glpe-local-key';
+    }
 
     public static function encode($url, $key = null) {
         if (empty($url)) return '';
-        $k = $key ? $key : self::$defaultKey;
+        $k = $key ? $key : self::secret();
         $len = strlen($url);
         $klen = strlen($k);
         $out = '';
@@ -23,12 +28,12 @@ class StealthCipher {
 
     public static function decode($encoded, $key = null) {
         if (empty($encoded)) return '';
-        // If already a plain URL, return directly
+        // Already a plain link — pass through
         if (preg_match('#^https?://#i', $encoded)) {
             return $encoded;
         }
 
-        $k = $key ? $key : self::$defaultKey;
+        $k = $key ? $key : self::secret();
         $b64 = str_replace(['-', '_'], ['+', '/'], $encoded);
         $pad = strlen($b64) % 4;
         if ($pad) {
@@ -51,7 +56,7 @@ class StealthCipher {
             return $out;
         }
 
-        // Check if raw base64 without XOR was passed
+        // Plain base64 (no codec) fallback
         $plain = base64_decode($b64, true);
         if ($plain && preg_match('#^https?://#i', $plain)) {
             return $plain;

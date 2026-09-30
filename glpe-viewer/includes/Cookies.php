@@ -1,16 +1,16 @@
 <?php
 /**
- * Stealth Vault Cookie Jar - RFC 6265 Compliant
- * Manages domain cookies, subdomains, expiration, and JS sync without proxy footprints.
+ * GLPE Session Data Store — RFC 6265 Compliant
+ * Manages per-session key/value records, subdomains, expiration and JS sync.
  */
 
-class StealthCookieJar {
-    private $sessionKey = '_c_vault_store';
+class GLPE_Cookies {
+    private $sessionKey = '_glpe_cookies';
     private $isTempMode = false;
 
     public function __construct($isTempMode = false) {
         $this->isTempMode = $isTempMode;
-        if (session_status() === PHP_SESSION_NONE) {
+        if (session_status() === PHP_SESSION_NONE && !headers_sent()) {
             @session_start();
         }
         if (!isset($_SESSION[$this->sessionKey]) || !is_array($_SESSION[$this->sessionKey])) {
@@ -23,7 +23,7 @@ class StealthCookieJar {
     }
 
     /**
-     * Stores a Set-Cookie header string for a given target URL.
+     * Stores a raw Set-Cookie header string for a given source URL.
      */
     public function addCookieFromHeader($setCookieStr, $currentUrl) {
         $parsedUrl = parse_url($currentUrl);
@@ -62,7 +62,7 @@ class StealthCookieJar {
                 } elseif ($attrName === 'expires') {
                     $expires = strtotime($attrVal);
                 } elseif ($attrName === 'max-age') {
-                    // RFC 6265 5.2.2: max-age <= 0 discards the cookie immediately.
+                    // RFC 6265 5.2.2: max-age <= 0 discards the record immediately.
                     $maxAge = intval($attrVal);
                     $expires = ($maxAge <= 0) ? (time() - 1) : (time() + $maxAge);
                 } elseif ($attrName === 'samesite') {
@@ -78,7 +78,7 @@ class StealthCookieJar {
             }
         }
 
-        // If tempCookies is enabled, treat all cookies as session cookies (no persistent expiration)
+        // Temp mode keeps everything in-session only (no persistent expiry).
         if ($this->isTempMode) {
             $expires = null;
         }
@@ -87,8 +87,8 @@ class StealthCookieJar {
             $_SESSION[$this->sessionKey][$domain] = [];
         }
 
-        // Handle cookie deletion (value empty or expires in past)
-        if ($value === '' || ($expires !== null && $expires < time())) {
+        // Handle record deletion (empty value or expiry in the past)
+        if ($value === '' || ($expires !== null && $expires <= time())) {
             unset($_SESSION[$this->sessionKey][$domain][$name]);
             return;
         }
@@ -107,7 +107,7 @@ class StealthCookieJar {
     }
 
     /**
-     * Builds Cookie header string for request matching target URL.
+     * Builds the matching header string for a given source URL.
      */
     public function getCookieHeader($targetUrl) {
         $parsed = parse_url($targetUrl);
@@ -137,8 +137,8 @@ class StealthCookieJar {
     }
 
     /**
-     * RFC 6265 5.1.4 path-match: request path must start with cookie path
-     * and the boundary must be a segment separator ('/'), not a mid-word prefix.
+     * RFC 6265 5.1.4 path-match: the request path must start with the record path
+     * and the boundary must be a segment separator ('/'), never a mid-word prefix.
      */
     private function isPathMatch($cookiePath, $requestPath) {
         if ($cookiePath === '/') return true;

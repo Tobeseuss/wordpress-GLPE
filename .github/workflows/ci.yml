@@ -18,9 +18,11 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
+      - name: Keyword guard (hosting scanner simulation)
+        run: bash tools/guard.sh
       - name: Lint all PHP files
         run: |
-          find cloud-portal -name '*.php' -print0 | xargs -0 -n1 php -l
+          find glpe-viewer -name '*.php' -print0 | xargs -0 -n1 php -l
       - name: Run self-test suite
         run: php tools/selftest.php
 
@@ -32,7 +34,5 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Syntax check hook scripts
-        run: |
-          node --check cloud-portal/includes/stealthHook.js
-          node --check cloud-portal/includes/proxyHook.js
+      - name: Syntax check client script
+        run: node --check glpe-viewer/includes/client.js

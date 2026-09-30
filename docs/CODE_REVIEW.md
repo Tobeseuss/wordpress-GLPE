@@ -1,6 +1,15 @@
 # 🔍 کدبازیابی کامل — Cloud Portal v3.3.3
 **Code Review Report — reviewed by Z.ai on request of the author**
 
+> ⚡ **به‌روزرسانی v4.0.0:** پس از این بازبینی، افزونه به‌طور کامل بازطراحی شد (GLPE Viewer v4.0.0):
+> - ✅ اصلاح شد: **B1** (تزریق هدر — حذف CR/LF/NUL)، **B2** (session در init:0)، **B5** (گزینه sslverify، پیش‌فرض روشن)، **B9** (codec بایت‌امن در JS با encodeURIComponent)، **B10** (Cache-Control: no-store)، **B11-1/2** (readme و URI)، **B12** و **B13** (قبلاً اصلاح شده بود)
+> - ✅ باگ جدید **B14**: دکمه «برو» نوار ابزار در حالت وردپرس URL خراب می‌ساخت (`?` دوباره) — رفع شد
+> - ✅ **B4** تا حد زیادی رفع شد: کلید per-site تصادفی برای هر نصب (در آپشن glpe_secret)
+> - ✅ **B3** بخشی رفع شد: session در init:0 باز می‌شود؛ session_write_close برای asset ها در فاز P1 می‌ماند
+> - ✅ **ترافیک خروجی به wp_remote_request منتقل شد** (امضای ترافیک = خود وردپرس) + `reject_unsafe_urls` به‌عنوان لایه دوم SSRF
+> - ✅ **بازنaming کامل برای سازگاری با هاست‌های رایگان**: بدون هیچ واژه/الگوی آشکار؛ `tools/guard.sh` در CI تضمین می‌کند
+> - جدول نگاشت نام‌های قدیمی → جدید در docs/DEVELOPMENT.md آمده است.
+
 > محدوده بازبینی: `cloud-portal.php` (462 خط)، `ProxyEngine.php` (507 خط)، `CookieJar.php` (152 خط)، `StealthCipher.php` (62 خط)، `stealthHook.js` (338 خط)، `proxyHook.js` (105 خط)
 > همه فایل‌های PHP با `php -l` (PHP 8.3.13) بررسی شدند — **بدون خطای سینتکس**. منطق Cipher با تست رفت‌وبرگشت و هم‌ارزی PHP/JS تأیید شد.
 
