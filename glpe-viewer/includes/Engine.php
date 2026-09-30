@@ -12,11 +12,16 @@ require_once __DIR__ . '/Codec.php';
 class GLPE_Engine {
     private $cookies;
     private $viewScript;
+    private $ownHost = '';
     private $userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
     public function __construct($viewScript = '', $isTempCookies = false) {
         $this->cookies = new GLPE_Cookies($isTempCookies);
         $this->viewScript = $viewScript;
+        $own = strtolower((string)parse_url((string)$viewScript, PHP_URL_HOST));
+        if ($own !== '') {
+            $this->ownHost = $own;
+        }
     }
 
     public function getCookies() {
@@ -61,6 +66,15 @@ class GLPE_Engine {
         $resolved = $trimmed;
         if ($baseUrl) {
             $resolved = $this->resolveRelativeUrl($trimmed, $baseUrl);
+        }
+
+        // References that already point back at this site stay untouched,
+        // so own pages (viewer form, toolbar home link) never get wrapped.
+        if ($this->ownHost !== '' && preg_match('#^https?://#i', $resolved)) {
+            $refHost = strtolower((string)parse_url($resolved, PHP_URL_HOST));
+            if ($refHost === $this->ownHost) {
+                return $resolved;
+            }
         }
 
         $isEncoded = !empty($options['encodeURL']);
@@ -182,16 +196,16 @@ class GLPE_Engine {
             </div>
             <div style="display:flex; align-items:center; gap:12px; font-size:11px; color:#cbd5e1; margin-right:12px;">
                 <label style="cursor:pointer; display:flex; align-items:center; gap:3px;">
-                    <input type="checkbox" ' . $ecChecked . ' onclick="var u=new URL(window.location.href); this.checked?u.searchParams.set(\'ec\',\'1\'):u.searchParams.delete(\'ec\'); window.location.href=u.href;"> بازنویسی پیوند
+                    <input type="checkbox" ' . $ecChecked . ' onclick="var u=new URL(window.location.href); this.checked?u.searchParams.set(\'ec\',\'1\'):u.searchParams.set(\'ec\',\'0\'); window.location.href=u.href;"> بازنویسی پیوند
                 </label>
                 <label style="cursor:pointer; display:flex; align-items:center; gap:3px;">
-                    <input type="checkbox" ' . $ntChecked . ' onclick="var u=new URL(window.location.href); this.checked?u.searchParams.set(\'nt\',\'1\'):u.searchParams.delete(\'nt\'); window.location.href=u.href;"> عنوان عمومی
+                    <input type="checkbox" ' . $ntChecked . ' onclick="var u=new URL(window.location.href); this.checked?u.searchParams.set(\'nt\',\'1\'):u.searchParams.set(\'nt\',\'0\'); window.location.href=u.href;"> عنوان عمومی
                 </label>
                 <label style="cursor:pointer; display:flex; align-items:center; gap:3px;">
-                    <input type="checkbox" ' . $nsChecked . ' onclick="var u=new URL(window.location.href); this.checked?u.searchParams.set(\'ns\',\'1\'):u.searchParams.delete(\'ns\'); window.location.href=u.href;"> بدون اسکریپت
+                    <input type="checkbox" ' . $nsChecked . ' onclick="var u=new URL(window.location.href); this.checked?u.searchParams.set(\'ns\',\'1\'):u.searchParams.set(\'ns\',\'0\'); window.location.href=u.href;"> بدون اسکریپت
                 </label>
                 <label style="cursor:pointer; display:flex; align-items:center; gap:3px;">
-                    <input type="checkbox" ' . $niChecked . ' onclick="var u=new URL(window.location.href); this.checked?u.searchParams.set(\'ni\',\'1\'):u.searchParams.delete(\'ni\'); window.location.href=u.href;"> بدون تصویر
+                    <input type="checkbox" ' . $niChecked . ' onclick="var u=new URL(window.location.href); this.checked?u.searchParams.set(\'ni\',\'1\'):u.searchParams.set(\'ni\',\'0\'); window.location.href=u.href;"> بدون تصویر
                 </label>
                 <button type="button" onclick="window.__toggleGlpeBar()" style="background:#334155; color:#94a3b8; border:none; padding:3px 8px; border-radius:4px; cursor:pointer;" title="بستن نوار ناوبری">
                     ✕

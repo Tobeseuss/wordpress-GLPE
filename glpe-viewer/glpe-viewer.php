@@ -3,7 +3,7 @@
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
  * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با قابلیت بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 4.1.0
+ * Version: 4.2.0
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '4.1.0');
+define('GLPE_VERSION', '4.2.0');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -151,7 +151,13 @@ class GLPE_Plugin {
             exit;
         }
 
-        // 2. Extract and decode the target link
+        // 2. Per-user session & record management page
+        if (isset($_GET['mode']) && $_GET['mode'] === 'sessions') {
+            $this->runSessionManager($engine);
+            exit;
+        }
+
+        // 3. Extract and decode the target link
         $rawParam = isset($_GET['l']) ? trim($_GET['l']) : (isset($_POST['l']) ? trim($_POST['l']) : '');
         if ($rawParam === '') {
             wp_redirect($this->viewerPageUrl());
@@ -164,13 +170,15 @@ class GLPE_Plugin {
             $targetUrl = 'https://' . $targetUrl;
         }
 
-        // 3. Display flags
+
+        // 4. Display flags — an explicit URL flag ("1" or "0") always wins;
+        //    otherwise the site-wide defaults from the settings page apply.
         $options = [
-            'removeScripts' => (isset($_GET['ns']) && $_GET['ns'] == '1') || (get_option('glpe_no_scripts', '0') === '1'),
-            'removeImages'  => (isset($_GET['ni']) && $_GET['ni'] == '1') || (get_option('glpe_no_images', '0') === '1'),
-            'stripTitle'    => (isset($_GET['nt']) && $_GET['nt'] == '1') || (get_option('glpe_blank_title', '0') === '1'),
-            'showToolbar'   => (isset($_GET['nb']) && $_GET['nb'] == '1') || (get_option('glpe_toolbar', '1') === '1'),
-            'encodeURL'     => (isset($_GET['ec']) && $_GET['ec'] == '1') || (get_option('glpe_rewrite_links', '1') === '1'),
+            'removeScripts' => $this->viewFlag('ns', 'glpe_no_scripts', '0'),
+            'removeImages'  => $this->viewFlag('ni', 'glpe_no_images', '0'),
+            'stripTitle'    => $this->viewFlag('nt', 'glpe_blank_title', '0'),
+            'showToolbar'   => $this->viewFlag('nb', 'glpe_toolbar', '1'),
+            'encodeURL'     => $this->viewFlag('ec', 'glpe_rewrite_links', '1'),
         ];
 
         $method   = isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : 'GET';
@@ -398,6 +406,7 @@ class GLPE_Plugin {
         $viewScript = add_query_arg(['_glpe' => '1'], home_url('/'));
         $engine = new GLPE_Engine($viewScript);
         $cookieCount = count($engine->getCookies()->getAllCookies());
+        $sessionsUrl = add_query_arg(['_glpe' => '1', 'mode' => 'sessions'], home_url('/'));
 
         $defaultEc = get_option('glpe_rewrite_links', '1') === '1';
         $defaultNb = get_option('glpe_toolbar', '1') === '1';
@@ -508,6 +517,12 @@ class GLPE_Plugin {
                     <?php endforeach; ?>
                 </div>
             </form>
+
+            <div style="display: flex; justify-content: center; margin-top: 14px;">
+                <a href="<?php echo esc_url($sessionsUrl); ?>" style="font-size: 12px; color: #94a3b8; text-decoration: none; background: #1e293b; border: 1px solid #334155; padding: 8px 16px; border-radius: 10px;">
+                    🍪 مدیریت نشست‌ها و کوکی‌های من (<?php echo (int)$cookieCount; ?>)
+                </a>
+            </div>
         </div>
         <?php
         return ob_get_clean();
@@ -529,12 +544,19 @@ class GLPE_Plugin {
     }
 
     public function registerSettings() {
-        register_setting('glpe_group', 'glpe_rewrite_links');
-        register_setting('glpe_group', 'glpe_toolbar');
-        register_setting('glpe_group', 'glpe_blank_title');
-        register_setting('glpe_group', 'glpe_no_scripts');
-        register_setting('glpe_group', 'glpe_no_images');
-        register_setting('glpe_group', 'glpe_ssl_verify');
+        $flags = ['glpe_rewrite_links', 'glpe_toolbar', 'glpe_blank_title', 'glpe_no_scripts', 'glpe_no_images', 'glpe_ssl_verify'];
+        foreach ($flags as $flag) {
+            register_setting('glpe_group', $flag, ['sanitize_callback' => [$this, 'sanitizeFlag']]);
+        }
+    }
+
+    /**
+     * Normalizes on/off settings. Unchecked checkboxes are absent from the
+     * POST payload, so every flag ships a hidden "0" input and this callback
+     * guarantees the saved value is always a clean "0"/"1" string.
+     */
+    public function sanitizeFlag($value) {
+        return ($value === '1' || $value === 1 || $value === true) ? '1' : '0';
     }
 
     public function renderAdminSettingsPage() {
@@ -581,6 +603,7 @@ class GLPE_Plugin {
                         <th scope="row">بازنویسی خودکار پیوندها (Short Links)</th>
                         <td>
                             <label>
+                                <input type="hidden" name="glpe_rewrite_links" value="0">
                                 <input type="checkbox" name="glpe_rewrite_links" value="1" <?php checked(get_option('glpe_rewrite_links', '1'), '1'); ?> />
                                 فعال‌سازی کدگذاری دوطرفه پیوندهای داخلی صفحات نمایش‌داده‌شده
                             </label>
@@ -590,6 +613,7 @@ class GLPE_Plugin {
                         <th scope="row">نوار ناوبری بالا (Nav Bar)</th>
                         <td>
                             <label>
+                                <input type="hidden" name="glpe_toolbar" value="0">
                                 <input type="checkbox" name="glpe_toolbar" value="1" <?php checked(get_option('glpe_toolbar', '1'), '1'); ?> />
                                 نمایش نوار ناوبری شناور بالای صفحه با قابلیت جستجوی جدید و دکمه صفحه اصلی
                             </label>
@@ -599,6 +623,7 @@ class GLPE_Plugin {
                         <th scope="row">عنوان عمومی تب (Blank Title)</th>
                         <td>
                             <label>
+                                <input type="hidden" name="glpe_blank_title" value="0">
                                 <input type="checkbox" name="glpe_blank_title" value="1" <?php checked(get_option('glpe_blank_title', '0'), '1'); ?> />
                                 نمایش عنوان عمومی به‌جای عنوان اصلی صفحه در تب مرورگر
                             </label>
@@ -608,6 +633,7 @@ class GLPE_Plugin {
                         <th scope="row">بدون جاوااسکریپت (No Scripts)</th>
                         <td>
                             <label>
+                                <input type="hidden" name="glpe_no_scripts" value="0">
                                 <input type="checkbox" name="glpe_no_scripts" value="1" <?php checked(get_option('glpe_no_scripts', '0'), '1'); ?> />
                                 غیرفعال‌سازی کدهای جاوااسکریپت صفحات خارجی
                             </label>
@@ -617,6 +643,7 @@ class GLPE_Plugin {
                         <th scope="row">بدون تصاویر (No Images)</th>
                         <td>
                             <label>
+                                <input type="hidden" name="glpe_no_images" value="0">
                                 <input type="checkbox" name="glpe_no_images" value="1" <?php checked(get_option('glpe_no_images', '0'), '1'); ?> />
                                 عدم بارگذاری تصاویر جهت کاهش شدید مصرف پهنای باند
                             </label>
@@ -626,6 +653,7 @@ class GLPE_Plugin {
                         <th scope="row">اعتبارسنجی SSL مقصد</th>
                         <td>
                             <label>
+                                <input type="hidden" name="glpe_ssl_verify" value="0">
                                 <input type="checkbox" name="glpe_ssl_verify" value="1" <?php checked(get_option('glpe_ssl_verify', '1'), '1'); ?> />
                                 فقط در صورت خطای گواهی روی هاست‌های قدیمی غیرفعال کنید (کاهش امنیت)
                             </label>
@@ -822,6 +850,191 @@ class GLPE_Plugin {
 
         wp_safe_redirect(add_query_arg(['page' => 'glpe-viewer', 'cp_msg' => $msg], admin_url('admin.php')));
         exit;
+    }
+
+    /**
+     * Display flag resolution: an explicit URL flag ("1" or "0") always wins,
+     * otherwise the site-wide default from the settings page is used.
+     */
+    private function viewFlag($param, $option, $default) {
+        $val = null;
+        if (isset($_GET[$param])) {
+            $val = $_GET[$param];
+        } elseif (isset($_POST[$param])) {
+            $val = $_POST[$param];
+        }
+        if ($val !== null) {
+            return $val == '1';
+        }
+        return get_option($option, $default) === '1';
+    }
+
+    /** Truncated preview of a stored record value (own data, kept compact). */
+    private function previewValue($value) {
+        $value = (string)$value;
+        if (function_exists('mb_strlen') && function_exists('mb_substr')) {
+            return mb_strlen($value) > 30 ? mb_substr($value, 0, 30) . '…' : $value;
+        }
+        return strlen($value) > 30 ? substr($value, 0, 30) . '…' : $value;
+    }
+
+    /**
+     * Per-user session & record manager (mode=sessions).
+     * Lets every authorized user inspect and clear the session data stored
+     * for their own browsing — per domain, per record, or all at once.
+     */
+    private function runSessionManager($engine) {
+        $jar = $engine->getCookies();
+        $baseSessionsUrl = add_query_arg(['_glpe' => '1', 'mode' => 'sessions'], home_url('/'));
+
+        // POST actions: clear everything / one domain / one record.
+        if (isset($_SERVER['REQUEST_METHOD']) && $_SERVER['REQUEST_METHOD'] === 'POST') {
+            $nonce = isset($_POST['_glpe_sess_nonce']) ? wp_unslash($_POST['_glpe_sess_nonce']) : '';
+            $do    = isset($_POST['sess_do']) ? sanitize_key(wp_unslash($_POST['sess_do'])) : '';
+
+            if ($nonce === '' || !wp_verify_nonce($nonce, 'glpe_sess_mgmt')) {
+                wp_safe_redirect(add_query_arg(['_glpe' => '1', 'mode' => 'sessions', 'err' => '1'], home_url('/')));
+                exit;
+            }
+
+            if ($do === 'clear_all') {
+                $jar->clearAll();
+            } elseif ($do === 'clear_domain') {
+                $domain = isset($_POST['domain']) ? sanitize_text_field(wp_unslash($_POST['domain'])) : '';
+                $jar->clearDomain($domain);
+            } elseif ($do === 'clear_cookie') {
+                $domain = isset($_POST['domain']) ? sanitize_text_field(wp_unslash($_POST['domain'])) : '';
+                $name   = isset($_POST['name'])   ? sanitize_text_field(wp_unslash($_POST['name']))   : '';
+                $path   = isset($_POST['path'])   ? sanitize_text_field(wp_unslash($_POST['path']))   : '';
+                $jar->removeCookie($domain, $name, $path !== '' ? $path : null);
+            }
+
+            wp_safe_redirect(add_query_arg(['_glpe' => '1', 'mode' => 'sessions', 'done' => '1'], home_url('/')));
+            exit;
+        }
+
+        $byDomain = $jar->getAllCookiesByDomain();
+        ksort($byDomain);
+        $total = 0;
+        foreach ($byDomain as $domainRecords) {
+            $total += count($domainRecords);
+        }
+        $saved  = isset($_GET['done']);
+        $failed = isset($_GET['err']);
+        $viewerUrl = $this->viewerPageUrl();
+
+        status_header(200);
+        nocache_headers();
+        header('Content-Type: text/html; charset=utf-8');
+        ?>
+        <!DOCTYPE html>
+        <html lang="fa" dir="rtl">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>مدیریت نشست‌ها و کوکی‌های من</title>
+            <style>
+                body { font-family: Tahoma, sans-serif; background: #0f172a; color: #f8fafc; padding: 24px; margin: 0; }
+                .wrap { max-width: 860px; margin: 0 auto; }
+                .card { background: #1e293b; padding: 24px; border-radius: 16px; border: 1px solid #334155; margin-bottom: 16px; }
+                h2 { margin: 0 0 6px 0; font-size: 18px; }
+                p { font-size: 13px; line-height: 1.9; color: #cbd5e1; }
+                table { width: 100%; border-collapse: collapse; font-size: 12px; }
+                th { text-align: right; color: #94a3b8; font-weight: bold; padding: 8px; border-bottom: 1px solid #334155; }
+                td { padding: 8px; border-bottom: 1px solid #26334d; color: #e2e8f0; word-break: break-all; }
+                tr:hover td { background: rgba(148,163,184,0.06); }
+                .btn { display: inline-block; background: #334155; color: #f8fafc; border: 1px solid #475569; padding: 7px 14px; border-radius: 8px; font-size: 12px; font-weight: bold; cursor: pointer; text-decoration: none; font-family: Tahoma, sans-serif; }
+                .btn-danger { background: #7f1d1d; border-color: #991b1b; }
+                .btn:hover { opacity: 0.9; }
+                .tag { display: inline-block; background: #0f172a; border: 1px solid #334155; color: #94a3b8; border-radius: 6px; padding: 1px 7px; font-size: 10px; margin-right: 4px; }
+                .notice { border-radius: 10px; padding: 10px 14px; font-size: 13px; margin-bottom: 14px; }
+                .notice-ok { background: rgba(5,150,105,0.15); border: 1px solid #059669; color: #6ee7b7; }
+                .notice-err { background: rgba(244,63,94,0.15); border: 1px solid #f43f5e; color: #fda4af; }
+                .mono { font-family: monospace; font-size: 11px; color: #94a3b8; }
+                .domain { font-weight: bold; font-size: 14px; color: #38bdf8; }
+            </style>
+        </head>
+        <body>
+        <div class="wrap">
+            <?php if ($saved): ?>
+                <div class="notice notice-ok">✔ تغییرات اعمال شد.</div>
+            <?php elseif ($failed): ?>
+                <div class="notice notice-err">خطای اعتبارسنجی؛ لطفاً دوباره تلاش کنید.</div>
+            <?php endif; ?>
+
+            <div class="card">
+                <h2>🍪 نشست‌ها و کوکی‌های من</h2>
+                <p>داده‌های نشست ذخیره‌شده برای مرور شما در این مرورگر. این داده‌ها فقط برای حساب کاربری فعلی شماست و هر کاربر تنها داده‌های خودش را می‌بیند.</p>
+                <p style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:0;">
+                    <span class="tag"><?php echo (int)$total; ?> کوکی در <?php echo count($byDomain); ?> دامنه</span>
+                    <?php if ($total > 0): ?>
+                    <form method="post" action="<?php echo esc_url($baseSessionsUrl); ?>" style="display:inline;" onsubmit="return confirm('همه نشست‌ها پاک شوند؟');">
+                        <input type="hidden" name="sess_do" value="clear_all">
+                        <?php wp_nonce_field('glpe_sess_mgmt', '_glpe_sess_nonce'); ?>
+                        <button type="submit" class="btn btn-danger">پاک‌کردن همه</button>
+                    </form>
+                    <?php endif; ?>
+                    <a class="btn" href="<?php echo esc_url($viewerUrl); ?>">← بازگشت به نمایشگر</a>
+                </p>
+            </div>
+
+            <?php if (empty($byDomain)): ?>
+                <div class="card">
+                    <p style="text-align:center; color:#94a3b8; margin:0;">هیچ نشست ذخیره‌شده‌ای وجود ندارد. با مرور سایت‌های جدید، داده‌های آن‌ها اینجا نمایش داده می‌شود.</p>
+                </div>
+            <?php endif; ?>
+
+            <?php foreach ($byDomain as $domain => $records): ?>
+                <div class="card">
+                    <p style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin:0 0 10px 0;">
+                        <span class="domain">🌐 <?php echo esc_html($domain); ?> <span class="tag"><?php echo count($records); ?> کوکی</span></span>
+                        <form method="post" action="<?php echo esc_url($baseSessionsUrl); ?>" style="display:inline;" onsubmit="return confirm('نشست این دامنه پاک شود؟');">
+                            <input type="hidden" name="sess_do" value="clear_domain">
+                            <input type="hidden" name="domain" value="<?php echo esc_attr($domain); ?>">
+                            <?php wp_nonce_field('glpe_sess_mgmt', '_glpe_sess_nonce'); ?>
+                            <button type="submit" class="btn">پاک‌کردن این دامنه</button>
+                        </form>
+                    </p>
+                    <table>
+                        <thead>
+                        <tr><th>نام</th><th>مقدار</th><th>مسیر</th><th>انقضا</th><th>نشانه‌ها</th><th></th></tr>
+                        </thead>
+                        <tbody>
+                        <?php foreach ($records as $c):
+                            $expText = ($c['expires'] === null)
+                                ? 'تا پایان نشست'
+                                : (function_exists('wp_date') ? wp_date('Y/m/d H:i', (int)$c['expires']) : date('Y/m/d H:i', (int)$c['expires']));
+                        ?>
+                        <tr>
+                            <td class="mono"><?php echo esc_html($c['key']); ?></td>
+                            <td class="mono" title="<?php echo esc_attr($c['value']); ?>"><?php echo esc_html($this->previewValue($c['value'])); ?></td>
+                            <td class="mono"><?php echo esc_html($c['path']); ?></td>
+                            <td class="mono"><?php echo esc_html($expText); ?></td>
+                            <td>
+                                <?php if (!empty($c['secure'])): ?><span class="tag">Secure</span><?php endif; ?>
+                                <?php if (!empty($c['httpOnly'])): ?><span class="tag">HttpOnly</span><?php endif; ?>
+                                <?php if (!empty($c['sameSite'])): ?><span class="tag"><?php echo esc_html($c['sameSite']); ?></span><?php endif; ?>
+                            </td>
+                            <td>
+                                <form method="post" action="<?php echo esc_url($baseSessionsUrl); ?>" style="display:inline;">
+                                    <input type="hidden" name="sess_do" value="clear_cookie">
+                                    <input type="hidden" name="domain" value="<?php echo esc_attr($domain); ?>">
+                                    <input type="hidden" name="name" value="<?php echo esc_attr($c['key']); ?>">
+                                    <input type="hidden" name="path" value="<?php echo esc_attr($c['path']); ?>">
+                                    <?php wp_nonce_field('glpe_sess_mgmt', '_glpe_sess_nonce'); ?>
+                                    <button type="submit" class="btn" title="حذف این کوکی">✕</button>
+                                </form>
+                            </td>
+                        </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            <?php endforeach; ?>
+        </div>
+        </body>
+        </html>
+        <?php
     }
 }
 

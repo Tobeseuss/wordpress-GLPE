@@ -44,6 +44,12 @@
     }
     try {
       var absolute = new URL(trimmed, currentTargetUrl).href;
+      // Never wrap same-origin references (this site's own pages,
+      // e.g. the navigation bar home link pointing at the viewer page).
+      var absObj = new URL(absolute);
+      if (window.location && absObj.origin === window.location.origin) {
+        return absolute;
+      }
       var sep = viewScript.indexOf('?') !== -1 ? '&' : '?';
       var payload = isEncoded ? cipherEncode(absolute) : encodeURIComponent(absolute);
       var flags = '';
@@ -266,11 +272,17 @@
   } catch(e) {}
 
   // 7b. MutationObserver for dynamically injected elements
+  // Own UI (navigation bar / reopen badge) is excluded from rewriting.
+  function isOwnUi(node) {
+    if (!node || node.nodeType !== 1) return false;
+    if (node.id === '__glpe_bar' || node.id === '__glpe_badge') return true;
+    return !!(node.closest && (node.closest('#__glpe_bar') || node.closest('#__glpe_badge')));
+  }
   try {
     var observer = new MutationObserver(function(mutations) {
       mutations.forEach(function(mutation) {
         mutation.addedNodes.forEach(function(node) {
-          if (node && node.nodeType === 1) {
+          if (node && node.nodeType === 1 && !isOwnUi(node)) {
             var tag = node.tagName;
             if (tag === 'IMG' || tag === 'VIDEO' || tag === 'AUDIO' || tag === 'SOURCE' || tag === 'IFRAME') {
               var s = node.getAttribute('src');
@@ -292,6 +304,7 @@
             var dataEls = node.querySelectorAll ? node.querySelectorAll('form, a, [data-src], [data-thumb], [data-background], [data-poster], [data-url], [data-image], [data-original], [data-bg]') : [];
             for (var i = 0; i < dataEls.length; i++) {
               var el = dataEls[i];
+              if (isOwnUi(el)) continue;
               if (el.tagName === 'FORM') {
                  var fa = el.getAttribute('action');
                  if (fa && !fa.startsWith('#') && !fa.startsWith('javascript:') && fa.indexOf('_glpe=') === -1) {

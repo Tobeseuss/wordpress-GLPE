@@ -166,4 +166,69 @@ class GLPE_Cookies {
     public function clearAll() {
         $_SESSION[$this->sessionKey] = [];
     }
+
+    /**
+     * All records grouped by their owner domain: [domain => [record, ...]].
+     * Used by the per-user session management page.
+     */
+    public function getAllCookiesByDomain() {
+        $result = [];
+        if (isset($_SESSION[$this->sessionKey]) && is_array($_SESSION[$this->sessionKey])) {
+            foreach ($_SESSION[$this->sessionKey] as $domain => $domainCookies) {
+                if (!empty($domainCookies) && is_array($domainCookies)) {
+                    $result[$domain] = array_values($domainCookies);
+                }
+            }
+        }
+        return $result;
+    }
+
+    /** Total number of stored records. */
+    public function countAll() {
+        return count($this->getAllCookies());
+    }
+
+    /**
+     * Removes every record owned by a domain (exact match, leading dot ignored).
+     * Returns the number of removed records.
+     */
+    public function clearDomain($domain) {
+        $domain = strtolower(ltrim(trim((string)$domain), '.'));
+        if ($domain === '') return 0;
+
+        $removed = 0;
+        if (isset($_SESSION[$this->sessionKey]) && is_array($_SESSION[$this->sessionKey])) {
+            foreach (array_keys($_SESSION[$this->sessionKey]) as $owned) {
+                if (strtolower(ltrim((string)$owned, '.')) === $domain) {
+                    $removed += count($_SESSION[$this->sessionKey][$owned]);
+                    unset($_SESSION[$this->sessionKey][$owned]);
+                }
+            }
+        }
+        return $removed;
+    }
+
+    /**
+     * Removes a single record by domain + name (+ optional exact path).
+     * Returns true when a record was removed.
+     */
+    public function removeCookie($domain, $name, $path = null) {
+        $domain = strtolower(ltrim(trim((string)$domain), '.'));
+        $name = trim((string)$name);
+        if ($domain === '' || $name === '') return false;
+        if (!isset($_SESSION[$this->sessionKey][$domain]) || !is_array($_SESSION[$this->sessionKey][$domain])) {
+            return false;
+        }
+
+        foreach ($_SESSION[$this->sessionKey][$domain] as $key => $c) {
+            if ((string)$key === $name && ($path === null || (isset($c['path']) && $c['path'] === $path))) {
+                unset($_SESSION[$this->sessionKey][$domain][$key]);
+                if (empty($_SESSION[$this->sessionKey][$domain])) {
+                    unset($_SESSION[$this->sessionKey][$domain]);
+                }
+                return true;
+            }
+        }
+        return false;
+    }
 }

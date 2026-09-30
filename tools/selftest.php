@@ -132,5 +132,22 @@ check('anonymous visitor sent to login', GLPE_Access::decide(false, false) === '
 check('signed-in without permission forbidden', GLPE_Access::decide(true, false) === 'forbidden');
 check('policy never allows without cap', GLPE_Access::decide(false, true) === 'allow' && GLPE_Access::decide(false, false) !== 'allow');
 
+echo "\n== 9. Per-user session management ==\n";
+$_SESSION = [];
+$jar2 = new GLPE_Cookies(false);
+$jar2->addCookieFromHeader('a=1; Path=/', 'https://example.com/');
+$jar2->addCookieFromHeader('b=2; Domain=example.com; Path=/', 'https://example.com/');
+$jar2->addCookieFromHeader('c=3', 'https://test.org/x/y');
+$grouped = $jar2->getAllCookiesByDomain();
+check('grouped by domain', count($grouped) === 2 && count($grouped['example.com']) === 2);
+check('countAll', $jar2->countAll() === 3);
+check('remove single record', $jar2->removeCookie('example.com', 'a', '/') === true && $jar2->countAll() === 2);
+check('remove with wrong path fails', $jar2->removeCookie('example.com', 'b', '/nope') === false);
+check('dot-domain clear', $jar2->clearDomain('.example.com') === 1 && $jar2->countAll() === 1);
+check('other domain survives', strpos($jar2->getCookieHeader('https://test.org/x/y'), 'c=3') !== false);
+check('own-host refs untouched', $engine->makeViewUrl('https://site.test/view/') === 'https://site.test/view/');
+check('own-host relative untouched', $engine->makeViewUrl('/dashboard', 'https://site.test/some/page') === 'https://site.test/dashboard');
+check('external still wrapped', strpos($engine->makeViewUrl('https://target.com/', null, ['encodeURL' => true]), '&l=') !== false);
+
 echo "\n== RESULT: $pass passed, $fail failed ==\n";
 exit($fail > 0 ? 1 : 0);
