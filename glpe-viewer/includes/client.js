@@ -12,6 +12,23 @@
   var viewScript = ctx.g || '/';
   var isEncoded = !!ctx.enc;
   var encKey = ctx.k || 'glpe-local-key';
+  // Inside a proxied document, same-origin references are usually TARGET
+  // references that the browser (or the Request constructor) already resolved
+  // against OUR origin — e.g. new Request('/youtubei/v1/guide') becomes
+  // http://this-site/youtubei/v1/guide. They must be re-anchored onto the
+  // real target and wrapped. Only this app's own endpoints stay untouched.
+  var isProxiedPage = false;
+  var ownAppPathRe = null;
+  try {
+    var _ctxOrigin = new URL(currentTargetUrl, window.location.href).origin;
+    isProxiedPage = !!(window.location && _ctxOrigin && _ctxOrigin !== window.location.origin);
+    ownAppPathRe = /^(\/(wp-admin|wp-login|wp-json|wp-content|wp-includes|feed|view)(\/|$)|\/\?)/i;
+  } catch (e) {}
+
+  function isOwnAppRef(absObj) {
+    if (absObj.search.indexOf('_glpe=') !== -1) return true;
+    return ownAppPathRe ? ownAppPathRe.test(absObj.pathname + absObj.search) : false;
+  }
 
   // Bi-directional byte codec matching the server-side GLPE_Codec
   function cipherEncode(str, key) {
@@ -50,11 +67,16 @@
     }
     try {
       var absolute = new URL(trimmed, currentTargetUrl).href;
-      // Never wrap same-origin references (this site's own pages,
-      // e.g. the navigation bar home link pointing at the viewer page).
       var absObj = new URL(absolute);
       if (window.location && absObj.origin === window.location.origin) {
-        return absolute;
+        // On the viewer page itself, own links stay untouched. Inside a
+        // proxied page, same-origin references are re-anchored onto the
+        // target site — otherwise SPA fetches (Request objects, service
+        // style relative URLs) silently hit this site and die with a 404.
+        if (!isProxiedPage || isOwnAppRef(absObj)) {
+          return absolute;
+        }
+        absolute = _ctxOrigin + absObj.pathname + absObj.search + absObj.hash;
       }
       var sep = viewScript.indexOf('?') !== -1 ? '&' : '?';
       var payload = isEncoded ? cipherEncode(absolute) : encodeURIComponent(absolute);
@@ -202,12 +224,35 @@
 
     window.addEventListener('submit', function(e) {
       var form = e.target;
-      if (form && !form.dataset.rewritten) {
-        var actionStr = realFormAction(form);
-        if (actionStr && typeof actionStr === 'string') {
-          setFormAction(form, resolveViewUrl(actionStr));
-        }
-        form.dataset.rewritten = '1';
+      if (!form || form.dataset.rewritten) return;
+      if (form.closest && form.closest('#__glpe_bar')) return;
+      var actionStr = realFormAction(form);
+      if (actionStr && typeof actionStr === 'string') {
+        setFormAction(form, resolveViewUrl(actionStr));
+      }
+      form.dataset.rewritten = '1';
+      // GET forms: force a REAL navigation with the gateway identity.
+      // Modern SPAs (YouTube) hijack submit and take over the navigation
+      // through the Navigation API with their own canonical URL — the
+      // gateway identity is dropped and their intercept handler fails to
+      // render inside the viewer. A full page load through the gateway
+      // renders reliably (server-side rewriting is complete), so navigate
+      // natively: the display link travels in the rewritten action and the
+      // user's fields ride the query string (merged onto the destination
+      // by the dispatcher).
+      var formMethod = (form.getAttribute('method') || 'get').toLowerCase();
+      if (formMethod === 'get' && !e.defaultPrevented) {
+        try {
+          var abs = new URL(realFormAction(form) || window.location.href, window.location.href);
+          var merged = new URLSearchParams(abs.search);
+          var fd = new FormData(form);
+          fd.forEach(function(v, k) {
+            if (typeof v === 'string') merged.set(k, v);
+          });
+          abs.search = merged.toString();
+          e.preventDefault();
+          window.location.href = abs.href;
+        } catch (err) {}
       }
     }, true);
   }
@@ -255,20 +300,37 @@
 
   // 7. Intercept SPA navigation (pushState & replaceState)
   if (window.history && window.history.pushState) {
-    var origPush = window.history.pushState;
-    window.history.pushState = function(state, title, url) {
-      if (url && typeof url === 'string') {
-        url = resolveViewUrl(url);
-      }
-      return origPush.call(this, state, title, url);
-    };
-    var origReplace = window.history.replaceState;
-    window.history.replaceState = function(state, title, url) {
-      if (url && typeof url === 'string') {
-        url = resolveViewUrl(url);
-      }
-      return origReplace.call(this, state, title, url);
-    };
+    // The url argument can be a string OR a URL object — frameworks (e.g.
+    // YouTube's SPA) pass URL instances, which must be unwrapped to href
+    // before resolving, otherwise they skip rewriting entirely.
+    function normalizeNavUrl(url) {
+      if (!url) return url;
+      if (typeof url === 'string') return resolveViewUrl(url);
+      if (url instanceof URL) return resolveViewUrl(url.href);
+      return url;
+    }
+    // Patch BOTH the prototype and the instance with the SAME wrapper:
+    // frameworks call history.replaceState(...) directly AND make
+    // prototype-level calls (History.prototype.replaceState.call(history,
+    // …) — verified live with YouTube), which skip instance patches.
+    function patchHistoryKey(key) {
+      try {
+        var protoDesc = Object.getOwnPropertyDescriptor(History.prototype, key);
+        if (!protoDesc || !protoDesc.configurable || typeof protoDesc.value !== 'function') return;
+        var nativeFn = protoDesc.value;
+        var wrapped = function(state, title, url) {
+          return nativeFn.call(this, state, title, normalizeNavUrl(url));
+        };
+        Object.defineProperty(History.prototype, key, {
+          value: wrapped, writable: protoDesc.writable !== false, configurable: true
+        });
+        Object.defineProperty(window.history, key, {
+          value: wrapped, writable: true, configurable: true
+        });
+      } catch (e) {}
+    }
+    patchHistoryKey('pushState');
+    patchHistoryKey('replaceState');
   }
 
   // 7a. Location interception — intentional no-op.
@@ -278,6 +340,37 @@
   // throws, Location.prototype has no own descriptors). Pages that navigate
   // via `location.href = …` therefore CAN leave the viewer; this is a
   // browser-enforced limit, documented in the readme.
+
+  // 7c. Navigation API — modern SPAs route through the navigate EVENT:
+  // a form submit / link click fires navigation's "navigate" event and the
+  // app calls e.intercept() with its own canonical URL, which (a) drops the
+  // gateway identity from the address bar and (b) fails to render inside
+  // the viewer (YouTube search is the canonical case). client.js is the
+  // first script on the page, so our listener registers first: unwrapped
+  // same-origin target navigations are cancelled and re-issued as FULL
+  // gateway navigations (server-side rendering is complete), while already
+  // wrapped destinations and this app's own endpoints pass through.
+  try {
+    if (window.navigation && window.navigation.addEventListener) {
+      window.navigation.addEventListener('navigate', function(e) {
+        try {
+          if (!e.canIntercept) return;
+          var dest = new URL(e.destination.url, window.location.href);
+          if (dest.origin !== window.location.origin) return;
+          if (dest.search.indexOf('_glpe=') !== -1) return;
+          if (isOwnAppRef(dest)) return;
+          // Leave boot-time canonicalization and in-page state updates
+          // alone: intercepting them mid-boot leaves an uninitialized
+          // shell (verified live). Only real route changes (/results,
+          // /watch, channel pages…) are converted to gateway loads.
+          if (dest.pathname === '/' || dest.pathname === '') return;
+          if (e.sameDocument === true) return;
+          e.preventDefault();
+          window.location.href = resolveViewUrl(dest.href);
+        } catch (err) {}
+      });
+    }
+  } catch (e) {}
 
   // 7b. MutationObserver for dynamically injected elements
   // Own UI (navigation bar / reopen badge) is excluded from rewriting.
@@ -296,6 +389,18 @@
               var s = node.getAttribute('src');
               if (s && !s.startsWith('#') && !s.startsWith('javascript:') && s.indexOf('_glpe=') === -1) {
                 node.setAttribute('src', resolveViewUrl(s));
+              }
+            } else if (tag === 'SCRIPT' || tag === 'LINK') {
+              // Dynamically injected player/stylesheet/loader nodes (e.g.
+              // YouTube's /s/player/.../base.js) must also travel through
+              // the gateway or they 404 against this site.
+              var rl = node.tagName === 'SCRIPT' ? node.getAttribute('src') : node.getAttribute('href');
+              if (rl && !rl.startsWith('#') && !rl.startsWith('javascript:') && !rl.startsWith('data:') && rl.indexOf('_glpe=') === -1) {
+                if (node.tagName === 'SCRIPT') {
+                  node.setAttribute('src', resolveViewUrl(rl));
+                } else {
+                  node.setAttribute('href', resolveViewUrl(rl));
+                }
               }
             } else if (tag === 'A') {
               var h = node.getAttribute('href');
