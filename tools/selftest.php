@@ -181,6 +181,13 @@ check('GET w/o action targets current page', strpos($outNoAct, 'name="l" value="
 $outJs = $engine->rewriteHtml('<form method="GET" action="javascript:void(0)"><input name="q"></form>', 'https://x.test/', ['encodeURL' => false, 'showToolbar' => false]);
 check('GET javascript: action untouched', strpos($outJs, 'action="javascript:void(0)"') !== false && strpos($outJs, 'name="_glpe"') === false, $outJs);
 
+// Tag-name/attribute separation must survive the GET rewrite — trim() once
+// produced "<formname=\"f\" ...>", an unknown element with no form semantics
+// (broke every button on google.com's homepage).
+$outNamed = $engine->rewriteHtml('<form name="f" action="/search" method="GET"><input name="q"><input type="submit"></form>', 'https://x.test/', ['encodeURL' => false, 'showToolbar' => false]);
+check('GET form tag space kept', strpos($outNamed, '<form name="f"') !== false && strpos($outNamed, '<formname') === false, $outNamed);
+check('GET form action stripped once', strpos($outNamed, 'action="https://site.test/"') !== false && substr_count($outNamed, 'action=') === 1, $outNamed);
+
 // Encoded-mode payload uses the reversible codec
 $outEnc = $engine->rewriteHtml('<form method="GET" action="https://x.test/find"><input name="q"></form>', 'https://x.test/', ['encodeURL' => true, 'showToolbar' => false]);
 check('GET encoded payload decodes back', GLPE_Codec::decode(preg_match('/name="l" value="([^"]+)"/', $outEnc, $em) ? $em[1] : '') === 'https://x.test/find', $outEnc);

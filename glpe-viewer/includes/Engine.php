@@ -407,7 +407,11 @@ class GLPE_Engine {
             if (!empty($options['tempSession']))   $hidden .= '<input type="hidden" name="tp" value="1">';
 
             $attrs = trim(preg_replace('/\s+action=([\'"]).*?\1/i', '', $attrs));
-            return '<form' . $attrs . ' action="' . esc_attr($gatewayBase) . '">' . $hidden;
+            // Keep one separating space between the tag name and the first
+            // remaining attribute — trim() alone would produce
+            // "<formname=\"f\" ...>", an unknown element with no form
+            // semantics (broke every button on google.com's homepage).
+            return '<form' . ($attrs !== '' ? ' ' . $attrs : '') . ' action="' . esc_attr($gatewayBase) . '">' . $hidden;
         }, $html);
 
         // 10. External references (sheets, icons, fonts)
