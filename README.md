@@ -5,7 +5,7 @@
 **نمایشگر صفحات وب برای وردپرس — مناسب هاست‌های رایگان و اشتراکی**
 WordPress remote page display plugin — built for free/shared hosting
 
-![Version](https://img.shields.io/badge/version-4.3.1-blue)
+![Version](https://img.shields.io/badge/version-4.4.0-blue)
 ![WordPress](https://img.shields.io/badge/WordPress-5.3%2B-21759B)
 ![PHP](https://img.shields.io/badge/PHP-7.2--8.3-8892BF)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -79,7 +79,7 @@ wordpress-GLPE/
 ```bash
 bash tools/guard.sh          # keyword guard must pass
 php tools/selftest.php       # tests must pass
-bash tools/package.sh 4.3.1  # build dist ZIP
+bash tools/package.sh 4.4.0  # build dist ZIP
 git commit + tag + push      # then publish GitHub Release with the ZIP
 ```
 Full checklist: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)

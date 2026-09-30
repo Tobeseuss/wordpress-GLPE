@@ -4,7 +4,7 @@ Tags: viewer, page display, embed, link preview, content
 Requires at least: 5.3
 Tested up to: 6.7
 Requires PHP: 7.2
-Stable tag: 4.3.1
+Stable tag: 4.4.0
 License: MIT
 License URI: https://opensource.org/licenses/MIT
 
@@ -32,6 +32,13 @@ License URI: https://opensource.org/licenses/MIT
 ۴. یا شورت‌کد [glpe_viewer] را در هر برگه یا المنتور قرار دهید.
 
 == Changelog ==
+= 4.4.0 =
+* رفع کارنکردن کلیدهای نوار ناوبری (بازنویسی پیوند / بدون اسکریپت / بدون تصویر / عنوان عمومی): رویدادهای درون‌خطی به دلیل پوشانده‌شدن سازنده URL توسط document.URL در سلسله‌مراتب اسکوپ، خطای «URL is not a constructor» می‌دادند — منطق کلیدها به تابع سراسری __glpeToggle منتقل شد
+* رفع حذف‌شدن «$1» در اسکریپت نوار ناوبری: تزریق HTML با preg_replace باعث تفسیر $N به‌عنوان backreference و خرابی جاوااسکریپت می‌شد — اکنون با preg_replace_callback تزریق می‌شود
+* رفع لودنشدن تصاویر بندانگشتی سایت‌های دارای srcset با پارامتر کامادار (مانند xhcdn): جداکننده کاندیداهای srcset فقط کامای همراه با فاصله است، نه هر ویرگول — طبق گرامر srcset پیاده‌سازی شد
+* پاکسازی کدهای بی‌اثر intercept مربوط به location/top در اسکریپت سمت مرورگر (این ویژگی‌ها در همه مرورگرها LegacyUnforgeable هستند و قابل بازنویسی نیستند) — با توضیح مستند شد
+* نکته: یوتیوب به‌دلیل معماری SPA و محافظت‌های سخت‌گیرانه مرورگر، پشتیبانی کامل از پخش در نمایشگر ندارد؛ حالت بدون اسکریپت فقط اسکلت صفحه را نشان می‌دهد
+
 = 4.3.1 =
 * رفع نهایی فرم ورود gmail.com: فشردن دکمه Next دیگر به صفحه خطا می‌رود؛ فرم داده‌ها را درست به گوگل می‌رساند
 * مشکل کلید 'action' در فرم‌ها: وقتی دکمه ارسال فرم نام "action" دارد (فرم گوگل)، ویژگی form.action در جاوااسکریپت توسط آن کنترل پوشانده می‌شد و نشانی ساختگی [object HTMLButtonElement] ساخته می‌شد — اکنون از accessors اولیه HTMLFormElement استفاده می‌شود

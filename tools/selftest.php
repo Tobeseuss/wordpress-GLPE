@@ -185,6 +185,20 @@ check('GET javascript: action untouched', strpos($outJs, 'action="javascript:voi
 $outEnc = $engine->rewriteHtml('<form method="GET" action="https://x.test/find"><input name="q"></form>', 'https://x.test/', ['encodeURL' => true, 'showToolbar' => false]);
 check('GET encoded payload decodes back', GLPE_Codec::decode(preg_match('/name="l" value="([^"]+)"/', $outEnc, $em) ? $em[1] : '') === 'https://x.test/find', $outEnc);
 
+echo "\n== 10b. rewriteSrcset (srcset grammar) ==\n";
+// Candidate separators are commas followed by whitespace; commas inside a
+// reference (CDN size hints like "s(w:526,h:298),webp/…") belong to the URL.
+$os = $engine->rewriteSrcset(
+    'https://ic.test/a/s(w:526,h:298),webp/030/1.webp 526w, https://ic.test/a/s(w:1280,h:720),webp/030/2.webp 1280w',
+    'https://x.test/',
+    ['encodeURL' => false]
+);
+check('URL-internal commas kept', strpos($os, 's%28w%3A526%2Ch%3A298%29%2Cwebp%2F030%2F1.webp') !== false && strpos($os, 's%28w%3A1280%2Ch%3A720%29%2Cwebp%2F030%2F2.webp') !== false, $os);
+check('candidate count preserved', count(explode(' 526w,', $os)) === 2 && count(explode(' 1280w', $os)) === 2, $os);
+check('descriptors kept', strpos($os, '526w') !== false && strpos($os, '1280w') !== false, $os);
+$os2 = $engine->rewriteSrcset('https://a.test/1.png,https://b.test/2.png', 'https://x.test/', ['encodeURL' => false]);
+check('comma-no-space is one URL', strpos($os2, 'a.test%2F1.png%2Chttps%3A%2F%2Fb.test%2F2.png') !== false, $os2);
+
 echo "\n== 11. Script namespace safety ==\n";
 $jsMixed = 'var ns="http://www.w3.org/2000/svg"; var api="https://api.test/endpoint";';
 $ojsMixed = $engine->rewriteJs($jsMixed, 'https://x.test/', ['encodeURL' => false]);

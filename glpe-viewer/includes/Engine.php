@@ -167,11 +167,16 @@ class GLPE_Engine {
      * Rewrites responsive srcset attributes (comma-separated URL descriptor pairs).
      */
     public function rewriteSrcset($srcset, $baseUrl, $options = []) {
-        $parts = explode(',', $srcset);
+        // Candidate separators are commas FOLLOWED BY whitespace (or the end
+        // of the attribute). Commas inside a reference (e.g. a CDN size hint
+        // like "s(w:526,h:298),webp/…") belong to the URL itself and must
+        // never split it — per the srcset grammar the reference ends at
+        // whitespace, not at a bare comma.
+        $parts = preg_split('/,(?=\s|$)/', $srcset);
         $rewritten = [];
         foreach ($parts as $part) {
             $part = trim($part);
-            if (empty($part)) continue;
+            if ($part === '') continue;
             $chunks = preg_split('/\s+/', $part, 2);
             $url = $chunks[0];
             $descriptor = isset($chunks[1]) ? ' ' . $chunks[1] : '';
@@ -234,16 +239,16 @@ class GLPE_Engine {
             </div>
             <div style="display:flex; align-items:center; gap:12px; font-size:11px; color:#cbd5e1; margin-right:12px;">
                 <label style="cursor:pointer; display:flex; align-items:center; gap:3px;">
-                    <input type="checkbox" ' . $ecChecked . ' onclick="var u=new URL(window.location.href); this.checked?u.searchParams.set(\'ec\',\'1\'):u.searchParams.set(\'ec\',\'0\'); window.location.href=u.href;"> بازنویسی پیوند
+                    <input type="checkbox" ' . $ecChecked . ' onclick="window.__glpeToggle(this,\'ec\')"> بازنویسی پیوند
                 </label>
                 <label style="cursor:pointer; display:flex; align-items:center; gap:3px;">
-                    <input type="checkbox" ' . $ntChecked . ' onclick="var u=new URL(window.location.href); this.checked?u.searchParams.set(\'nt\',\'1\'):u.searchParams.set(\'nt\',\'0\'); window.location.href=u.href;"> عنوان عمومی
+                    <input type="checkbox" ' . $ntChecked . ' onclick="window.__glpeToggle(this,\'nt\')"> عنوان عمومی
                 </label>
                 <label style="cursor:pointer; display:flex; align-items:center; gap:3px;">
-                    <input type="checkbox" ' . $nsChecked . ' onclick="var u=new URL(window.location.href); this.checked?u.searchParams.set(\'ns\',\'1\'):u.searchParams.set(\'ns\',\'0\'); window.location.href=u.href;"> بدون اسکریپت
+                    <input type="checkbox" ' . $nsChecked . ' onclick="window.__glpeToggle(this,\'ns\')"> بدون اسکریپت
                 </label>
                 <label style="cursor:pointer; display:flex; align-items:center; gap:3px;">
-                    <input type="checkbox" ' . $niChecked . ' onclick="var u=new URL(window.location.href); this.checked?u.searchParams.set(\'ni\',\'1\'):u.searchParams.set(\'ni\',\'0\'); window.location.href=u.href;"> بدون تصویر
+                    <input type="checkbox" ' . $niChecked . ' onclick="window.__glpeToggle(this,\'ni\')"> بدون تصویر
                 </label>
                 <button type="button" onclick="window.__toggleGlpeBar()" style="background:#334155; color:#94a3b8; border:none; padding:3px 8px; border-radius:4px; cursor:pointer;" title="بستن نوار ناوبری">
                     ✕
@@ -254,7 +259,22 @@ class GLPE_Engine {
         <div id="__glpe_badge" onclick="window.__toggleGlpeBar()" style="position:fixed; top:10px; right:10px; width:28px; height:28px; background:#0f172a; color:#38bdf8; border:1px solid #334155; border-radius:50%; display:none; align-items:center; justify-content:center; cursor:pointer; z-index:2147483647; font-size:14px; box-shadow:0 2px 8px rgba(0,0,0,0.3);" title="نمایش نوار ناوبری">
             ⚡
         </div>
-        <script>document.body.style.marginTop = "42px";</script>
+        <script>
+        window.__glpeToggle = function(el, flag) {
+            try {
+                var h = window.location.href;
+                var re = new RegExp(\'([?&])\' + flag + \'=[^&]*\');
+                var pair = flag + \'=\' + (el.checked ? \'1\' : \'0\');
+                if (re.test(h)) {
+                    h = h.replace(re, \'$1\' + pair);
+                } else {
+                    h += (h.indexOf(\'?\') === -1 ? \'?\' : \'&\') + pair;
+                }
+                window.location.href = h;
+            } catch (e) {}
+        };
+        document.body.style.marginTop = "42px";
+        </script>
         ';
     }
 
@@ -450,7 +470,11 @@ class GLPE_Engine {
                 "\n</script>\n";
 
             if (stripos($html, '<head>') !== false) {
-                $html = preg_replace('/<head>/i', '<head>' . $injection, $html, 1);
+                // Callback injection: replacement strings would interpret $/
+                // sequences inside the script payload as backreferences.
+                $html = preg_replace_callback('/<head>/i', function($hm) use ($injection) {
+                    return $hm[0] . $injection;
+                }, $html, 1);
             } else {
                 $html = $injection . $html;
             }
@@ -460,7 +484,13 @@ class GLPE_Engine {
         if ($showToolbar) {
             $toolbarHtml = $this->generateToolbarHtml($targetUrl, $options);
             if (stripos($html, '<body') !== false) {
-                $html = preg_replace('/<body\b([^>]*)>/i', '<body$1>' . $toolbarHtml, $html, 1);
+                // Callback injection — a replacement string here would treat
+                // every $N inside the toolbar markup (e.g. the "$1" regex
+                // backreference in the toggle helper) as a backreference and
+                // silently erase it.
+                $html = preg_replace_callback('/<body\b([^>]*)>/i', function($bm) use ($toolbarHtml) {
+                    return '<body' . $bm[1] . '>' . $toolbarHtml;
+                }, $html, 1);
             } else {
                 $html = $toolbarHtml . $html;
             }

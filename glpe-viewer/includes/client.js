@@ -71,16 +71,11 @@
   }
 
   // 1. Frame-buster neutralization
-  try {
-    Object.defineProperty(window, 'top', {
-      get: function() { return window.self; },
-      set: function() {}
-    });
-    Object.defineProperty(window, 'parent', {
-      get: function() { return window.self; },
-      set: function() {}
-    });
-  } catch(e) {}
+  // NOTE: `window.top` / `window.parent` are [LegacyUnforgeable] —
+  // non-configurable own properties on every browser — so they cannot be
+  // redefined. Frame-buster scripts are instead neutralized server-side by
+  // the HTML rewriter (top/parent location references are replaced before
+  // the script ever reaches the browser).
 
   // 2. Intercept window.fetch (dynamic content, form endpoints, JSON APIs)
   if (window.fetch) {
@@ -276,37 +271,13 @@
     };
   }
 
-  // 7a. Location / redirect interception
-  try {
-    var _origLocation = window.location;
-    var locProto = window.Location ? window.Location.prototype : null;
-    if (locProto) {
-      var origAssign = locProto.assign;
-      if (origAssign) {
-        locProto.assign = function(url) {
-          return origAssign.call(this, resolveViewUrl(url));
-        };
-      }
-      var origReplaceLoc = locProto.replace;
-      if (origReplaceLoc) {
-        locProto.replace = function(url) {
-          return origReplaceLoc.call(this, resolveViewUrl(url));
-        };
-      }
-    }
-
-    Object.defineProperty(window, 'location', {
-      get: function() { return _origLocation; },
-      set: function(val) {
-        if (typeof val === 'string') {
-          _origLocation.href = resolveViewUrl(val);
-        } else {
-          _origLocation.href = val;
-        }
-      },
-      configurable: true
-    });
-  } catch(e) {}
+  // 7a. Location interception — intentional no-op.
+  // `window.location` (and every Location property such as href/assign/
+  // replace) is [LegacyUnforgeable]: a non-configurable own property that
+  // cannot be shadowed, patched or proxied (verified live: defineProperty
+  // throws, Location.prototype has no own descriptors). Pages that navigate
+  // via `location.href = …` therefore CAN leave the viewer; this is a
+  // browser-enforced limit, documented in the readme.
 
   // 7b. MutationObserver for dynamically injected elements
   // Own UI (navigation bar / reopen badge) is excluded from rewriting.
