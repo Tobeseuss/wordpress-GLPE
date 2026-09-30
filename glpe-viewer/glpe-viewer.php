@@ -3,7 +3,7 @@
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
  * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با قابلیت بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 4.0.0
+ * Version: 4.1.0
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '4.0.0');
+define('GLPE_VERSION', '4.1.0');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -31,6 +31,7 @@ define('GLPE_SECRET', $glpe_secret);
 require_once GLPE_DIR . 'includes/Cookies.php';
 require_once GLPE_DIR . 'includes/Codec.php';
 require_once GLPE_DIR . 'includes/Engine.php';
+require_once GLPE_DIR . 'includes/Access.php';
 
 class GLPE_Plugin {
     private static $instance = null;
@@ -58,6 +59,11 @@ class GLPE_Plugin {
         // Admin
         add_action('admin_menu', [$this, 'registerAdminMenu']);
         add_action('admin_init', [$this, 'registerSettings']);
+        add_action('admin_init', [$this, 'maybeUpgrade']);
+
+        // Access management form handlers (admin-post.php)
+        add_action('admin_post_glpe_save_roles', [$this, 'handleSaveRoles']);
+        add_action('admin_post_glpe_toggle_user', [$this, 'handleToggleUser']);
     }
 
     public function startSession() {
@@ -75,6 +81,10 @@ class GLPE_Plugin {
      * Creates a dedicated page on activation if it doesn't already exist.
      */
     public function activate() {
+        // Administrators always keep the viewer permission; grant it up front.
+        GLPE_Access::grantToAdministrator();
+        update_option('glpe_db_version', GLPE_VERSION);
+
         $pageSlug = trim((string)get_option('glpe_slug', 'view'), '/');
         if ($pageSlug === '') {
             $pageSlug = 'view';
@@ -100,12 +110,29 @@ class GLPE_Plugin {
     }
 
     /**
+     * Per-version upgrade routine (runs on admin_init; cheap no-op afterwards).
+     * Ensures the viewer permission exists on the administrator role, even on
+     * installations that activated an older plugin version.
+     */
+    public function maybeUpgrade() {
+        GLPE_Access::maybeUpgrade(GLPE_VERSION);
+    }
+
+    /**
      * Intercepts front-end display requests (?_glpe=1&l=...) before template rendering.
      */
     public function dispatchRequest() {
         $isView = isset($_GET['_glpe']) || isset($_POST['_glpe']);
         if (!$isView) {
             return;
+        }
+
+        // 0. Access gate — the viewer is reserved for signed-in users that
+        //    hold the "glpe_browser" permission (administrators included).
+        $verdict = GLPE_Access::verdict();
+        if ($verdict !== 'allow') {
+            $this->respondToGate($verdict);
+            exit;
         }
 
         $viewScript  = add_query_arg(['_glpe' => '1'], home_url('/'));
@@ -239,10 +266,135 @@ class GLPE_Plugin {
         }
     }
 
+    /** Absolute URL of the current request (used for post-login redirects). */
+    private function currentRequestUrl() {
+        $uri = isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : '/';
+        return esc_url_raw(home_url($uri));
+    }
+
+    /**
+     * Handles visitors that fail the access gate on viewer requests.
+     * 'login'     → bounce to the WordPress login form and return here afterwards.
+     * 'forbidden' → styled 403 page.
+     */
+    private function respondToGate($verdict) {
+        if ($verdict === 'login') {
+            wp_safe_redirect(wp_login_url($this->currentRequestUrl()));
+            exit;
+        }
+
+        status_header(403);
+        nocache_headers();
+        header('Content-Type: text/html; charset=utf-8');
+        $loginUrl  = wp_login_url($this->currentRequestUrl());
+        $viewerUrl = $this->viewerPageUrl();
+        ?>
+        <!DOCTYPE html>
+        <html lang="fa" dir="rtl">
+        <head>
+            <meta charset="UTF-8">
+            <title>دسترسی مجاز نیست</title>
+            <style>
+                body { font-family: Tahoma, sans-serif; background: #0f172a; color: #f8fafc; padding: 40px; margin: 0; }
+                .box { max-width: 580px; margin: 40px auto; background: #1e293b; padding: 28px; border-radius: 16px; border: 1px solid #334155; }
+                h2 { color: #fbbf24; margin-top: 0; font-size: 18px; }
+                p { font-size: 13px; line-height: 1.9; color: #cbd5e1; }
+                a { display: inline-block; margin-top: 15px; margin-left: 10px; color: #38bdf8; text-decoration: none; font-weight: bold; font-size: 13px; }
+                code { background: #0f172a; padding: 2px 6px; border-radius: 6px; font-size: 12px; color: #fbbf24; }
+            </style>
+        </head>
+        <body>
+            <div class="box">
+                <h2>🔐 دسترسی مجاز نیست</h2>
+                <p>استفاده از نمایشگر صفحات وب فقط برای کاربران دارای مجوز <code>مرورگر GLPE</code> یا مدیران امکان‌پذیر است. حساب کاربری فعلی شما این مجوز را ندارد.</p>
+                <p>لطفاً با حسابی دارای مجوز وارد شوید یا از مدیر سایت بخواهید مجوز «مرورگر GLPE» را برای حساب شما فعال کند.</p>
+                <a href="<?php echo esc_url($loginUrl); ?>">ورود با حساب دیگر</a>
+                <a href="<?php echo esc_url($viewerUrl); ?>">← بازگشت</a>
+            </div>
+        </body>
+        </html>
+        <?php
+        exit;
+    }
+
+    /** Login card shown by the shortcode for logged-out visitors. */
+    private function renderLoginCard() {
+        $backUrl = get_permalink();
+        if (!$backUrl) {
+            $backUrl = home_url('/');
+        }
+        ob_start();
+        ?>
+        <div class="glpe-widget" style="max-width: 420px; margin: 20px auto; font-family: Tahoma, system-ui, sans-serif; direction: rtl; text-align: right; background: #0f172a; border: 1px solid #1e293b; border-radius: 24px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.3); color: #f8fafc;">
+            <div style="text-align: center; margin-bottom: 18px;">
+                <span style="font-size: 34px;">🔐</span>
+                <h3 style="margin: 10px 0 4px 0; font-size: 16px; font-weight: bold; color: #fff;">ورود لازم است</h3>
+                <p style="margin: 0; font-size: 12px; line-height: 1.9; color: #94a3b8;">استفاده از نمایشگر صفحات وب مخصوص کاربران دارای مجوز «مرورگر GLPE» است. ابتدا وارد حساب کاربری خود شوید.</p>
+            </div>
+            <style>
+                #glpe-login-form p { margin-bottom: 12px; }
+                #glpe-login-form label { color: #cbd5e1; font-size: 12px; }
+                #glpe-login-form input[type="text"],
+                #glpe-login-form input[type="password"] {
+                    width: 100%; box-sizing: border-box; padding: 11px 14px; background: #1e293b;
+                    border: 1px solid #334155; border-radius: 12px; color: #fff; font-size: 13px; outline: none;
+                }
+                #glpe-login-form .login-remember { color: #94a3b8; font-size: 12px; }
+                #glpe-login-form .login-remember input[type="checkbox"] { accent-color: #2563eb; }
+                #glpe-login-form .login-submit input[type="submit"] {
+                    width: 100%; padding: 12px 24px; background: linear-gradient(to left, #2563eb, #4f46e5);
+                    color: #fff; border: none; border-radius: 12px; font-size: 13px; font-weight: bold; cursor: pointer;
+                }
+            </style>
+            <?php
+            wp_login_form([
+                'echo'           => true,
+                'redirect'       => $backUrl,
+                'form_id'        => 'glpe-login-form',
+                'label_username' => 'نام کاربری یا ایمیل',
+                'label_password' => 'گذرواژه',
+                'label_remember' => 'مرا به خاطر بسپار',
+                'label_log_in'   => 'ورود به نمایشگر',
+                'remember'       => true,
+            ]);
+            ?>
+        </div>
+        <?php
+        return ob_get_clean();
+    }
+
+    /** Denial card shown by the shortcode for signed-in users without the permission. */
+    private function renderForbiddenCard() {
+        $loginUrl = wp_login_url($this->currentRequestUrl());
+        ob_start();
+        ?>
+        <div class="glpe-widget" style="max-width: 420px; margin: 20px auto; font-family: Tahoma, system-ui, sans-serif; direction: rtl; text-align: right; background: #0f172a; border: 1px solid #1e293b; border-radius: 24px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.3); color: #f8fafc;">
+            <div style="text-align: center; margin-bottom: 6px;">
+                <span style="font-size: 34px;">🚫</span>
+                <h3 style="margin: 10px 0 4px 0; font-size: 16px; font-weight: bold; color: #fff;">دسترسی مجاز نیست</h3>
+                <p style="margin: 0; font-size: 12px; line-height: 1.9; color: #94a3b8;">حساب کاربری فعلی شما مجوز «مرورگر GLPE» را ندارد. برای دریافت مجوز با مدیر سایت تماس بگیرید یا با حساب دیگری وارد شوید.</p>
+            </div>
+            <div style="margin-top: 16px;">
+                <a href="<?php echo esc_url($loginUrl); ?>" style="display: block; text-align: center; padding: 11px 18px; background: #1e293b; border: 1px solid #334155; color: #fff; border-radius: 12px; font-size: 13px; font-weight: bold; text-decoration: none;">ورود با حساب دیگر</a>
+            </div>
+        </div>
+        <?php
+        return ob_get_clean();
+    }
+
     /**
      * Renders the front-end viewer form via the [glpe_viewer] shortcode.
      */
     public function renderShortcode($atts) {
+        // Access gate — mirrors the check applied to viewer requests above.
+        $verdict = GLPE_Access::verdict();
+        if ($verdict === 'login') {
+            return $this->renderLoginCard();
+        }
+        if ($verdict === 'forbidden') {
+            return $this->renderForbiddenCard();
+        }
+
         $viewScript = add_query_arg(['_glpe' => '1'], home_url('/'));
         $engine = new GLPE_Engine($viewScript);
         $cookieCount = count($engine->getCookies()->getAllCookies());
@@ -393,6 +545,19 @@ class GLPE_Plugin {
                 تنظیمات نمایشگر صفحات وب (GLPE Viewer)
             </h1>
 
+            <?php
+            $cpNotice = isset($_GET['cp_msg']) ? sanitize_key($_GET['cp_msg']) : '';
+            $cpNotices = [
+                'roles-saved' => 'سطح دسترسی نقش‌ها ذخیره شد.',
+                'granted'     => 'مجوز «مرورگر GLPE» به کاربر اعطا شد.',
+                'revoked'     => 'مجوز «مرورگر GLPE» از کاربر لغو شد.',
+                'notfound'    => 'کاربر موردنظر یافت نشد.',
+            ];
+            if ($cpNotice !== '' && isset($cpNotices[$cpNotice])) {
+                echo '<div class="notice notice-success is-dismissible"><p>' . esc_html($cpNotices[$cpNotice]) . '</p></div>';
+            }
+            ?>
+
             <div style="background: #fff; border: 1px solid #ccd0d4; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
                 <h3 style="margin-top: 0;">🌐 برگه اختصاصی نمایشگر</h3>
                 <p>برگه اختصاصی نمایشگر فعال است و از آدرس زیر در دسترس می‌باشد:</p>
@@ -470,8 +635,193 @@ class GLPE_Plugin {
 
                 <?php submit_button('ذخیره تغییرات'); ?>
             </form>
+
+            <?php $this->renderAccessCard(); ?>
         </div>
         <?php
+    }
+
+    /**
+     * Access management card — grants/revokes the "مرورگر GLPE" permission
+     * (capability glpe_browser) on roles and individual users.
+     */
+    private function renderAccessCard() {
+        $cap = GLPE_Access::CAP;
+        $accessCount = GLPE_Access::countHolders();
+
+        $allRoles = wp_roles()->get_names();
+        $formRoles = $allRoles;
+        unset($formRoles['administrator']);
+
+        $userSearch = isset($_GET['cp_user_search']) ? sanitize_text_field(wp_unslash($_GET['cp_user_search'])) : '';
+        $usersArgs = [
+            'number'  => 30,
+            'orderby' => 'registered',
+            'order'   => 'DESC',
+        ];
+        if ($userSearch !== '') {
+            $usersArgs['search'] = '*' . $userSearch . '*';
+            $usersArgs['search_columns'] = ['user_login', 'user_email', 'user_nicename', 'display_name'];
+        }
+        $usersQuery = new WP_User_Query($usersArgs);
+
+        $userRows = [];
+        foreach ($usersQuery->get_results() as $userObj) {
+            $effective = $userObj->has_cap($cap);
+            $explicit  = array_key_exists($cap, (array)$userObj->caps) ? (bool)$userObj->caps[$cap] : null;
+
+            if ($effective) {
+                $status = $explicit === true
+                    ? '<span style="color:#059669; font-weight:bold;">✔ مجاز (مجوز اختصاصی)</span>'
+                    : '<span style="color:#059669; font-weight:bold;">✔ مجاز (از طریق نقش)</span>';
+            } else {
+                $status = $explicit === false
+                    ? '<span style="color:#b45309; font-weight:bold;">⛔ لغو صریح (نقش مجاز است)</span>'
+                    : '<span style="color:#9ca3af;">— بدون مجوز</span>';
+            }
+
+            $roleLabels = [];
+            foreach ((array)$userObj->roles as $roleName) {
+                $roleLabels[] = isset($allRoles[$roleName]) ? translate_user_role($allRoles[$roleName]) : $roleName;
+            }
+
+            $userRows[] = [
+                'display'   => $userObj->display_name !== '' ? $userObj->display_name : $userObj->user_login,
+                'login'     => $userObj->user_login,
+                'email'     => $userObj->user_email,
+                'roles'     => implode('، ', $roleLabels),
+                'status'    => $status,
+                'effective' => $effective,
+                'action'    => wp_nonce_url(
+                    admin_url('admin-post.php?action=glpe_toggle_user&user=' . (int)$userObj->ID . '&dir=' . ($effective ? 'revoke' : 'grant')),
+                    'glpe_toggle_user_' . (int)$userObj->ID
+                ),
+            ];
+        }
+        ?>
+
+        <div style="background: #fff; border: 1px solid #ccd0d4; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+            <h3 style="margin-top: 0;">🔐 مدیریت دسترسی — سطح «مرورگر GLPE»</h3>
+            <p>
+                فقط کاربران دارای سطح دسترسی <strong>«مرورگر GLPE»</strong> یا مدیران می‌توانند از نمایشگر استفاده کنند؛ سایر بازدیدکنندگان ابتدا باید وارد حساب کاربری شوند.
+                شناسه فنی این سطح دسترسی: <code><?php echo esc_html($cap); ?></code>
+            </p>
+            <p style="font-size: 13px; color: #059669; font-weight: bold;">
+                ✔ <?php echo (int)$accessCount; ?> کاربر در حال حاضر مجاز است.
+            </p>
+
+            <h4 style="margin-bottom: 6px;">مجوز نقش‌ها</h4>
+            <p style="font-size: 12px; color: #64748b; margin-top: 0;">
+                با فعال‌کردن هر نقش، همه کاربران آن نقش مجاز می‌شوند. مدیرکل همیشه مجاز است و قابل لغو نیست.
+            </p>
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                <input type="hidden" name="action" value="glpe_save_roles">
+                <?php wp_nonce_field('glpe_save_roles'); ?>
+                <table class="widefat striped" style="max-width: 560px;">
+                    <tbody>
+                    <tr>
+                        <td><label><input type="checkbox" checked disabled> <?php echo esc_html(translate_user_role('Administrator')); ?></label></td>
+                        <td><code>administrator</code></td>
+                        <td style="color: #64748b; font-size: 11px;">همیشه مجاز (قفل)</td>
+                    </tr>
+                    <?php foreach ($formRoles as $roleName => $roleLabel):
+                        $roleObj = get_role($roleName);
+                        $roleHas = $roleObj && $roleObj->has_cap($cap);
+                    ?>
+                    <tr>
+                        <td><label><input type="checkbox" name="glpe_roles[]" value="<?php echo esc_attr($roleName); ?>" <?php checked($roleHas); ?>> <?php echo esc_html(translate_user_role($roleLabel)); ?></label></td>
+                        <td><code><?php echo esc_html($roleName); ?></code></td>
+                        <td></td>
+                    </tr>
+                    <?php endforeach; ?>
+                    </tbody>
+                </table>
+                <?php submit_button('ذخیره مجوز نقش‌ها', 'secondary', 'submit', false); ?>
+            </form>
+
+            <h4 style="margin-top: 24px; margin-bottom: 6px;">مجوز کاربران</h4>
+            <p style="font-size: 12px; color: #64748b; margin-top: 0;">
+                ۳۰ کاربر اخیر نمایش داده می‌شود؛ برای یافتن کاربر دیگر از جستجو استفاده کنید.
+            </p>
+            <form method="get" action="<?php echo esc_url(admin_url('admin.php')); ?>" style="margin-bottom: 10px;">
+                <input type="hidden" name="page" value="glpe-viewer">
+                <input type="search" name="cp_user_search" value="<?php echo esc_attr($userSearch); ?>" placeholder="جستجوی نام کاربری، ایمیل یا نام..." style="padding: 6px 10px; width: 320px; max-width: 100%;">
+                <button type="submit" class="button button-secondary">جستجو</button>
+            </form>
+            <table class="widefat striped">
+                <thead>
+                <tr>
+                    <th>کاربر</th>
+                    <th>نقش‌ها</th>
+                    <th>وضعیت مجوز</th>
+                    <th>عملیات</th>
+                </tr>
+                </thead>
+                <tbody>
+                <?php if (empty($userRows)): ?>
+                    <tr><td colspan="4">کاربری یافت نشد.</td></tr>
+                <?php endif; ?>
+                <?php foreach ($userRows as $row): ?>
+                    <tr>
+                        <td>
+                            <strong><?php echo esc_html($row['display']); ?></strong><br>
+                            <span style="font-size: 11px; color: #64748b;"><?php echo esc_html($row['login']); ?> · <?php echo esc_html($row['email']); ?></span>
+                        </td>
+                        <td style="font-size: 12px;"><?php echo esc_html($row['roles']); ?></td>
+                        <td><?php echo $row['status']; // phpcs:ignore WordPress.Security.EscapeOutput -- static prepared HTML ?></td>
+                        <td>
+                            <a class="button button-small <?php echo $row['effective'] ? '' : 'button-primary'; ?>" href="<?php echo esc_url($row['action']); ?>">
+                                <?php echo $row['effective'] ? 'لغو مجوز' : 'اعطای مجوز'; ?>
+                            </a>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+        <?php
+    }
+
+    /** Saves the per-role permission checkboxes. */
+    public function handleSaveRoles() {
+        if (!current_user_can('manage_options')) {
+            wp_die('دسترسی غیرمجاز', '', ['response' => 403]);
+        }
+        check_admin_referer('glpe_save_roles');
+
+        $requested = isset($_POST['glpe_roles']) && is_array($_POST['glpe_roles'])
+            ? array_map('sanitize_key', wp_unslash($_POST['glpe_roles']))
+            : [];
+        foreach (wp_roles()->get_names() as $roleName => $roleLabel) {
+            GLPE_Access::toggleRole($roleName, in_array($roleName, $requested, true));
+        }
+
+        wp_safe_redirect(add_query_arg(['page' => 'glpe-viewer', 'cp_msg' => 'roles-saved'], admin_url('admin.php')));
+        exit;
+    }
+
+    /** Grants or revokes the permission for a single user. */
+    public function handleToggleUser() {
+        if (!current_user_can('manage_options')) {
+            wp_die('دسترسی غیرمجاز', '', ['response' => 403]);
+        }
+        $userId = isset($_GET['user']) ? absint($_GET['user']) : 0;
+        $dir    = (isset($_GET['dir']) && $_GET['dir'] === 'revoke') ? 'revoke' : 'grant';
+        check_admin_referer('glpe_toggle_user_' . $userId);
+
+        $msg = 'notfound';
+        if ($userId && get_user_by('id', $userId)) {
+            if ($dir === 'grant') {
+                GLPE_Access::grantToUser($userId);
+                $msg = 'granted';
+            } else {
+                GLPE_Access::revokeFromUser($userId);
+                $msg = 'revoked';
+            }
+        }
+
+        wp_safe_redirect(add_query_arg(['page' => 'glpe-viewer', 'cp_msg' => $msg], admin_url('admin.php')));
+        exit;
     }
 }
 

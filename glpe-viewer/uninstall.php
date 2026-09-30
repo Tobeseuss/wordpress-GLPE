@@ -20,10 +20,29 @@ $glpe_options = [
     'glpe_no_scripts',
     'glpe_no_images',
     'glpe_ssl_verify',
+    'glpe_db_version',
 ];
 
 foreach ($glpe_options as $glpe_option) {
     delete_option($glpe_option);
+}
+
+// Remove the viewer permission (glpe_browser) from every role, administrator included.
+if (function_exists('wp_roles')) {
+    foreach (wp_roles()->get_names() as $glpe_role_name => $glpe_role_label) {
+        $glpe_role = get_role($glpe_role_name);
+        if ($glpe_role && $glpe_role->has_cap('glpe_browser')) {
+            $glpe_role->remove_cap('glpe_browser');
+        }
+    }
+}
+
+// Remove per-user permission overrides (both grants and explicit denies).
+foreach (get_users(['fields' => ['ID']]) as $glpe_user_ref) {
+    $glpe_user = get_userdata($glpe_user_ref->ID);
+    if ($glpe_user && array_key_exists('glpe_browser', (array)$glpe_user->caps)) {
+        $glpe_user->remove_cap('glpe_browser');
+    }
 }
 
 if ($glpe_page_id) {

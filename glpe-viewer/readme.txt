@@ -1,10 +1,10 @@
 === GLPE Viewer — Remote Page Display ===
 Contributors: tobeseuss
 Tags: viewer, page display, embed, link preview, content
-Requires at least: 5.0
+Requires at least: 5.3
 Tested up to: 6.7
 Requires PHP: 7.2
-Stable tag: 4.0.0
+Stable tag: 4.1.0
 License: MIT
 License URI: https://opensource.org/licenses/MIT
 
@@ -23,6 +23,7 @@ License URI: https://opensource.org/licenses/MIT
 * محافظت از آدرس‌های داخلی شبکه
 * سه لایه انتقال: WordPress HTTP API، cURL و Streams
 * صفحه تنظیمات کامل در پیشخوان
+* سطح دسترسی «مرورگر GLPE» — فقط کاربران دارای مجوز یا مدیران می‌توانند از نمایشگر استفاده کنند
 
 == Installation ==
 ۱. پوشه glpe-viewer را ZIP کرده و از منوی افزونه‌ها > بارگذاری افزونه نصب کنید.
@@ -31,6 +32,13 @@ License URI: https://opensource.org/licenses/MIT
 ۴. یا شورت‌کد [glpe_viewer] را در هر برگه یا المنتور قرار دهید.
 
 == Changelog ==
+= 4.1.0 =
+* سطح دسترسی جدید «مرورگر GLPE» (شناسه glpe_browser) — استفاده از نمایشگر فقط برای کاربران دارای مجوز یا مدیران
+* بازدیدکنندگان غیرعضو به فرم ورود وردپرس هدایت می‌شوند و پس از ورود به همان صفحه بازمی‌گردند
+* کاربران فاقد مجوز پیام خطای ۴۰۳ اختصاصی می‌بینند
+* مدیریت مجوز نقش‌ها و کاربران از صفحه تنظیمات پیشخوان
+* پاک‌سازی کامل مجوزها هنگام حذف افزونه
+
 = 4.0.0 =
 * بازطراحی کامل ساختار و نام‌گذاری
 * انتقال ترافیک خروجی به لایه استاندارد WordPress HTTP API

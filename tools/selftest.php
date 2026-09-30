@@ -124,5 +124,13 @@ $ocss = $engine->rewriteCss($css, 'https://example.com/a/', ['encodeURL' => fals
 check('css @import rewritten', strpos($ocss, rawurlencode('https://example.com/a/extra.css')) !== false, $ocss);
 check('css relative url', strpos($ocss, rawurlencode('https://example.com/im.png')) !== false, $ocss);
 
+echo "\n== 8. Access policy (GLPE_Access) ==\n";
+require $root . '/glpe-viewer/includes/Access.php';
+check('capability identifier', GLPE_Access::CAP === 'glpe_browser');
+check('holder allowed', GLPE_Access::decide(true, true) === 'allow');
+check('anonymous visitor sent to login', GLPE_Access::decide(false, false) === 'login');
+check('signed-in without permission forbidden', GLPE_Access::decide(true, false) === 'forbidden');
+check('policy never allows without cap', GLPE_Access::decide(false, true) === 'allow' && GLPE_Access::decide(false, false) !== 'allow');
+
 echo "\n== RESULT: $pass passed, $fail failed ==\n";
 exit($fail > 0 ? 1 : 0);

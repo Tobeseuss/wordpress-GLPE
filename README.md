@@ -5,8 +5,8 @@
 **نمایشگر صفحات وب برای وردپرس — مناسب هاست‌های رایگان و اشتراکی**
 WordPress remote page display plugin — built for free/shared hosting
 
-![Version](https://img.shields.io/badge/version-4.0.0-blue)
-![WordPress](https://img.shields.io/badge/WordPress-5.0%2B-21759B)
+![Version](https://img.shields.io/badge/version-4.1.0-blue)
+![WordPress](https://img.shields.io/badge/WordPress-5.3%2B-21759B)
 ![PHP](https://img.shields.io/badge/PHP-7.2--8.3-8892BF)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -33,6 +33,7 @@ WordPress remote page display plugin — built for free/shared hosting
 - سه لایه انتقال: WordPress HTTP API → cURL → Streams
 - گزینه‌های کم‌مصرف: بدون تصاویر / بدون اسکریپت برای کاهش پهنای باند
 - شورت‌کد `[glpe_viewer]` + برگه خودکار `/view/` + صفحه تنظیمات در پیشخوان
+- 🔐 سطح دسترسی «مرورگر GLPE» — فقط کاربران دارای مجوز یا مدیران می‌توانند از نمایشگر استفاده و وارد شوند؛ مدیریت مجوز نقش‌ها و کاربران از پیشخوان
 - حذف کامل داده‌ها هنگام حذف افزونه (`uninstall.php`)
 
 ### نصب
@@ -64,6 +65,7 @@ wordpress-GLPE/
 │       ├── Engine.php      # WP HTTP transport + HTML/CSS/JS rewriter
 │       ├── Cookies.php     # RFC 6265 session store
 │       ├── Codec.php       # Per-site reversible link codec
+│       ├── Access.php      # "GLPE Viewer" permission (capability gate + admin helpers)
 │       └── client.js       # Injected client-side companion
 ├── docs/
 │   ├── CODE_REVIEW.md      # Full review history of v3.3.3 → v4.0.0
@@ -76,7 +78,7 @@ wordpress-GLPE/
 ```bash
 bash tools/guard.sh          # keyword guard must pass
 php tools/selftest.php       # tests must pass
-bash tools/package.sh 4.0.1  # build dist ZIP
+bash tools/package.sh 4.1.0  # build dist ZIP
 git commit + tag + push      # then publish GitHub Release with the ZIP
 ```
 Full checklist: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
