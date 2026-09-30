@@ -75,18 +75,22 @@ $hdr2 = $jar->getCookieHeader('https://other.com/');
 check('cookie not leaked cross-domain', $hdr2 === '', $hdr2);
 $jar->addCookieFromHeader('gone=x; Max-Age=0', 'https://example.com/');
 $hdr3 = $jar->getCookieHeader('https://example.com/');
-check('expired cookie deleted', strpos($hdr3, 'gone=') === false, $hdr3);
-$jar->addCookieFromHeader('token=tok; Path=/member', 'https://example.com/user/panel');
+check('expired cookie deleted (B12)', strpos($hdr3, 'gone=') === false, $hdr3);
+// Path scoping: cookie added at /user/panel → default path = /user (RFC 6265 default-path)
+$jar->addCookieFromHeader('token=tok', 'https://example.com/user/panel');
 check('path scoping', strpos($jar->getCookieHeader('https://example.com/other'), 'token=') === false && strpos($jar->getCookieHeader('https://example.com/user/panel/x'), 'token=tok') !== false);
-check('getAllCookies count', count($jar->getAllCookies()) === 2);
+// Regression B13: Path=/user must NOT match /username (segment boundary)
+$jar->addCookieFromHeader('seg=v; Path=/user', 'https://example.com/');
+check('segment boundary (B13)', strpos($jar->getCookieHeader('https://example.com/username'), 'seg=') === false && strpos($jar->getCookieHeader('https://example.com/user/2'), 'seg=v') !== false);
+check('getAllCookies count', count($jar->getAllCookies()) === 3);
 $jar->clearAll();
 check('clearAll', count($jar->getAllCookies()) === 0);
 
 echo "\n== 6. rewriteHtml basics ==\n";
 $html = '<html><head><title>Orig</title></head><body><a href="/go">x</a><img src="/i.png"><style>body{background:url(bg.jpg)}</style></body></html>';
 $out = $engine->rewriteHtml($html, 'https://example.com/dir/page', ['encodeURL' => false, 'showToolbar' => false]);
-check('anchor rewritten', strpos($out, 'b=' . rawurlencode('https://example.com/dir/go')) !== false, $out);
-check('img rewritten', strpos($out, 'https%3A%2F%2Fexample.com%2Fdir%2Fi.png') !== false);
+check('anchor rewritten', strpos($out, 'b=' . rawurlencode('https://example.com/go')) !== false, 'abs path /go resolves to /go');
+check('img rewritten', strpos($out, 'https%3A%2F%2Fexample.com%2Fi.png') !== false);
 check('css url rewritten', strpos($out, 'https%3A%2F%2Fexample.com%2Fdir%2Fbg.jpg') !== false);
 $out2 = $engine->rewriteHtml($html, 'https://example.com/', ['encodeURL' => false, 'stripTitle' => true, 'showToolbar' => false]);
 check('stripTitle', strpos($out2, '<title>سند وب | Web Viewer</title>') !== false);

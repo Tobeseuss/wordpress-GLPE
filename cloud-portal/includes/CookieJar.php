@@ -62,7 +62,9 @@ class StealthCookieJar {
                 } elseif ($attrName === 'expires') {
                     $expires = strtotime($attrVal);
                 } elseif ($attrName === 'max-age') {
-                    $expires = time() + intval($attrVal);
+                    // RFC 6265 5.2.2: max-age <= 0 discards the cookie immediately.
+                    $maxAge = intval($attrVal);
+                    $expires = ($maxAge <= 0) ? (time() - 1) : (time() + $maxAge);
                 } elseif ($attrName === 'samesite') {
                     $sameSite = $attrVal;
                 }
@@ -119,11 +121,11 @@ class StealthCookieJar {
             foreach ($_SESSION[$this->sessionKey] as $domain => $domainCookies) {
                 if ($host === $domain || (strlen($host) > strlen($domain) && substr($host, -(strlen($domain) + 1)) === '.' . $domain)) {
                     foreach ($domainCookies as $name => $c) {
-                        if ($c['expires'] !== null && $c['expires'] < $now) {
+                        if ($c['expires'] !== null && $c['expires'] <= $now) {
                             unset($_SESSION[$this->sessionKey][$domain][$name]);
                             continue;
                         }
-                        if (strpos($path, $c['path']) === 0 || $c['path'] === '/') {
+                        if ($this->isPathMatch($c['path'], $path)) {
                             $cookies[] = $name . '=' . $c['value'];
                         }
                     }
@@ -132,6 +134,21 @@ class StealthCookieJar {
         }
 
         return implode('; ', $cookies);
+    }
+
+    /**
+     * RFC 6265 5.1.4 path-match: request path must start with cookie path
+     * and the boundary must be a segment separator ('/'), not a mid-word prefix.
+     */
+    private function isPathMatch($cookiePath, $requestPath) {
+        if ($cookiePath === '/') return true;
+        if ($cookiePath === $requestPath) return true;
+        if (strpos($requestPath, $cookiePath) === 0) {
+            $len = strlen($cookiePath);
+            if (substr($cookiePath, -1) === '/') return true;
+            if (isset($requestPath[$len]) && $requestPath[$len] === '/') return true;
+        }
+        return false;
     }
 
     public function getAllCookies() {
