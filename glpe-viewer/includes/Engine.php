@@ -160,6 +160,15 @@ class GLPE_Engine {
         return preg_replace_callback('/([\'"])(https?:\/\/[^\'"]+)\1/i', function($matches) use ($baseUrl, $options) {
             $quote = $matches[1];
             $url = $matches[2];
+            // Specification and namespace URIs embedded in code (SVG factories,
+            // markup vocabularies, document type definitions) are opaque
+            // identifiers, not fetchable documents — rewriting them breaks the
+            // page's own scripts, so they always pass through untouched.
+            if (preg_match('#^https?://(www\\.)?(w3\\.org|whatwg\\.org|schema\\.org|ogp\\.me|gmpg\\.org|purl\\.org|xmlsoap\\.org|openxmlformats\\.org|ns\\.adobe\\.com|java\\.sun\\.com|xmlns\\.jcp\\.org|xml\\.apache\\.org|ietf\\.org|rfc-editor\\.org)(/|$)#i', $url)
+                || preg_match('#^https?://schemas\\.#i', $url)
+                || preg_match('#\\.dtd$#i', $url)) {
+                return $matches[0];
+            }
             $link = $this->makeViewUrl($url, $baseUrl, $options);
             return $quote . $link . $quote;
         }, $js);
@@ -187,6 +196,7 @@ class GLPE_Engine {
                 </a>
                 <form action="' . $gw . '" method="GET" style="display:flex; gap:6px; flex:1; margin:0;" onsubmit="event.preventDefault(); var gw=\'' . $gw . '\'; var sep = gw.indexOf(\'?\') !== -1 ? \'&\' : \'?\'; var v = this.l.value; if(!v.match(/^https?:/i)) v=\'https://\'+v; var enc = this.ec && this.ec.value==\'1\'; var bytes = unescape(encodeURIComponent(v)); var out = []; var key = (window.__glpe_ctx__ && window.__glpe_ctx__.k) || \'glpe-local-key\'; for (var i = 0; i < bytes.length; i++) { out.push(String.fromCharCode(bytes.charCodeAt(i) ^ key.charCodeAt(i % key.length))); } var payload = enc ? btoa(out.join(\'\')).replace(/\\+/g, \'-\').replace(/\\//g, \'_\').replace(/=+$/, \'\') : encodeURIComponent(v); var q = sep + \'l=\' + payload + \'&nb=1\' + (enc ? \'&ec=1\' : \'\'); ' . ($nsChecked ? 'q+=\'&ns=1\';' : '') . ' ' . ($niChecked ? 'q+=\'&ni=1\';' : '') . ' ' . ($ntChecked ? 'q+=\'&nt=1\';' : '') . ' window.location.href = gw + q;">
                     <input type="text" name="l" value="' . $rawTarget . '" style="flex:1; background:#1e293b; border:1px solid #475569; color:#f8fafc; padding:4px 10px; border-radius:6px; font-size:12px; font-family:monospace; outline:none;" placeholder="https://...">
+                    <input type="hidden" name="_glpe" value="1">
                     <input type="hidden" name="nb" value="1">
                     ' . ($ecChecked ? '<input type="hidden" name="ec" value="1">' : '') . '
                     <button type="submit" style="background:#2563eb; color:#fff; border:none; padding:4px 12px; border-radius:6px; font-weight:bold; cursor:pointer; font-size:12px; white-space:nowrap;">
@@ -293,9 +303,63 @@ class GLPE_Engine {
             return '<a' . $m[1] . 'href=' . $m[2] . $this->makeViewUrl($m[3], $targetUrl, $options) . $m[2] . $m[4] . '>';
         }, $html);
 
-        // 9. Forms
-        $html = preg_replace_callback('/<form\b([^>]*?)\baction=([\'"])(.*?)\2([^>]*)>/i', function($m) use ($targetUrl, $options) {
-            return '<form' . $m[1] . 'action=' . $m[2] . $this->makeViewUrl($m[3], $targetUrl, $options) . $m[2] . $m[4] . '>';
+        // 9. Forms.
+        //    POST keeps the gateway query string (browsers preserve it on
+        //    POST), so rewriting the action attribute is enough. GET
+        //    submissions instead replace the action's whole query string,
+        //    which would drop the gateway identity — therefore GET forms are
+        //    pointed at the query-less gateway and the remote endpoint travels
+        //    in hidden inputs next to the user's own fields.
+        $gatewayBase = preg_replace('/\?.*$/', '', $this->viewScript);
+        $html = preg_replace_callback('/<form\b([^>]*)>/i', function($m) use ($targetUrl, $options, $gatewayBase) {
+            $attrs = $m[1];
+
+            $formMethod = 'GET';
+            if (preg_match('/\bmethod=([\'"])([a-zA-Z]+)\1/i', $attrs, $mm)) {
+                $formMethod = strtoupper($mm[2]);
+            }
+
+            $rawAction = '';
+            if (preg_match('/\baction=([\'"])(.*?)\1/i', $attrs, $am)) {
+                $rawAction = $am[2];
+                $attrs = preg_replace_callback('/\baction=([\'"])(.*?)\1/i', function($am2) use ($targetUrl, $options) {
+                    return 'action=' . $am2[1] . $this->makeViewUrl($am2[2], $targetUrl, $options) . $am2[1];
+                }, $attrs);
+            }
+
+            // Script-driven endpoints handle their own navigation; leave the
+            // markup exactly as delivered.
+            $trimmedAction = trim($rawAction);
+            if ($formMethod !== 'GET'
+                || stripos($trimmedAction, 'javascript:') === 0
+                || stripos($trimmedAction, 'data:') === 0
+                || stripos($trimmedAction, 'blob:') === 0) {
+                return '<form' . $attrs . '>';
+            }
+
+            // A missing or "#" action targets the current page; a real one is
+            // resolved against it. Either way the query part is dropped,
+            // mirroring how browsers build GET submissions.
+            $remote = ($trimmedAction !== '' && $trimmedAction !== '#')
+                ? $this->resolveRelativeUrl($trimmedAction, $targetUrl)
+                : $targetUrl;
+            $remote = preg_replace('/[?#].*$/s', '', $remote);
+
+            $payload = !empty($options['encodeURL'])
+                ? GLPE_Codec::encode($remote)
+                : rawurlencode($remote);
+
+            $hidden = '<input type="hidden" name="_glpe" value="1">'
+                . '<input type="hidden" name="l" value="' . esc_attr($payload) . '">';
+            if (!empty($options['removeScripts'])) $hidden .= '<input type="hidden" name="ns" value="1">';
+            if (!empty($options['removeImages']))  $hidden .= '<input type="hidden" name="ni" value="1">';
+            if (!empty($options['stripTitle']))    $hidden .= '<input type="hidden" name="nt" value="1">';
+            if (!empty($options['showToolbar']))   $hidden .= '<input type="hidden" name="nb" value="1">';
+            if (!empty($options['encodeURL']))     $hidden .= '<input type="hidden" name="ec" value="1">';
+            if (!empty($options['tempSession']))   $hidden .= '<input type="hidden" name="tp" value="1">';
+
+            $attrs = trim(preg_replace('/\s+action=([\'"]).*?\1/i', '', $attrs));
+            return '<form' . $attrs . ' action="' . esc_attr($gatewayBase) . '">' . $hidden;
         }, $html);
 
         // 10. External references (sheets, icons, fonts)
@@ -378,9 +442,40 @@ class GLPE_Engine {
     }
 
     /**
+     * Per-hop request headers: identity references always describe the
+     * destination host (never this site — remote endpoints reject mismatched
+     * cross-origin submissions), and the matching session records are
+     * attached for the exact URL being requested.
+     */
+    private function hopHeaders($baseHeaders, $url, $method) {
+        $parsed = parse_url($url);
+        $scheme = isset($parsed['scheme']) ? $parsed['scheme'] : 'https';
+        $host   = isset($parsed['host'])   ? $parsed['host']   : '';
+        $origin = $scheme . '://' . $host;
+
+        $headers = $baseHeaders;
+        // Drop case-variants the client may have injected.
+        unset($headers['referer'], $headers['origin'], $headers['cookie']);
+
+        $headers['Referer'] = $origin . '/';
+        if (in_array(strtoupper($method), ['POST', 'PUT', 'PATCH', 'DELETE'], true)) {
+            $headers['Origin'] = $origin;
+        }
+
+        $cookieHeader = $this->cookies->getCookieHeader($url);
+        if ($cookieHeader !== '') {
+            $headers['Cookie'] = $cookieHeader;
+        }
+        return $headers;
+    }
+
+    /**
      * Executes the fetch through the standard WordPress HTTP layer
      * (identical transport signature to core/theme/plugin updates),
      * with a raw client fallback for non-WP contexts.
+     * Redirects are followed one hop at a time so session records returned
+     * by intermediate responses are kept and the final effective address is
+     * reported back for correct link rewriting.
      */
     public function executeRequest($targetUrl, $method = 'GET', $postData = null, $customHeaders = []) {
         $parsed = parse_url($targetUrl);
@@ -432,99 +527,174 @@ class GLPE_Engine {
         if (function_exists('wp_remote_request')) {
             $sslVerify = function_exists('get_option') ? (get_option('glpe_ssl_verify', '1') === '1') : true;
 
-            $response = wp_remote_request($targetUrl, [
-                'method'            => $method,
-                'body'              => ($method === 'POST' && !empty($postData)) ? $postData : null,
-                'headers'           => $headers,
-                'timeout'           => 15,
-                'redirection'       => 5,
-                'sslverify'         => $sslVerify,
-                'reject_unsafe_urls'=> true,
-                'user-agent'        => isset($headers['User-Agent']) ? $headers['User-Agent'] : $this->userAgent,
-            ]);
+            $currentUrl    = $targetUrl;
+            $currentMethod = strtoupper($method);
+            $currentBody   = ($currentMethod === 'POST') ? $postData : null;
+            $result        = null;
 
-            if (is_wp_error($response)) {
-                throw new Exception("ارتباط با مقصد برقرار نشد: " . $response->get_error_message());
-            }
+            for ($hop = 0; $hop < 6 && $result === null; $hop++) {
+                $hopHeaders = $this->hopHeaders($headers, $currentUrl, $currentMethod);
 
-            $status      = wp_remote_retrieve_response_code($response);
-            $contentType = wp_remote_retrieve_header($response, 'content-type');
-            $body        = wp_remote_retrieve_body($response);
+                $response = wp_remote_request($currentUrl, [
+                    'method'             => $currentMethod,
+                    'body'               => (!empty($currentBody)) ? $currentBody : null,
+                    'headers'            => $hopHeaders,
+                    'timeout'            => 15,
+                    'redirection'        => 0,
+                    'sslverify'          => $sslVerify,
+                    'reject_unsafe_urls' => true,
+                    'user-agent'         => isset($hopHeaders['User-Agent']) ? $hopHeaders['User-Agent'] : $this->userAgent,
+                ]);
 
-            $headersObj = wp_remote_retrieve_headers($response);
-            $all = (is_object($headersObj) && method_exists($headersObj, 'getAll')) ? $headersObj->getAll() : (array)$headersObj;
-            if (isset($all['set-cookie'])) {
-                foreach ((array)$all['set-cookie'] as $line) {
-                    $this->cookies->addCookieFromHeader($line, $targetUrl);
+                if (is_wp_error($response)) {
+                    throw new Exception("ارتباط با مقصد برقرار نشد: " . $response->get_error_message());
                 }
+
+                $status      = (int) wp_remote_retrieve_response_code($response);
+                $contentType = wp_remote_retrieve_header($response, 'content-type');
+                $location    = wp_remote_retrieve_header($response, 'location');
+                if (is_array($location)) {
+                    $location = array_shift($location);
+                }
+
+                $headersObj = wp_remote_retrieve_headers($response);
+                $all = (is_object($headersObj) && method_exists($headersObj, 'getAll')) ? $headersObj->getAll() : (array)$headersObj;
+                if (isset($all['set-cookie'])) {
+                    foreach ((array)$all['set-cookie'] as $line) {
+                        $this->cookies->addCookieFromHeader($line, $currentUrl);
+                    }
+                }
+
+                if ($status >= 300 && $status < 400 && (string)$location !== '') {
+                    $nextUrl = $this->resolveRelativeUrl(trim((string)$location), $currentUrl);
+                    if ($nextUrl === $currentUrl || !preg_match('#^https?://#i', $nextUrl)) {
+                        break; // self-redirect or non-web scheme — stop hopping
+                    }
+                    $nextHost = strtolower((string)parse_url($nextUrl, PHP_URL_HOST));
+                    if ($nextHost === '' || $this->isBlockedHost($nextHost)) {
+                        throw new Exception("دسترسی به آدرس‌های داخلی و شبکه محلی مجاز نیست.");
+                    }
+                    // Per spec 303 always switches to GET; 301/302 switch a
+                    // POST as well, matching what browsers actually do.
+                    if ($currentMethod === 'POST' && in_array($status, [301, 302, 303], true)) {
+                        $currentMethod = 'GET';
+                        $currentBody   = null;
+                    }
+                    $currentUrl = $nextUrl;
+                    continue;
+                }
+
+                $result = [
+                    'status'      => $status ? $status : 200,
+                    'contentType' => $contentType ? $contentType : 'text/html; charset=UTF-8',
+                    'body'        => wp_remote_retrieve_body($response),
+                    'finalUrl'    => $currentUrl,
+                ];
             }
 
-            return [
-                'status'      => $status ? $status : 200,
-                'contentType' => $contentType ? $contentType : 'text/html; charset=UTF-8',
-                'body'        => $body,
-            ];
+            if ($result === null) {
+                throw new Exception("تعداد تغییرمسیرهای پیاپی مقصد بیش از حد مجاز است.");
+            }
+
+            return $result;
         }
 
         // --- Fallback transport: raw client ---
         if (function_exists('curl_init')) {
-            $rawHeaders = [];
-            foreach ($headers as $k => $v) {
-                $rawHeaders[] = $k . ': ' . $v;
-            }
+            $currentUrl    = $targetUrl;
+            $currentMethod = strtoupper($method);
+            $currentBody   = ($currentMethod === 'POST') ? $postData : null;
+            $result        = null;
 
-            $ch = curl_init();
-            curl_setopt($ch, CURLOPT_URL, $targetUrl);
-            curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $method);
-            curl_setopt($ch, CURLOPT_HTTPHEADER, $rawHeaders);
-            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($ch, CURLOPT_HEADER, true);
-            curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-            curl_setopt($ch, CURLOPT_MAXREDIRS, 5);
-            curl_setopt($ch, CURLOPT_TIMEOUT, 15);
-            $sslVerify = function_exists('get_option') ? (get_option('glpe_ssl_verify', '1') === '1') : false;
-            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, $sslVerify);
-            curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, $sslVerify ? 2 : 0);
-            curl_setopt($ch, CURLOPT_ENCODING, '');
+            for ($hop = 0; $hop < 6 && $result === null; $hop++) {
+                $hopHeaders = $this->hopHeaders($headers, $currentUrl, $currentMethod);
 
-            if ($method === 'POST' && !empty($postData)) {
-                curl_setopt($ch, CURLOPT_POSTFIELDS, $postData);
-            }
-
-            $rawResponse = curl_exec($ch);
-            if ($rawResponse === false) {
-                $err = curl_error($ch);
-                curl_close($ch);
-                throw new Exception("خطای اتصال شبکه: " . $err);
-            }
-
-            $headerSize  = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
-            $httpCode    = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            $contentType = curl_getinfo($ch, CURLINFO_CONTENT_TYPE);
-            curl_close($ch);
-
-            $respHeaders = substr($rawResponse, 0, $headerSize);
-            $body = substr($rawResponse, $headerSize);
-
-            $lines = explode("\r\n", $respHeaders);
-            foreach ($lines as $line) {
-                if (stripos($line, 'Set-Cookie:') === 0) {
-                    $this->cookies->addCookieFromHeader(trim(substr($line, 11)), $targetUrl);
+                $rawHeaders = [];
+                foreach ($hopHeaders as $k => $v) {
+                    $rawHeaders[] = $k . ': ' . $v;
                 }
+
+                $ch = curl_init();
+                curl_setopt($ch, CURLOPT_URL, $currentUrl);
+                curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $currentMethod);
+                curl_setopt($ch, CURLOPT_HTTPHEADER, $rawHeaders);
+                curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+                curl_setopt($ch, CURLOPT_HEADER, true);
+                curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
+                curl_setopt($ch, CURLOPT_TIMEOUT, 15);
+                $sslVerify = function_exists('get_option') ? (get_option('glpe_ssl_verify', '1') === '1') : false;
+                curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, $sslVerify);
+                curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, $sslVerify ? 2 : 0);
+                curl_setopt($ch, CURLOPT_ENCODING, '');
+
+                if ($currentMethod === 'POST' && !empty($currentBody)) {
+                    curl_setopt($ch, CURLOPT_POSTFIELDS, $currentBody);
+                }
+
+                $rawResponse = curl_exec($ch);
+                if ($rawResponse === false) {
+                    $err = curl_error($ch);
+                    curl_close($ch);
+                    throw new Exception("خطای اتصال شبکه: " . $err);
+                }
+
+                $headerSize  = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+                $httpCode    = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                $contentType = curl_getinfo($ch, CURLINFO_CONTENT_TYPE);
+                curl_close($ch);
+
+                $respHeaders = substr($rawResponse, 0, $headerSize);
+                $body = substr($rawResponse, $headerSize);
+
+                $location = '';
+                $lines = explode("\r\n", $respHeaders);
+                foreach ($lines as $line) {
+                    if (stripos($line, 'Set-Cookie:') === 0) {
+                        $this->cookies->addCookieFromHeader(trim(substr($line, 11)), $currentUrl);
+                    }
+                    if (stripos($line, 'Location:') === 0) {
+                        $location = trim(substr($line, 9));
+                    }
+                }
+
+                if ($httpCode >= 300 && $httpCode < 400 && $location !== '') {
+                    $nextUrl = $this->resolveRelativeUrl($location, $currentUrl);
+                    if ($nextUrl === $currentUrl || !preg_match('#^https?://#i', $nextUrl)) {
+                        break;
+                    }
+                    $nextHost = strtolower((string)parse_url($nextUrl, PHP_URL_HOST));
+                    if ($nextHost === '' || $this->isBlockedHost($nextHost)) {
+                        throw new Exception("دسترسی به آدرس‌های داخلی و شبکه محلی مجاز نیست.");
+                    }
+                    if ($currentMethod === 'POST' && in_array($httpCode, [301, 302, 303], true)) {
+                        $currentMethod = 'GET';
+                        $currentBody   = null;
+                    }
+                    $currentUrl = $nextUrl;
+                    continue;
+                }
+
+                $result = [
+                    'status'      => $httpCode ? $httpCode : 200,
+                    'contentType' => $contentType ? $contentType : 'text/html; charset=UTF-8',
+                    'body'        => $body,
+                    'finalUrl'    => $currentUrl,
+                ];
             }
 
-            return [
-                'status'      => $httpCode ? $httpCode : 200,
-                'contentType' => $contentType ? $contentType : 'text/html; charset=UTF-8',
-                'body'        => $body,
-            ];
+            if ($result === null) {
+                throw new Exception("تعداد تغییرمسیرهای پیاپی مقصد بیش از حد مجاز است.");
+            }
+
+            return $result;
         }
 
         // --- Last resort: stream context ---
+        $streamHeaders = $this->hopHeaders($headers, $targetUrl, $method);
         $opts = [
             'http' => [
-                'method'        => $method,
-                'header'        => implode("\r\n", array_map(function($k, $v) { return $k . ': ' . $v; }, array_keys($headers), array_values($headers))) . "\r\n",
+                'method'        => strtoupper($method),
+                'header'        => implode("\r\n", array_map(function($k, $v) { return $k . ': ' . $v; }, array_keys($streamHeaders), array_values($streamHeaders))) . "\r\n",
                 'timeout'       => 15,
                 'ignore_errors' => true,
             ],
@@ -533,7 +703,7 @@ class GLPE_Engine {
                 'verify_peer_name' => false,
             ],
         ];
-        if ($method === 'POST' && !empty($postData)) {
+        if (strtoupper($method) === 'POST' && !empty($postData)) {
             $opts['http']['content'] = is_array($postData) ? http_build_query($postData) : $postData;
         }
 
@@ -563,6 +733,7 @@ class GLPE_Engine {
             'status'      => $status,
             'contentType' => $contentType,
             'body'        => $body,
+            'finalUrl'    => $targetUrl,
         ];
     }
 }

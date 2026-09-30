@@ -149,5 +149,43 @@ check('own-host refs untouched', $engine->makeViewUrl('https://site.test/view/')
 check('own-host relative untouched', $engine->makeViewUrl('/dashboard', 'https://site.test/some/page') === 'https://site.test/dashboard');
 check('external still wrapped', strpos($engine->makeViewUrl('https://target.com/', null, ['encodeURL' => true]), '&l=') !== false);
 
+echo "\n== 10. Form submission handling ==\n";
+// POST form: action rewritten into an internal link, markup untouched otherwise
+$htmlPost = '<form method="POST" action="https://accounts.test/v3/sign?continue=https%3A%2F%2Fx.test%2F"><input name="e"></form>';
+$outPost = $engine->rewriteHtml($htmlPost, 'https://accounts.test/signin', ['encodeURL' => false, 'showToolbar' => false]);
+check('POST action wrapped', strpos($outPost, 'action="https://site.test/?_glpe=1&l=') !== false, $outPost);
+check('POST form keeps user fields', strpos($outPost, '<input name="e">') !== false);
+
+// GET form: gateway identity moves into hidden inputs, action loses its query
+$htmlGet = '<form method="GET" action="https://x.test/search"><input name="q"></form>';
+$outGet = $engine->rewriteHtml($htmlGet, 'https://x.test/', ['encodeURL' => false, 'showToolbar' => false]);
+check('GET action is query-less gateway', strpos($outGet, 'action="https://site.test/"') !== false, $outGet);
+check('GET hidden gateway flag', strpos($outGet, 'name="_glpe" value="1"') !== false);
+check('GET hidden remote endpoint', strpos($outGet, 'name="l" value="' . rawurlencode('https://x.test/search') . '"') !== false, $outGet);
+check('GET drops original action query', strpos($outGet, 'x.test/search?') === false);
+
+// GET form without action → current page becomes the remote endpoint
+$outNoAct = $engine->rewriteHtml('<form><input name="q"></form>', 'https://x.test/page', ['encodeURL' => false, 'showToolbar' => false]);
+check('GET w/o action targets current page', strpos($outNoAct, 'name="l" value="' . rawurlencode('https://x.test/page') . '"') !== false, $outNoAct);
+
+// Script-driven actions stay exactly as delivered
+$outJs = $engine->rewriteHtml('<form method="GET" action="javascript:void(0)"><input name="q"></form>', 'https://x.test/', ['encodeURL' => false, 'showToolbar' => false]);
+check('GET javascript: action untouched', strpos($outJs, 'action="javascript:void(0)"') !== false && strpos($outJs, 'name="_glpe"') === false, $outJs);
+
+// Encoded-mode payload uses the reversible codec
+$outEnc = $engine->rewriteHtml('<form method="GET" action="https://x.test/find"><input name="q"></form>', 'https://x.test/', ['encodeURL' => true, 'showToolbar' => false]);
+check('GET encoded payload decodes back', GLPE_Codec::decode(preg_match('/name="l" value="([^"]+)"/', $outEnc, $em) ? $em[1] : '') === 'https://x.test/find', $outEnc);
+
+echo "\n== 11. Script namespace safety ==\n";
+$jsMixed = 'var ns="http://www.w3.org/2000/svg"; var api="https://api.test/endpoint";';
+$ojsMixed = $engine->rewriteJs($jsMixed, 'https://x.test/', ['encodeURL' => false]);
+check('W3C namespace untouched', strpos($ojsMixed, '"http://www.w3.org/2000/svg"') !== false, $ojsMixed);
+check('api URL still rewritten', strpos($ojsMixed, rawurlencode('https://api.test/endpoint')) !== false, $ojsMixed);
+$ojsNs = $engine->rewriteJs('el("http://schemas.test.com/v1"); el2("http://schema.org/Thing");', 'https://x.test/', []);
+check('schemas.* host untouched', strpos($ojsNs, 'http://schemas.test.com/v1') !== false, $ojsNs);
+check('schema.org untouched', strpos($ojsNs, 'http://schema.org/Thing') !== false, $ojsNs);
+$ojsPlain = $engine->rewriteJs('go("https://example.net/nav");', 'https://x.test/', ['encodeURL' => false]);
+check('ordinary JS URL rewritten', strpos($ojsPlain, rawurlencode('https://example.net/nav')) !== false, $ojsPlain);
+
 echo "\n== RESULT: $pass passed, $fail failed ==\n";
 exit($fail > 0 ? 1 : 0);

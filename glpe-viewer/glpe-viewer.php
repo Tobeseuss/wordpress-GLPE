@@ -3,7 +3,7 @@
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
  * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با قابلیت بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 4.2.0
+ * Version: 4.3.0
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '4.2.0');
+define('GLPE_VERSION', '4.3.0');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -139,8 +139,13 @@ class GLPE_Plugin {
         $tempCookies = (isset($_GET['tp']) && $_GET['tp'] == '1') || (isset($_POST['tp']) && $_POST['tp'] == '1');
         $engine = new GLPE_Engine($viewScript, $tempCookies);
 
-        // 1. Client-side data synchronization beacon
-        if (isset($_GET['mode']) && $_GET['mode'] === 'sync') {
+        // 1. Extract the display link first — control modes below only apply
+        //    to gateway requests that carry no display link, so displayed
+        //    sites using "mode" as their own field name keep working.
+        $rawParam = isset($_GET['l']) ? trim($_GET['l']) : (isset($_POST['l']) ? trim($_POST['l']) : '');
+
+        // 2. Client-side data synchronization beacon
+        if ($rawParam === '' && isset($_GET['mode']) && $_GET['mode'] === 'sync') {
             $url    = isset($_POST['url'])    ? sanitize_text_field(wp_unslash($_POST['url']))    : (isset($_GET['url'])    ? sanitize_text_field($_GET['url'])    : '');
             $cookie = isset($_POST['cookie']) ? sanitize_text_field(wp_unslash($_POST['cookie'])) : (isset($_GET['cookie']) ? sanitize_text_field($_GET['cookie']) : '');
 
@@ -151,14 +156,12 @@ class GLPE_Plugin {
             exit;
         }
 
-        // 2. Per-user session & record management page
-        if (isset($_GET['mode']) && $_GET['mode'] === 'sessions') {
+        // 3. Per-user session & record management page
+        if ($rawParam === '' && isset($_GET['mode']) && $_GET['mode'] === 'sessions') {
             $this->runSessionManager($engine);
             exit;
         }
 
-        // 3. Extract and decode the target link
-        $rawParam = isset($_GET['l']) ? trim($_GET['l']) : (isset($_POST['l']) ? trim($_POST['l']) : '');
         if ($rawParam === '') {
             wp_redirect($this->viewerPageUrl());
             exit;
@@ -170,8 +173,26 @@ class GLPE_Plugin {
             $targetUrl = 'https://' . $targetUrl;
         }
 
+        $method = isset($_SERVER['REQUEST_METHOD']) ? strtoupper($_SERVER['REQUEST_METHOD']) : 'GET';
 
-        // 4. Display flags — an explicit URL flag ("1" or "0") always wins;
+        // 4. GET submissions carry their fields in the gateway query string
+        //    (the display link itself travels in hidden inputs). Forward every
+        //    non-reserved field to the destination as part of its query.
+        if ($method === 'GET' && isset($_SERVER['QUERY_STRING'])) {
+            $reserved = ['_glpe', 'l', 'ns', 'ni', 'nt', 'nb', 'ec', 'tp'];
+            $fields = [];
+            foreach (explode('&', (string)$_SERVER['QUERY_STRING']) as $pair) {
+                if ($pair === '') continue;
+                $fieldName = explode('=', $pair, 2)[0];
+                if (in_array($fieldName, $reserved, true)) continue;
+                $fields[] = $pair;
+            }
+            if (!empty($fields)) {
+                $targetUrl .= (strpos($targetUrl, '?') !== false ? '&' : '?') . implode('&', $fields);
+            }
+        }
+
+        // 5. Display flags — an explicit URL flag ("1" or "0") always wins;
         //    otherwise the site-wide defaults from the settings page apply.
         $options = [
             'removeScripts' => $this->viewFlag('ns', 'glpe_no_scripts', '0'),
@@ -179,20 +200,22 @@ class GLPE_Plugin {
             'stripTitle'    => $this->viewFlag('nt', 'glpe_blank_title', '0'),
             'showToolbar'   => $this->viewFlag('nb', 'glpe_toolbar', '1'),
             'encodeURL'     => $this->viewFlag('ec', 'glpe_rewrite_links', '1'),
+            'tempSession'   => $tempCookies,
         ];
 
-        $method   = isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : 'GET';
         $postData = ($method === 'POST') ? file_get_contents('php://input') : null;
 
-        // Forward the client's own request headers (minus hop-by-hop / identity ones).
+        // Forward the client's own request headers (minus hop-by-hop, identity
+        // and location ones — the destination must see its own origin, not
+        // this site's, or its cross-site checks reject the exchange).
         // Values are stripped of CR/LF/NUL to prevent header injection.
         $customHeaders = [];
-        $blockedHeaders = ['host', 'cookie', 'content-length', 'connection', 'accept-encoding', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip', 'via', 'forwarded', 'client-ip', 'true-client-ip', 'cf-connecting-ip', 'x-cluster-client-ip'];
+        $blockedHeaders = ['host', 'cookie', 'content-length', 'connection', 'accept-encoding', 'origin', 'referer', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-real-ip', 'via', 'forwarded', 'client-ip', 'true-client-ip', 'cf-connecting-ip', 'x-cluster-client-ip'];
         if (function_exists('getallheaders')) {
             foreach (getallheaders() as $name => $val) {
                 $nameLower = strtolower($name);
                 if (!in_array($nameLower, $blockedHeaders, true)) {
-                    $customHeaders[$nameLower] = str_replace(["\r", "\n", "\0"], '', sanitize_text_field($val));
+                    $customHeaders[$nameLower] = str_replace(["\r", "\n", "\0"], '', trim((string)$val));
                 }
             }
         } else {
@@ -200,13 +223,13 @@ class GLPE_Plugin {
                 if (strpos($key, 'HTTP_') === 0) {
                     $name = strtolower(str_replace('_', '-', substr($key, 5)));
                     if (!in_array($name, $blockedHeaders, true)) {
-                        $customHeaders[$name] = str_replace(["\r", "\n", "\0"], '', sanitize_text_field($val));
+                        $customHeaders[$name] = str_replace(["\r", "\n", "\0"], '', trim((string)$val));
                     }
                 }
             }
         }
         if (isset($_SERVER['CONTENT_TYPE'])) {
-            $customHeaders['content-type'] = str_replace(["\r", "\n", "\0"], '', sanitize_text_field($_SERVER['CONTENT_TYPE']));
+            $customHeaders['content-type'] = str_replace(["\r", "\n", "\0"], '', trim((string)$_SERVER['CONTENT_TYPE']));
         }
 
         try {
@@ -230,12 +253,19 @@ class GLPE_Plugin {
 
             $body = $result['body'];
 
+            // Rewrite against the address that actually served the content —
+            // a redirect chain can land somewhere else than the request began,
+            // and relative references must follow the final landing page.
+            $rewriteBase = (isset($result['finalUrl']) && is_string($result['finalUrl']) && $result['finalUrl'] !== '')
+                ? $result['finalUrl']
+                : $targetUrl;
+
             if (stripos($contentType, 'text/html') !== false) {
-                $body = $engine->rewriteHtml($body, $targetUrl, $options);
+                $body = $engine->rewriteHtml($body, $rewriteBase, $options);
             } elseif (stripos($contentType, 'text/css') !== false) {
-                $body = $engine->rewriteCss($body, $targetUrl, $options);
+                $body = $engine->rewriteCss($body, $rewriteBase, $options);
             } elseif (stripos($contentType, 'javascript') !== false) {
-                $body = $engine->rewriteJs($body, $targetUrl, $options);
+                $body = $engine->rewriteJs($body, $rewriteBase, $options);
             }
 
             echo $body;
