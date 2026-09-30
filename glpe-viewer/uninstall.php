@@ -37,8 +37,10 @@ if (function_exists('wp_roles')) {
     }
 }
 
-// Remove per-user permission overrides (both grants and explicit denies).
+// Remove per-user permission overrides (both grants and explicit denies)
+// and the per-account session snapshots.
 foreach (get_users(['fields' => ['ID']]) as $glpe_user_ref) {
+    delete_user_meta($glpe_user_ref->ID, '_glpe_account_jar');
     $glpe_user = get_userdata($glpe_user_ref->ID);
     if ($glpe_user && array_key_exists('glpe_browser', (array)$glpe_user->caps)) {
         $glpe_user->remove_cap('glpe_browser');

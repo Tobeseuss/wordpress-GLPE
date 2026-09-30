@@ -163,6 +163,37 @@ class GLPE_Cookies {
         return $result;
     }
 
+    /**
+     * Full jar snapshot (domain => name => record) for account storage.
+     */
+    public function exportAll() {
+        return (isset($_SESSION[$this->sessionKey]) && is_array($_SESSION[$this->sessionKey]))
+            ? $_SESSION[$this->sessionKey]
+            : [];
+    }
+
+    /**
+     * Replaces the whole jar with a previously exported snapshot. Only
+     * arrays whose structure matches domain => name => record are accepted.
+     */
+    public function importAll($jar) {
+        if (!is_array($jar)) return false;
+        $clean = [];
+        foreach ($jar as $domain => $domainCookies) {
+            if (!is_string($domain) || $domain === '' || !is_array($domainCookies)) continue;
+            foreach ($domainCookies as $name => $record) {
+                if (!is_string($name) || $name === '' || !is_array($record)) continue;
+                $clean[$domain][$name] = $record;
+            }
+        }
+        $_SESSION[$this->sessionKey] = $clean;
+        return true;
+    }
+
+    public function isEmpty() {
+        return empty($_SESSION[$this->sessionKey]) || !is_array($_SESSION[$this->sessionKey]);
+    }
+
     public function clearAll() {
         $_SESSION[$this->sessionKey] = [];
     }

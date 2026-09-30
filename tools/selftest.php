@@ -110,6 +110,23 @@ check('getAllCookies count', count($jar->getAllCookies()) === 3);
 $jar->clearAll();
 check('clearAll', count($jar->getAllCookies()) === 0);
 
+// Account snapshot roundtrip (the “save my sessions to my account” feature):
+// export → wipe → import restores records; malformed input is a no-op that
+// leaves valid data intact; each account loads only its own snapshot copy.
+$jar->addCookieFromHeader('sid=abc123; Path=/; Domain=example.com; HttpOnly; SameSite=Lax; Max-Age=3600', 'https://example.com/login');
+$snapshot = $jar->exportAll();
+check('export captures records', isset($snapshot['example.com']['sid']), print_r($snapshot, true));
+$_SESSION['_glpe_cookies'] = [];
+check('empty after wipe', $jar->isEmpty());
+$jar2 = new GLPE_Cookies(false);
+$jar2->importAll($snapshot);
+$hdrBack = $jar2->getCookieHeader('https://example.com/other');
+check('import restores records', strpos($hdrBack, 'sid=abc123') !== false, $hdrBack);
+$jar2->importAll('garbage-string');
+check('malformed import is a no-op', strpos($jar2->getCookieHeader('https://example.com/x'), 'sid=abc123') !== false);
+$jar2->importAll(['evil.com' => ['x' => 'not-an-array']]);
+check('malformed entries dropped', $jar2->isEmpty());
+
 echo "\n== 6. rewriteHtml basics ==\n";
 $html = '<html><head><title>Orig</title></head><body><a href="/go">x</a><img src="/i.png"><style>body{background:url(bg.jpg)}</style></body></html>';
 $out = $engine->rewriteHtml($html, 'https://example.com/dir/page', ['encodeURL' => false, 'showToolbar' => false]);

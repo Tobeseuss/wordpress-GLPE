@@ -3,7 +3,7 @@
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
  * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با قابلیت بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 4.6.0
+ * Version: 4.7.0
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '4.6.0');
+define('GLPE_VERSION', '4.7.0');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -64,6 +64,13 @@ class GLPE_Plugin {
         // Access management form handlers (admin-post.php)
         add_action('admin_post_glpe_save_roles', [$this, 'handleSaveRoles']);
         add_action('admin_post_glpe_toggle_user', [$this, 'handleToggleUser']);
+        add_action('admin_post_glpe_save_jar', [$this, 'handleSaveJar']);
+
+        // Per-account session isolation: a browser's jar belongs to exactly
+        // one account — logging out drops it, logging in restores the
+        // account's own saved jar (never another user's).
+        add_action('wp_login', [$this, 'onLogin'], 10, 1);
+        add_action('wp_logout', [$this, 'onLogout']);
     }
 
     public function startSession() {
@@ -134,6 +141,11 @@ class GLPE_Plugin {
             $this->respondToGate($verdict);
             exit;
         }
+
+        // 0a. Account-jar restore: if this browser session has no records
+        //     yet but the signed-in account has a saved snapshot, load it —
+        //     logins to remote sites then follow the account, not the browser.
+        $this->maybeRestoreAccountJar();
 
         $viewScript  = add_query_arg(['_glpe' => '1'], home_url('/'));
         $tempCookies = (isset($_GET['tp']) && $_GET['tp'] == '1') || (isset($_POST['tp']) && $_POST['tp'] == '1');
@@ -548,11 +560,26 @@ class GLPE_Plugin {
                 </div>
             </form>
 
-            <div style="display: flex; justify-content: center; margin-top: 14px;">
+            <div style="display: flex; justify-content: center; gap: 8px; margin-top: 14px; flex-wrap: wrap; align-items: center;">
                 <a href="<?php echo esc_url($sessionsUrl); ?>" style="font-size: 12px; color: #94a3b8; text-decoration: none; background: #1e293b; border: 1px solid #334155; padding: 8px 16px; border-radius: 10px;">
                     🍪 مدیریت نشست‌ها و کوکی‌های من (<?php echo (int)$cookieCount; ?>)
                 </a>
+                <?php if (is_user_logged_in()): ?>
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display: inline; margin: 0;"
+                      onsubmit="return confirm('نشست‌ها و کوکی‌های فعلی مرورگر در حساب شما ذخیره شوند؟');">
+                    <input type="hidden" name="action" value="glpe_save_jar">
+                    <?php wp_nonce_field('glpe_save_jar'); ?>
+                    <button type="submit" style="font-size: 12px; color: #6ee7b7; background: rgba(5,150,105,0.12); border: 1px solid #059669; padding: 8px 16px; border-radius: 10px; cursor: pointer; font-family: inherit;">
+                        💾 ذخیره نشست‌ها در حساب من (<?php echo (int)$this->accountJarCount(); ?>)
+                    </button>
+                </form>
+                <?php endif; ?>
             </div>
+            <?php if (isset($_GET['cp_msg']) && $_GET['cp_msg'] === 'jar-saved'): ?>
+            <div style="text-align: center; margin-top: 10px; font-size: 12px; color: #6ee7b7;">
+                ✔ نشست‌ها و کوکی‌های فعلی در حساب شما ذخیره شد؛ از این پس با ورود به حساب‌تان در هر مرورگری بارگذاری می‌شود.
+            </div>
+            <?php endif; ?>
         </div>
         <?php
         return ob_get_clean();
@@ -882,6 +909,96 @@ class GLPE_Plugin {
         exit;
     }
 
+    /** Meta key holding the account's persistent session snapshot. */
+    const ACCOUNT_JAR_META = '_glpe_account_jar';
+
+    /**
+     * Copies the current browser-session jar into the signed-in user's
+     * account (user meta). Invoked by the "save my sessions to my account"
+     * buttons in the viewer widget and the session manager. The snapshot is
+     * strictly per-account: other accounts never see or restore it.
+     */
+    public function handleSaveJar() {
+        if (!is_user_logged_in()) {
+            wp_die('ورود لازم است.');
+        }
+        if (!current_user_can('administrator') && !current_user_can(GLPE_Access::CAP)) {
+            wp_die('دسترسی مجاز نیست.');
+        }
+        check_admin_referer('glpe_save_jar');
+
+        if (session_status() === PHP_SESSION_NONE && !headers_sent()) {
+            @session_start();
+        }
+        $jar = (isset($_SESSION['_glpe_cookies']) && is_array($_SESSION['_glpe_cookies']))
+            ? $_SESSION['_glpe_cookies']
+            : [];
+        update_user_meta(get_current_user_id(), self::ACCOUNT_JAR_META, $jar);
+
+        $back = wp_get_referer();
+        if (!$back) $back = home_url('/');
+        wp_safe_redirect(add_query_arg('cp_msg', 'jar-saved', $back));
+        exit;
+    }
+
+    /**
+     * Login: a browser's jar belongs to exactly one account. Drop whatever
+     * the previous session left behind, then restore THIS account's saved
+     * snapshot so its remote-site logins follow the account everywhere.
+     */
+    public function onLogin($user_login) {
+        $user = get_user_by('login', $user_login);
+        if (!$user) return;
+        if (session_status() === PHP_SESSION_NONE && !headers_sent()) {
+            @session_start();
+        }
+        $_SESSION['_glpe_cookies'] = [];
+        $saved = get_user_meta($user->ID, self::ACCOUNT_JAR_META, true);
+        if (is_array($saved) && !empty($saved)) {
+            $_SESSION['_glpe_cookies'] = $saved;
+        }
+    }
+
+    /** Logout: drop the jar so the next account on this browser starts clean. */
+    public function onLogout() {
+        if (session_status() === PHP_SESSION_NONE && !headers_sent()) {
+            @session_start();
+        }
+        $_SESSION['_glpe_cookies'] = [];
+    }
+
+    /**
+     * Called on gateway requests after the access gate: if the browser
+     * session has no records (fresh PHP session, expired session, another
+     * device) but the signed-in account has a saved snapshot, load it.
+     */
+    private function maybeRestoreAccountJar() {
+        if (!is_user_logged_in()) return;
+        if (session_status() === PHP_SESSION_NONE && !headers_sent()) {
+            @session_start();
+        }
+        if (!empty($_SESSION['_glpe_cookies']) && is_array($_SESSION['_glpe_cookies'])) {
+            return; // live browsing already has records — nothing to restore
+        }
+        $saved = get_user_meta(get_current_user_id(), self::ACCOUNT_JAR_META, true);
+        if (is_array($saved) && !empty($saved)) {
+            $_SESSION['_glpe_cookies'] = $saved;
+        }
+    }
+
+    /** Cookie record count inside the signed-in account's saved snapshot. */
+    private function accountJarCount() {
+        if (!is_user_logged_in()) return 0;
+        $saved = get_user_meta(get_current_user_id(), self::ACCOUNT_JAR_META, true);
+        $count = 0;
+        if (is_array($saved)) {
+            foreach ($saved as $domainCookies) {
+                if (is_array($domainCookies)) $count += count($domainCookies);
+            }
+        }
+        return $count;
+    }
+
     /**
      * Display flag resolution: an explicit URL flag ("1" or "0") always wins,
      * otherwise the site-wide default from the settings page is used.
@@ -997,11 +1114,18 @@ class GLPE_Plugin {
                 <p>داده‌های نشست ذخیره‌شده برای مرور شما در این مرورگر. این داده‌ها فقط برای حساب کاربری فعلی شماست و هر کاربر تنها داده‌های خودش را می‌بیند.</p>
                 <p style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:0;">
                     <span class="tag"><?php echo (int)$total; ?> کوکی در <?php echo count($byDomain); ?> دامنه</span>
+                    <?php $accountCount = $this->accountJarCount(); ?>
+                    <span class="tag" title="نسخه ذخیره‌شده در حساب کاربری شما که با ورود در هر مرورگری بارگذاری می‌شود">💾 <?php echo (int)$accountCount; ?> کوکی ذخیره‌شده در حساب</span>
                     <?php if ($total > 0): ?>
                     <form method="post" action="<?php echo esc_url($baseSessionsUrl); ?>" style="display:inline;" onsubmit="return confirm('همه نشست‌ها پاک شوند؟');">
                         <input type="hidden" name="sess_do" value="clear_all">
                         <?php wp_nonce_field('glpe_sess_mgmt', '_glpe_sess_nonce'); ?>
                         <button type="submit" class="btn btn-danger">پاک‌کردن همه</button>
+                    </form>
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline;" onsubmit="return confirm('نشست‌ها و کوکی‌های فعلی مرورگر در حساب شما ذخیره شوند؟');">
+                        <input type="hidden" name="action" value="glpe_save_jar">
+                        <?php wp_nonce_field('glpe_save_jar'); ?>
+                        <button type="submit" class="btn" style="background: rgba(5,150,105,0.15); border-color: #059669; color: #6ee7b7;">💾 ذخیره در حساب من</button>
                     </form>
                     <?php endif; ?>
                     <a class="btn" href="<?php echo esc_url($viewerUrl); ?>">← بازگشت به نمایشگر</a>
