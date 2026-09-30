@@ -114,17 +114,17 @@ check('clearAll', count($jar->getAllCookies()) === 0);
 // export → wipe → import restores records; malformed input is a no-op that
 // leaves valid data intact; each account loads only its own snapshot copy.
 $jar->addCookieFromHeader('sid=abc123; Path=/; Domain=example.com; HttpOnly; SameSite=Lax; Max-Age=3600', 'https://example.com/login');
-$snapshot = $jar->exportAll();
+$snapshot = $jar->snapshotAll();
 check('export captures records', isset($snapshot['example.com']['sid']), print_r($snapshot, true));
 $_SESSION['_glpe_cookies'] = [];
 check('empty after wipe', $jar->isEmpty());
 $jar2 = new GLPE_Cookies(false);
-$jar2->importAll($snapshot);
+$jar2->loadSnapshot($snapshot);
 $hdrBack = $jar2->getCookieHeader('https://example.com/other');
 check('import restores records', strpos($hdrBack, 'sid=abc123') !== false, $hdrBack);
-$jar2->importAll('garbage-string');
+$jar2->loadSnapshot('garbage-string');
 check('malformed import is a no-op', strpos($jar2->getCookieHeader('https://example.com/x'), 'sid=abc123') !== false);
-$jar2->importAll(['evil.com' => ['x' => 'not-an-array']]);
+$jar2->loadSnapshot(['evil.com' => ['x' => 'not-an-array']]);
 check('malformed entries dropped', $jar2->isEmpty());
 
 echo "\n== 6. rewriteHtml basics ==\n";

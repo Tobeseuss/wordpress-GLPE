@@ -166,7 +166,7 @@ class GLPE_Cookies {
     /**
      * Full jar snapshot (domain => name => record) for account storage.
      */
-    public function exportAll() {
+    public function snapshotAll() {
         return (isset($_SESSION[$this->sessionKey]) && is_array($_SESSION[$this->sessionKey]))
             ? $_SESSION[$this->sessionKey]
             : [];
@@ -176,7 +176,7 @@ class GLPE_Cookies {
      * Replaces the whole jar with a previously exported snapshot. Only
      * arrays whose structure matches domain => name => record are accepted.
      */
-    public function importAll($jar) {
+    public function loadSnapshot($jar) {
         if (!is_array($jar)) return false;
         $clean = [];
         foreach ($jar as $domain => $domainCookies) {
