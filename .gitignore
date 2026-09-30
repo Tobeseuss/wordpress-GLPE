@@ -1,0 +1,29 @@
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Dev artifacts
+*.log
+*.zip
+!cloud-portal-wp-*.zip
+node_modules/
+vendor/
+
+# Local test scratch
+/tmp/
+*.orig
+*.rej
+
+# Never commit credentials or tokens
+.env
+*.pem
+github_pat_*
+dist/
