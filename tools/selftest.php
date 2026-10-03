@@ -223,6 +223,23 @@ check('descriptors kept', strpos($os, '526w') !== false && strpos($os, '1280w') 
 $os2 = $engine->rewriteSrcset('https://a.test/1.png,https://b.test/2.png', 'https://x.test/', ['encodeURL' => false]);
 check('comma-no-space is one URL', strpos($os2, 'a.test%2F1.png%2Chttps%3A%2F%2Fb.test%2F2.png') !== false, $os2);
 
+echo "\n== 10c. Player payload escapes (YouTube streams) ==\n";
+// ytInitialPlayerResponse embeds stream URLs with \u0026 escapes — the
+// wrapped URL must decode to a valid target or playback requests 400.
+$jsEsc = 'var s={"u":"https://rr4---sn-x.googlevideo.com/videoplayback?expire=1\u0026ei=abc\u0026ip=1.2.3.4"};';
+$outEsc = $engine->rewriteJs($jsEsc, 'https://www.youtube.com/', ['encodeURL' => true]);
+check('JSON escapes decoded', (bool)preg_match('/l=([^&\'"]+)/', $outEsc, $em2) && strpos(GLPE_Codec::decode($em2[1]), '&ei=abc&ip=1.2.3.4') !== false, isset($em2[1]) ? GLPE_Codec::decode($em2[1]) : $outEsc);
+check('no unicode escapes left', isset($em2[1]) && strpos(GLPE_Codec::decode($em2[1]), '\\u0026') === false);
+
+echo "\n== 10d. YouTube embed player injection ==\n";
+$ytPage = $engine->rewriteHtml('<html><head><title>t</title></head><body><p>x</p></body></html>', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', ['showToolbar' => false, 'encodeURL' => false]);
+check('watch page gets embed player', strpos($ytPage, 'youtube-nocookie.com/embed/dQw4w9WgXcQ') !== false, $ytPage);
+check('iframe src stays direct', strpos($ytPage, 'src="https://www.youtube-nocookie.com/embed/') !== false);
+$ytShort = $engine->rewriteHtml('<html><body></body></html>', 'https://youtu.be/dQw4w9WgXcQ', ['showToolbar' => false, 'encodeURL' => false]);
+check('short links get embed player', strpos($ytShort, 'embed/dQw4w9WgXcQ') !== false);
+$nonYt = $engine->rewriteHtml('<html><body></body></html>', 'https://www.google.com/', ['showToolbar' => false, 'encodeURL' => false]);
+check('other pages untouched', strpos($nonYt, '__glpe_ytplayer') === false);
+
 echo "\n== 11. Script namespace safety ==\n";
 $jsMixed = 'var ns="http://www.w3.org/2000/svg"; var api="https://api.test/endpoint";';
 $ojsMixed = $engine->rewriteJs($jsMixed, 'https://x.test/', ['encodeURL' => false]);

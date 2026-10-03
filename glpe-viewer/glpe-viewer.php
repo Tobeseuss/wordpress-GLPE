@@ -3,7 +3,7 @@
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
  * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با قابلیت بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 4.7.0
+ * Version: 4.8.0
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '4.7.0');
+define('GLPE_VERSION', '4.8.0');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -245,6 +245,16 @@ class GLPE_Plugin {
         }
 
         try {
+            // Media targets (video/audio bytes) stream straight through:
+            // buffering a full video in PHP memory would exhaust the server
+            // and stall playback. Range requests (206) are relayed as-is.
+            if ($method === 'GET' && preg_match('#videoplayback|googlevideo\.com|\.m3u8(\?|$)|\.(mp4|webm|m4a|mp3|ts|ogg|flv)(\?|$)#i', $targetUrl)) {
+                if ($engine->streamMediaRequest($targetUrl, $customHeaders)) {
+                    exit;
+                }
+                // streaming unavailable → fall through to the buffered path
+            }
+
             $result = $engine->executeRequest($targetUrl, $method, $postData, $customHeaders);
 
             // Fresh content on every request; allow embedding from any origin.

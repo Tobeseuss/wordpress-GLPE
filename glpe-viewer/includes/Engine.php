@@ -193,6 +193,18 @@ class GLPE_Engine {
         return preg_replace_callback('/([\'"])(https?:\/\/[^\'"]+)\1/i', function($matches) use ($baseUrl, $options) {
             $quote = $matches[1];
             $url = $matches[2];
+            // Inline JSON payloads embed ampersands as \u0026 escapes (e.g.
+            // YouTube's ytInitialPlayerResponse stream URLs). The escapes are
+            // JSON text, not URL characters — decoding them here keeps the
+            // wrapped target URL valid when the player later requests it.
+            if (strpos($url, '\\u') !== false) {
+                $unescaped = preg_replace_callback('/\\\\u([0-9a-fA-F]{4})/', function($um) {
+                    return mb_convert_encoding(pack('n', hexdec($um[1])), 'UTF-8', 'UTF-16BE');
+                }, $url);
+                if (is_string($unescaped) && $unescaped !== '') {
+                    $url = $unescaped;
+                }
+            }
             // Specification and namespace URIs embedded in code (SVG factories,
             // markup vocabularies, document type definitions) are opaque
             // identifiers, not fetchable documents — rewriting them breaks the
@@ -500,6 +512,38 @@ class GLPE_Engine {
             }
         }
 
+        // 18. YouTube watch pages: the in-page player cannot operate inside
+        // the viewer — YouTube's server-side streaming stack (SABR/PoToken)
+        // rejects streams whose session was not opened by the real client.
+        // Give every watch page the official embed player instead: it plays
+        // video and advertisements natively, exactly like the original site.
+        // The iframe is injected verbatim (never rewritten) and loads from
+        // YouTube directly in the visitor's own browser.
+        $ytVideoId = '';
+        if (preg_match('#youtube(?:-nocookie)?\.com/watch\?(?:[^\#]*&)?v=([A-Za-z0-9_-]{6,20})#i', $targetUrl, $vm)) {
+            $ytVideoId = $vm[1];
+        } elseif (preg_match('#youtu\.be/([A-Za-z0-9_-]{6,20})#i', $targetUrl, $vm)) {
+            $ytVideoId = $vm[1];
+        }
+        if ($ytVideoId !== '' && preg_match('#^[A-Za-z0-9_-]+$#', $ytVideoId)) {
+            $playerHtml = '<style>'
+                . 'ytd-player,#movie_player,#player-container-01,.html5-video-player,#player-wrap{display:none!important}'
+                . '</style>'
+                . '<div id="__glpe_ytplayer" style="position:relative;z-index:2147483646;background:#000;'
+                . 'margin:52px auto 0 auto;max-width:960px;width:calc(100% - 24px);aspect-ratio:16/9;">'
+                . '<iframe src="https://www.youtube-nocookie.com/embed/' . $ytVideoId . '" '
+                . 'style="position:absolute;inset:0;width:100%;height:100%;border:0;" '
+                . 'allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" '
+                . 'allowfullscreen title="Video player"></iframe></div>';
+            if (stripos($html, '<body') !== false) {
+                $html = preg_replace_callback('/<body\b([^>]*)>/i', function($bm) use ($playerHtml) {
+                    return '<body' . $bm[1] . '>' . $playerHtml;
+                }, $html, 1);
+            } else {
+                $html = $playerHtml . $html;
+            }
+        }
+
         return $html;
     }
 
@@ -797,5 +841,114 @@ class GLPE_Engine {
             'body'        => $body,
             'finalUrl'    => $targetUrl,
         ];
+    }
+
+    /**
+     * Streams a media target (video/audio bytes) straight to the client
+     * without buffering it in memory — a full video would exhaust PHP's
+     * memory limit and stall playback. Status and the range-relevant
+     * response headers (Content-Type / Content-Length / Content-Range /
+     * Accept-Ranges) are relayed before the first byte, so seeking and
+     * partial requests (206) behave like a direct download.
+     * Returns true once the bytes have been flushed; the caller must exit.
+     */
+    public function streamMediaRequest($targetUrl, $customHeaders = []) {
+        $parsed = parse_url($targetUrl);
+        if (!isset($parsed['host'])) {
+            throw new Exception("آدرس وارد شده نامعتبر است.");
+        }
+        if ($this->isBlockedHost($parsed['host'])) {
+            throw new Exception("دسترسی به آدرس‌های داخلی و شبکه محلی مجاز نیست.");
+        }
+        if (!function_exists('curl_init') || headers_sent()) {
+            return false;
+        }
+
+        $currentUrl = $targetUrl;
+        $outStream = null;
+        for ($hop = 0; $hop < 4; $hop++) {
+            $headers = $this->hopHeaders($customHeaders, $currentUrl, 'GET');
+            $cookieHeader = $this->cookies->getCookieHeader($currentUrl);
+            $raw = [];
+            foreach ($headers as $k => $v) {
+                $raw[] = $k . ': ' . $v;
+            }
+            if ($cookieHeader !== '') {
+                $raw[] = 'Cookie: ' . $cookieHeader;
+            }
+
+            $statusLine = null;
+            $relay = [];
+            $headersSent = false;
+            $sendHeaders = function() use (&$statusLine, &$relay, &$headersSent) {
+                if ($headersSent) return;
+                http_response_code($statusLine ? $statusLine : 200);
+                header('Cache-Control: no-store, max-age=0');
+                header('Access-Control-Allow-Origin: *');
+                header('Access-Control-Allow-Headers: *');
+                header('Access-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges');
+                foreach ($relay as $name => $value) {
+                    header($name . ': ' . $value);
+                }
+                $headersSent = true;
+            };
+
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, $currentUrl);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, $raw);
+            curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 0);
+            curl_setopt($ch, CURLOPT_BUFFERSIZE, 262144);
+            curl_setopt($ch, CURLOPT_ENCODING, '');
+            $sslVerify = function_exists('get_option') ? (get_option('glpe_ssl_verify', '1') === '1') : false;
+            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, $sslVerify);
+            curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, $sslVerify ? 2 : 0);
+            curl_setopt($ch, CURLOPT_HEADERFUNCTION, function($ch, $line) use (&$statusLine, &$relay) {
+                $trim = trim($line);
+                if ($trim === '') return strlen($line);
+                if (stripos($trim, 'HTTP/') === 0) {
+                    if (preg_match('#HTTP/\S+\s+(\d{3})#i', $trim, $m)) {
+                        $statusLine = (int)$m[1];
+                    }
+                    $relay = []; // redirect hops reset the collected headers
+                    return strlen($line);
+                }
+                $parts = explode(':', $trim, 2);
+                if (count($parts) === 2) {
+                    $name = trim($parts[0]);
+                    $lower = strtolower($name);
+                    if (in_array($lower, ['content-type', 'content-length', 'content-range', 'accept-ranges', 'content-disposition', 'last-modified', 'etag'], true)) {
+                        $relay[$name] = str_replace(["\r", "\n", "\0"], '', trim($parts[1]));
+                    }
+                }
+                return strlen($line);
+            });
+            curl_setopt($ch, CURLOPT_WRITEFUNCTION, function($ch, $chunk) use ($sendHeaders, &$outStream) {
+                $sendHeaders();
+                if ($outStream === null) {
+                    $outStream = fopen('php://output', 'wb');
+                }
+                $n = fwrite($outStream, $chunk);
+                if (function_exists('flush')) @flush();
+                return ($n === false) ? -1 : strlen($chunk);
+            });
+
+            curl_exec($ch);
+            $errNo   = curl_errno($ch);
+            $nextUrl = curl_getinfo($ch, CURLINFO_REDIRECT_URL);
+            $status  = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+            curl_close($ch);
+
+            if ($status >= 300 && $status < 400 && $nextUrl && $hop < 3) {
+                $currentUrl = $nextUrl; // follow the hop with fresh identity headers
+                continue;
+            }
+            if ($errNo !== 0 && !$headersSent) {
+                return false; // let the caller fall back to the buffered path
+            }
+            $sendHeaders();
+            return true;
+        }
+        return true;
     }
 }
