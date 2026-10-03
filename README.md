@@ -5,7 +5,7 @@
 **نمایشگر صفحات وب برای وردپرس — مناسب هاست‌های رایگان و اشتراکی**
 WordPress remote page display plugin — built for free/shared hosting
 
-![Version](https://img.shields.io/badge/version-4.8.0-blue)
+![Version](https://img.shields.io/badge/version-4.9.0-blue)
 ![WordPress](https://img.shields.io/badge/WordPress-5.3%2B-21759B)
 ![PHP](https://img.shields.io/badge/PHP-7.2--8.3-8892BF)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -36,6 +36,18 @@ WordPress remote page display plugin — built for free/shared hosting
 - 🔐 سطح دسترسی «مرورگر GLPE» — فقط کاربران دارای مجوز یا مدیران می‌توانند از نمایشگر استفاده و وارد شوند؛ مدیریت مجوز نقش‌ها و کاربران از پیشخوان
 - 🍪 مدیریت نشست‌ها توسط کاربر — هر کاربر می‌تواند کوکی‌ها و نشست‌های ذخیره‌شده خودش را به‌تفکیک دامنه ببیند و پاک کند (`?_glpe=1&mode=sessions` + لینک از ویجت)
 - حذف کامل داده‌ها هنگام حذف افزونه (`uninstall.php`)
+
+### سازگاری سایت‌ها (تأییدشده با تست واقعی)
+| نوع سرویس | وضعیت | توضیح |
+|---|---|---|
+| سایت‌های استاتیک و معمولی | ✅ کامل | لینک‌ها، فرم‌ها (GET/POST)، تصاویر، CSS |
+| جستجو و فرم‌های سایت‌های بزرگ | ✅ کار می‌کند | تا مرحله ارسال به سرور مقصد |
+| پخش مستقیم ویدیو/صدا (mp4، m3u8، فایل‌های استاندارد) | ✅ کار می‌کند | جریان مستقیم با پشتیبانی Range/206 و جستجو |
+| صفحات تماشای یوتیوب | ✅ پخش‌کننده رسمی | ویدیو و تبلیغات با پخش‌کننده رسمی جاسازی‌شده |
+| ورود به حساب‌ها در سایت‌های دیگر | ⚠️ تا حد زیادی | تا جایی که سرویس مقصد بررسی‌های امنیتی IP اعمال نکند |
+| کپچای گوگل (صفحه «unusual traffic») | ❌ ساختاری | کپچا برای تأیید کلاینت واقعی طراحی شده و در هر پروکسی وب از کار می‌افتد |
+| web.telegram.org | ❌ ساختاری | اپلیکیشن روی WebSocket + Service Worker + IndexedDB سوار است که پروکسی HTTP قابل حمل آن‌ها نیست |
+| پلیرهای محافظت‌شده (SABR/PoToken مانند یوتیوب داخلی) | ❌ ساختاری | یوتیوب خودش استریم پروکسی‌شده را رد می‌کند؛ راه‌حل: پخش‌کننده رسمی جاسازی‌شده (بالا) |
 
 ### نصب
 1. از بخش [Releases](https://github.com/Tobeseuss/wordpress-GLPE/releases) فایل `glpe-viewer-x.y.z.zip` را دانلود کنید.
@@ -79,7 +91,7 @@ wordpress-GLPE/
 ```bash
 bash tools/guard.sh          # keyword guard must pass
 php tools/selftest.php       # tests must pass
-bash tools/package.sh 4.8.0  # build dist ZIP
+bash tools/package.sh 4.9.0  # build dist ZIP
 git commit + tag + push      # then publish GitHub Release with the ZIP
 ```
 Full checklist: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
