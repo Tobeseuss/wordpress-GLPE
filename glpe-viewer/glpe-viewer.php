@@ -3,7 +3,7 @@
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
  * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با قابلیت بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 4.9.0
+ * Version: 4.9.1
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '4.9.0');
+define('GLPE_VERSION', '4.9.1');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -284,6 +284,23 @@ class GLPE_Plugin {
 
             if (stripos($contentType, 'text/html') !== false) {
                 $body = $engine->rewriteHtml($body, $rewriteBase, $options);
+
+                // Destination-side anti-abuse walls (search captchas, CDN
+                // challenge pages) look like a dead viewer to visitors —
+                // "nothing happens". Show a clear notice that the block
+                // comes from the destination site, not from the viewer.
+                if (preg_match('#unusual traffic|/sorry/index|cf-chl|Just a moment|g-recaptcha|Attention Required#i', $body)) {
+                    $notice = '<div style="position:fixed;bottom:0;left:0;right:0;z-index:2147483646;'
+                        . 'background:#7f1d1d;color:#fecaca;font:12px Tahoma,sans-serif;padding:10px 16px;text-align:center;direction:rtl;">'
+                        . '⚠️ این صفحه توسط وب‌سایت مقصد نمایش داده شده است (بررسی ضد سوءاستفاده درباره IP سرور — کپچا یا چالش مرورگر). '
+                        . 'چند دقیقه دیگر دوباره تلاش کنید؛ این محدودیت به نمایشگر مربوط نیست.'
+                        . '</div>';
+                    if (stripos($body, '</body>') !== false) {
+                        $body = preg_replace('#</body>#i', $notice . '</body>', $body, 1);
+                    } else {
+                        $body .= $notice;
+                    }
+                }
             } elseif (stripos($contentType, 'text/css') !== false) {
                 $body = $engine->rewriteCss($body, $rewriteBase, $options);
             } elseif (stripos($contentType, 'javascript') !== false) {
