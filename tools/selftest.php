@@ -82,6 +82,9 @@ check('anchor untouched', $engine->makeViewUrl('#sec') === '#sec');
 check('no double wrap', $engine->makeViewUrl('https://site.test/?_glpe=1&l=abc') === 'https://site.test/?_glpe=1&l=abc');
 $s3 = $engine->makeViewUrl('https://x.com', null, ['encodeURL' => true, 'removeScripts' => true, 'showToolbar' => true]);
 check('flags appended', strpos($s3, 'ns=1') !== false && strpos($s3, 'nb=1') !== false, $s3);
+$s3m = $engine->makeViewUrl('https://x.com', null, ['encodeURL' => true, 'showToolbar' => true, 'mobileView' => true]);
+check('mobile flag appended', strpos($s3m, '&mb=1') !== false, $s3m);
+check('mobile flag off by default', strpos($s3, '&mb=1') === false, $s3);
 // Attribute values carry HTML entities ("&amp;") — decoding is required so
 // the destination receives real query fields (gmail sign-in regression).
 $s4 = $engine->makeViewUrl('/v3/signin/identifier?continue=https://mail.google.com/mail/u/0/&amp;dsh=S-1:2&amp;flowName=WebLiteSignIn', 'https://accounts.google.com/v3/signin/x', ['encodeURL' => true]);

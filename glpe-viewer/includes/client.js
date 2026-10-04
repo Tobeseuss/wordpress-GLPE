@@ -86,6 +86,7 @@
       if (ctx.st) flags += '&nt=1';
       if (ctx.tb) flags += '&nb=1';
       if (ctx.enc) flags += '&ec=1';
+      if (ctx.mb) flags += '&mb=1';
       return viewScript + sep + 'l=' + payload + flags;
     } catch(e) {
       return trimmed;

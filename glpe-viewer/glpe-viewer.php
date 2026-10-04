@@ -3,7 +3,7 @@
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
  * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با قابلیت بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 4.9.1
+ * Version: 4.10.0
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '4.9.1');
+define('GLPE_VERSION', '4.10.0');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -212,6 +212,7 @@ class GLPE_Plugin {
             'stripTitle'    => $this->viewFlag('nt', 'glpe_blank_title', '0'),
             'showToolbar'   => $this->viewFlag('nb', 'glpe_toolbar', '1'),
             'encodeURL'     => $this->viewFlag('ec', 'glpe_rewrite_links', '1'),
+            'mobileView'    => $this->viewFlag('mb', 'glpe_mobile_view', '0'),
             'tempSession'   => $tempCookies,
         ];
 
@@ -242,6 +243,17 @@ class GLPE_Plugin {
         }
         if (isset($_SERVER['CONTENT_TYPE'])) {
             $customHeaders['content-type'] = str_replace(["\r", "\n", "\0"], '', trim((string)$_SERVER['CONTENT_TYPE']));
+        }
+
+        // Mobile view: fetch destinations with a mobile identity so sites
+        // that vary their content by device serve the mobile layout. Safari
+        // on iOS sends no client hints, so the desktop hints are dropped
+        // instead of contradicting the mobile user agent.
+        if (!empty($options['mobileView'])) {
+            $customHeaders['user-agent'] = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) '
+                . 'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
+            unset($customHeaders['sec-ch-ua'], $customHeaders['sec-ch-ua-mobile'], $customHeaders['sec-ch-ua-platform']);
+            $customHeaders['accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
         }
 
         try {
@@ -561,6 +573,9 @@ class GLPE_Plugin {
                         </label>
                         <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
                             <input type="checkbox" name="ni" value="1" <?php checked($defaultNi); ?>> بدون تصاویر (No Images)
+                        </label>
+                        <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                            <input type="checkbox" name="mb" value="1"> 📱 نسخه موبایل (Mobile)
                         </label>
                         <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
                             <input type="checkbox" name="tp" value="1"> نشست موقت (Temp Session)

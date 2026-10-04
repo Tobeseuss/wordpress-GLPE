@@ -99,6 +99,7 @@ class GLPE_Engine {
         if (!empty($options['stripTitle']))    $viewUrl .= '&nt=1';
         if (!empty($options['showToolbar']))   $viewUrl .= '&nb=1';
         if (!empty($options['encodeURL']))     $viewUrl .= '&ec=1';
+        if (!empty($options['mobileView']))    $viewUrl .= '&mb=1';
 
         return $viewUrl;
     }
@@ -230,6 +231,7 @@ class GLPE_Engine {
         $nsChecked = !empty($options['removeScripts']) ? 'checked' : '';
         $niChecked = !empty($options['removeImages']) ? 'checked' : '';
         $ntChecked = !empty($options['stripTitle']) ? 'checked' : '';
+        $mbChecked = !empty($options['mobileView']) ? 'checked' : '';
         $gw = esc_attr($this->viewScript);
 
         return '
@@ -239,11 +241,12 @@ class GLPE_Engine {
                 <a href="' . esc_attr($homeUrl) . '" style="color:#38bdf8; text-decoration:none; font-weight:bold; display:flex; align-items:center; gap:4px; padding:4px 8px; border-radius:6px; background:#1e293b; white-space:nowrap;">
                     🏠 صفحه اصلی
                 </a>
-                <form action="' . $gw . '" method="GET" style="display:flex; gap:6px; flex:1; margin:0;" onsubmit="event.preventDefault(); var gw=\'' . $gw . '\'; var sep = gw.indexOf(\'?\') !== -1 ? \'&\' : \'?\'; var v = this.l.value; if(!v.match(/^https?:/i)) v=\'https://\'+v; var enc = this.ec && this.ec.value==\'1\'; var bytes = unescape(encodeURIComponent(v)); var out = []; var key = (window.__glpe_ctx__ && window.__glpe_ctx__.k) || \'glpe-local-key\'; for (var i = 0; i < bytes.length; i++) { out.push(String.fromCharCode(bytes.charCodeAt(i) ^ key.charCodeAt(i % key.length))); } var payload = enc ? btoa(out.join(\'\')).replace(/\\+/g, \'-\').replace(/\\//g, \'_\').replace(/=+$/, \'\') : encodeURIComponent(v); var q = sep + \'l=\' + payload + \'&nb=1\' + (enc ? \'&ec=1\' : \'\'); ' . ($nsChecked ? 'q+=\'&ns=1\';' : '') . ' ' . ($niChecked ? 'q+=\'&ni=1\';' : '') . ' ' . ($ntChecked ? 'q+=\'&nt=1\';' : '') . ' window.location.href = gw + q;">
+                <form action="' . $gw . '" method="GET" style="display:flex; gap:6px; flex:1; margin:0;" onsubmit="event.preventDefault(); var gw=\'' . $gw . '\'; var sep = gw.indexOf(\'?\') !== -1 ? \'&\' : \'?\'; var v = this.l.value; if(!v.match(/^https?:/i)) v=\'https://\'+v; var enc = this.ec && this.ec.value==\'1\'; var bytes = unescape(encodeURIComponent(v)); var out = []; var key = (window.__glpe_ctx__ && window.__glpe_ctx__.k) || \'glpe-local-key\'; for (var i = 0; i < bytes.length; i++) { out.push(String.fromCharCode(bytes.charCodeAt(i) ^ key.charCodeAt(i % key.length))); } var payload = enc ? btoa(out.join(\'\')).replace(/\\+/g, \'-\').replace(/\\//g, \'_\').replace(/=+$/, \'\') : encodeURIComponent(v); var q = sep + \'l=\' + payload + \'&nb=1\' + (enc ? \'&ec=1\' : \'\'); ' . ($nsChecked ? 'q+=\'&ns=1\';' : '') . ' ' . ($niChecked ? 'q+=\'&ni=1\';' : '') . ' ' . ($ntChecked ? 'q+=\'&nt=1\';' : '') . ' ' . ($mbChecked ? 'q+=\'&mb=1\';' : '') . ' window.location.href = gw + q;">
                     <input type="text" name="l" value="' . $rawTarget . '" style="flex:1; background:#1e293b; border:1px solid #475569; color:#f8fafc; padding:4px 10px; border-radius:6px; font-size:12px; font-family:monospace; outline:none;" placeholder="https://...">
                     <input type="hidden" name="_glpe" value="1">
                     <input type="hidden" name="nb" value="1">
                     ' . ($ecChecked ? '<input type="hidden" name="ec" value="1">' : '') . '
+                    ' . ($mbChecked ? '<input type="hidden" name="mb" value="1">' : '') . '
                     <button type="submit" style="background:#2563eb; color:#fff; border:none; padding:4px 12px; border-radius:6px; font-weight:bold; cursor:pointer; font-size:12px; white-space:nowrap;">
                         برو ↵
                     </button>
@@ -261,6 +264,9 @@ class GLPE_Engine {
                 </label>
                 <label style="cursor:pointer; display:flex; align-items:center; gap:3px;">
                     <input type="checkbox" ' . $niChecked . ' onclick="window.__glpeToggle(this,\'ni\')"> بدون تصویر
+                </label>
+                <label style="cursor:pointer; display:flex; align-items:center; gap:3px;">
+                    <input type="checkbox" ' . $mbChecked . ' onclick="window.__glpeToggle(this,\'mb\')"> 📱 نسخه موبایل
                 </label>
                 <button type="button" onclick="window.__toggleGlpeBar()" style="background:#334155; color:#94a3b8; border:none; padding:3px 8px; border-radius:4px; cursor:pointer;" title="بستن نوار ناوبری">
                     ✕
@@ -479,6 +485,7 @@ class GLPE_Engine {
                 'rs'  => $removeScripts,
                 'ri'  => $removeImages,
                 'st'  => $stripTitle,
+                'mb'  => !empty($options['mobileView']),
             ];
             $injection = "\n<script>\n" .
                 "window.__glpe_ctx__ = " . json_encode($ctxConfig) . ";\n" .
