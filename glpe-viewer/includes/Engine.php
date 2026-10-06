@@ -13,6 +13,7 @@ class GLPE_Engine {
     private $cookies;
     private $viewScript;
     private $ownHost = '';
+    private $srcdocDepth = 0;
     private $userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
     public function __construct($viewScript = '', $isTempCookies = false) {
@@ -87,8 +88,10 @@ class GLPE_Engine {
             }
         }
 
-        $isEncoded = !empty($options['encodeURL']);
-        $payload = $isEncoded ? GLPE_Codec::encode($resolved) : rawurlencode($resolved);
+        // Core tenet — every destination reference is wrapped into an opaque
+        // per-site token. Readable (percent-encoded) destinations are never
+        // emitted, unconditionally: there is no optional mode anymore.
+        $payload = GLPE_Codec::encode($resolved);
 
         $sep = (strpos($this->viewScript, '?') !== false) ? '&' : '?';
         $viewUrl = $this->viewScript . $sep . 'l=' . $payload;
@@ -98,7 +101,6 @@ class GLPE_Engine {
         if (!empty($options['removeImages']))  $viewUrl .= '&ni=1';
         if (!empty($options['stripTitle']))    $viewUrl .= '&nt=1';
         if (!empty($options['showToolbar']))   $viewUrl .= '&nb=1';
-        if (!empty($options['encodeURL']))     $viewUrl .= '&ec=1';
         if (!empty($options['mobileView']))    $viewUrl .= '&mb=1';
 
         return $viewUrl;
@@ -226,8 +228,9 @@ class GLPE_Engine {
     private function generateToolbarHtml($targetUrl, $options = []) {
         $slug = trim((string)(function_exists('get_option') ? get_option('glpe_slug', 'view') : 'view'), '/');
         $homeUrl = home_url('/' . ($slug !== '' ? $slug : 'view') . '/');
-        $rawTarget = htmlspecialchars($targetUrl, ENT_QUOTES, 'UTF-8');
-        $ecChecked = !empty($options['encodeURL']) ? 'checked' : '';
+        // The readable destination is deliberately NOT echoed into the markup
+        // (core tenet: no readable address in any exchange); the Go box starts
+        // empty and every submission is wrapped by the inline handler below.
         $nsChecked = !empty($options['removeScripts']) ? 'checked' : '';
         $niChecked = !empty($options['removeImages']) ? 'checked' : '';
         $ntChecked = !empty($options['stripTitle']) ? 'checked' : '';
@@ -241,11 +244,10 @@ class GLPE_Engine {
                 <a href="' . esc_attr($homeUrl) . '" style="color:#38bdf8; text-decoration:none; font-weight:bold; display:flex; align-items:center; gap:4px; padding:4px 8px; border-radius:6px; background:#1e293b; white-space:nowrap;">
                     🏠 صفحه اصلی
                 </a>
-                <form action="' . $gw . '" method="GET" style="display:flex; gap:6px; flex:1; margin:0;" onsubmit="event.preventDefault(); var gw=\'' . $gw . '\'; var sep = gw.indexOf(\'?\') !== -1 ? \'&\' : \'?\'; var v = this.l.value; if(!v.match(/^https?:/i)) v=\'https://\'+v; var enc = this.ec && this.ec.value==\'1\'; var bytes = unescape(encodeURIComponent(v)); var out = []; var key = (window.__glpe_ctx__ && window.__glpe_ctx__.k) || \'glpe-local-key\'; for (var i = 0; i < bytes.length; i++) { out.push(String.fromCharCode(bytes.charCodeAt(i) ^ key.charCodeAt(i % key.length))); } var payload = enc ? btoa(out.join(\'\')).replace(/\\+/g, \'-\').replace(/\\//g, \'_\').replace(/=+$/, \'\') : encodeURIComponent(v); var q = sep + \'l=\' + payload + \'&nb=1\' + (enc ? \'&ec=1\' : \'\'); ' . ($nsChecked ? 'q+=\'&ns=1\';' : '') . ' ' . ($niChecked ? 'q+=\'&ni=1\';' : '') . ' ' . ($ntChecked ? 'q+=\'&nt=1\';' : '') . ' ' . ($mbChecked ? 'q+=\'&mb=1\';' : '') . ' window.location.href = gw + q;">
-                    <input type="text" name="l" value="' . $rawTarget . '" style="flex:1; background:#1e293b; border:1px solid #475569; color:#f8fafc; padding:4px 10px; border-radius:6px; font-size:12px; font-family:monospace; outline:none;" placeholder="https://...">
+                <form action="' . $gw . '" method="GET" style="display:flex; gap:6px; flex:1; margin:0;" onsubmit="event.preventDefault(); var gw=\'' . $gw . '\'; var sep = gw.indexOf(\'?\') !== -1 ? \'&\' : \'?\'; var v = this.l.value; if(!v.match(/^https?:/i)) v=\'https://\'+v; var bytes = unescape(encodeURIComponent(v)); var out = []; var key = (window.__glpe_ctx__ && window.__glpe_ctx__.k) || \'glpe-local-key\'; for (var i = 0; i < bytes.length; i++) { out.push(String.fromCharCode(bytes.charCodeAt(i) ^ key.charCodeAt(i % key.length))); } var payload = btoa(out.join(\'\')).replace(/\\+/g, \'-\').replace(/\\//g, \'_\').replace(/=+$/, \'\'); var q = sep + \'l=\' + payload + \'&nb=1\'; ' . ($nsChecked ? 'q+=\'&ns=1\';' : '') . ' ' . ($niChecked ? 'q+=\'&ni=1\';' : '') . ' ' . ($ntChecked ? 'q+=\'&nt=1\';' : '') . ' ' . ($mbChecked ? 'q+=\'&mb=1\';' : '') . ' window.location.href = gw + q;">
+                    <input type="text" name="l" value="" style="flex:1; background:#1e293b; border:1px solid #475569; color:#f8fafc; padding:4px 10px; border-radius:6px; font-size:12px; font-family:monospace; outline:none;" placeholder="https://...">
                     <input type="hidden" name="_glpe" value="1">
                     <input type="hidden" name="nb" value="1">
-                    ' . ($ecChecked ? '<input type="hidden" name="ec" value="1">' : '') . '
                     ' . ($mbChecked ? '<input type="hidden" name="mb" value="1">' : '') . '
                     <button type="submit" style="background:#2563eb; color:#fff; border:none; padding:4px 12px; border-radius:6px; font-weight:bold; cursor:pointer; font-size:12px; white-space:nowrap;">
                         برو ↵
@@ -253,9 +255,6 @@ class GLPE_Engine {
                 </form>
             </div>
             <div style="display:flex; align-items:center; gap:12px; font-size:11px; color:#cbd5e1; margin-right:12px;">
-                <label style="cursor:pointer; display:flex; align-items:center; gap:3px;">
-                    <input type="checkbox" ' . $ecChecked . ' onclick="window.__glpeToggle(this,\'ec\')"> بازنویسی پیوند
-                </label>
                 <label style="cursor:pointer; display:flex; align-items:center; gap:3px;">
                     <input type="checkbox" ' . $ntChecked . ' onclick="window.__glpeToggle(this,\'nt\')"> عنوان عمومی
                 </label>
@@ -315,7 +314,23 @@ class GLPE_Engine {
         $html = preg_replace('/(\btop\.location|\bparent\.location|\bwindow\.top\.location)/i', 'window.__safe_loc', $html);
 
         // 2. Remove framing restrictions declared in the document itself
-        $html = preg_replace('/<meta[^>]+http-equiv=[\'"]?(Content-Security-Policy|X-Frame-Options)[\'"]?[^>]*>/i', '', $html);
+        $html = preg_replace('/<meta[^>]+http-equiv=[\'"]?(Content-Security-Policy(-Report-Only)?|X-Frame-Options)[\'"]?[^>]*>/i', '', $html);
+
+        // 2a. Core tenet — nothing may load directly from a remote origin.
+        // A <base> marker would re-anchor unresolved references onto the real
+        // destination, so it is stripped outright.
+        $html = preg_replace('/<base\b[^>]*>/i', '', $html);
+
+        // 2b. Hyperlink audit beacons fire their own requests straight at the
+        // destination when a link is clicked — the attribute is removed.
+        $html = preg_replace('/\s+ping=(["\'])[^"\']*\1/i', '', $html);
+        $html = preg_replace('/\s+ping=[^\s>]+/i', '', $html);
+
+        // 2c. Integrity digests describe the ORIGINAL file, while rewritten
+        // documents legitimately differ — keeping the attribute would get the
+        // resource discarded by the browser, so it is stripped.
+        $html = preg_replace('/\s+integrity=(["\'])[^"\']*\1/i', '', $html);
+        $html = preg_replace('/\s+integrity=[^\s>]+/i', '', $html);
 
         // 3. Generic tab title
         if ($stripTitle) {
@@ -360,6 +375,12 @@ class GLPE_Engine {
             return '<' . $m[1] . $m[2] . 'src=' . $m[3] . $this->makeViewUrl($m[4], $targetUrl, $options) . $m[3] . $m[5] . '>';
         }, $html);
 
+        // 7a. <object data="..."> resolves exactly like a src attribute —
+        // left alone it would fetch the resource straight from the origin.
+        $html = preg_replace_callback('/<(object|embed)\b([^>]*?)\bdata=([\'"])(.*?)\3([^>]*)>/i', function($m) use ($targetUrl, $options) {
+            return '<' . $m[1] . $m[2] . 'data=' . $m[3] . $this->makeViewUrl($m[4], $targetUrl, $options) . $m[3] . $m[5] . '>';
+        }, $html);
+
         $html = preg_replace_callback('/<video\b([^>]*?)\bposter=([\'"])(.*?)\2([^>]*)>/i', function($m) use ($targetUrl, $options) {
             return '<video' . $m[1] . 'poster=' . $m[2] . $this->makeViewUrl($m[3], $targetUrl, $options) . $m[2] . $m[4] . '>';
         }, $html);
@@ -367,6 +388,12 @@ class GLPE_Engine {
         // 8. Anchors
         $html = preg_replace_callback('/<a\b([^>]*?)\bhref=([\'"])(.*?)\2([^>]*)>/i', function($m) use ($targetUrl, $options) {
             return '<a' . $m[1] . 'href=' . $m[2] . $this->makeViewUrl($m[3], $targetUrl, $options) . $m[2] . $m[4] . '>';
+        }, $html);
+
+        // 8a. Button/image submission overrides (formaction) steer the
+        // submission to a different endpoint — they must ride the gateway too.
+        $html = preg_replace_callback('/<(button|input)\b([^>]*?)\bformaction=([\'"])(.*?)\3([^>]*)>/i', function($m) use ($targetUrl, $options) {
+            return '<' . $m[1] . $m[2] . 'formaction=' . $m[3] . $this->makeViewUrl($m[4], $targetUrl, $options) . $m[3] . $m[5] . '>';
         }, $html);
 
         // 9. Forms.
@@ -411,18 +438,18 @@ class GLPE_Engine {
                 : $targetUrl;
             $remote = preg_replace('/[?#].*$/s', '', $remote);
 
-            $payload = !empty($options['encodeURL'])
-                ? GLPE_Codec::encode($remote)
-                : rawurlencode($remote);
+            // Core tenet — the endpoint travels as an opaque token only.
+            // Gateway-injected fields carry data-g so the client-side
+            // submission wrapper never forwards them to the destination.
+            $payload = GLPE_Codec::encode($remote);
 
-            $hidden = '<input type="hidden" name="_glpe" value="1">'
-                . '<input type="hidden" name="l" value="' . esc_attr($payload) . '">';
-            if (!empty($options['removeScripts'])) $hidden .= '<input type="hidden" name="ns" value="1">';
-            if (!empty($options['removeImages']))  $hidden .= '<input type="hidden" name="ni" value="1">';
-            if (!empty($options['stripTitle']))    $hidden .= '<input type="hidden" name="nt" value="1">';
-            if (!empty($options['showToolbar']))   $hidden .= '<input type="hidden" name="nb" value="1">';
-            if (!empty($options['encodeURL']))     $hidden .= '<input type="hidden" name="ec" value="1">';
-            if (!empty($options['tempSession']))   $hidden .= '<input type="hidden" name="tp" value="1">';
+            $hidden = '<input type="hidden" name="_glpe" value="1" data-g="1">'
+                . '<input type="hidden" name="l" value="' . esc_attr($payload) . '" data-g="1">';
+            if (!empty($options['removeScripts'])) $hidden .= '<input type="hidden" name="ns" value="1" data-g="1">';
+            if (!empty($options['removeImages']))  $hidden .= '<input type="hidden" name="ni" value="1" data-g="1">';
+            if (!empty($options['stripTitle']))    $hidden .= '<input type="hidden" name="nt" value="1" data-g="1">';
+            if (!empty($options['showToolbar']))   $hidden .= '<input type="hidden" name="nb" value="1" data-g="1">';
+            if (!empty($options['tempSession']))   $hidden .= '<input type="hidden" name="tp" value="1" data-g="1">';
 
             $attrs = trim(preg_replace('/\s+action=([\'"]).*?\1/i', '', $attrs));
             // Keep one separating space between the tag name and the first
@@ -473,13 +500,39 @@ class GLPE_Engine {
             return '<' . $m[1] . $m[2] . $m[3] . '=' . $m[4] . $this->makeViewUrl($m[5], $targetUrl, $options) . $m[4] . $m[6] . '>';
         }, $html);
 
+        // 15a. Inline event handlers (onclick="location='https://…'") carry
+        // references the browser would request directly — rewrite the URLs
+        // inside them exactly like inline script bodies.
+        $html = preg_replace_callback('/\s(on[a-z]+)=([\'"])(.*?)\2/is', function($m) use ($targetUrl, $options) {
+            return ' ' . $m[1] . '=' . $m[2] . $this->rewriteJs($m[3], $targetUrl, $options) . $m[2];
+        }, $html);
+
+        // 15b. srcdoc frames carry a whole nested document — its references
+        // must ride the gateway as well. The nested document is rewritten
+        // through the same pipeline (one level deep, without the toolbar).
+        if ($this->srcdocDepth === 0 && strpos($html, 'srcdoc=') !== false) {
+            $this->srcdocDepth++;
+            $html = preg_replace_callback('/<iframe\b([^>]*?)\bsrcdoc=(["\'])(.*?)\2/is', function($m) use ($targetUrl, $options) {
+                $inner = html_entity_decode($m[3], ENT_QUOTES | ENT_HTML5, 'UTF-8');
+                if (!is_string($inner) || $inner === '' || stripos($inner, '<') === false) {
+                    return $m[0];
+                }
+                $innerOptions = $options;
+                $innerOptions['showToolbar'] = false;
+                $rewritten = $this->rewriteHtml($inner, $targetUrl, $innerOptions);
+                return '<iframe' . $m[1] . 'srcdoc=' . $m[2] . esc_attr($rewritten) . $m[2];
+            }, $html);
+            $this->srcdocDepth--;
+        }
+
         // 16. Client-side companion script
         if (!$removeScripts) {
             $hookScript = file_get_contents(__DIR__ . '/client.js');
             $ctxConfig = [
-                'u'   => $targetUrl,
+                // Core tenet — even the companion configuration carries the
+                // destination as an opaque token; the client unwraps it.
+                'u'   => GLPE_Codec::encode($targetUrl),
                 'g'   => $this->viewScript,
-                'enc' => !empty($options['encodeURL']),
                 'k'   => GLPE_Codec::secret(),
                 'tb'  => $showToolbar,
                 'rs'  => $removeScripts,

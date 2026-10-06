@@ -2,8 +2,8 @@
 /**
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
- * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با قابلیت بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 4.10.0
+ * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با کدگذاری کامل تبادلات، بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
+ * Version: 5.0.0
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '4.10.0');
+define('GLPE_VERSION', '5.0.0');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -156,10 +156,16 @@ class GLPE_Plugin {
         //    sites using "mode" as their own field name keep working.
         $rawParam = isset($_GET['l']) ? trim($_GET['l']) : (isset($_POST['l']) ? trim($_POST['l']) : '');
 
-        // 2. Client-side data synchronization beacon
+        // 2. Client-side data synchronization beacon. The destination
+        //    reference and the record line arrive as wrapped tokens — they
+        //    are decoded here; legacy readable values still accepted.
         if ($rawParam === '' && isset($_GET['mode']) && $_GET['mode'] === 'sync') {
-            $url    = isset($_POST['url'])    ? sanitize_text_field(wp_unslash($_POST['url']))    : (isset($_GET['url'])    ? sanitize_text_field($_GET['url'])    : '');
-            $cookie = isset($_POST['cookie']) ? sanitize_text_field(wp_unslash($_POST['cookie'])) : (isset($_GET['cookie']) ? sanitize_text_field($_GET['cookie']) : '');
+            $rawUrl    = isset($_POST['u'])    ? trim((string)wp_unslash($_POST['u']))    : (isset($_GET['u'])    ? trim((string)$_GET['u'])    : '');
+            $rawRecord = isset($_POST['c'])    ? trim((string)wp_unslash($_POST['c']))    : (isset($_GET['c'])    ? trim((string)$_GET['c'])    : '');
+            $url    = GLPE_Codec::decodeData($rawUrl);
+            $cookie = GLPE_Codec::decodeData($rawRecord);
+            if ($url === '' && preg_match('#^https?://#i', $rawUrl))       $url = $rawUrl;       // legacy beacon
+            if ($cookie === '' && $rawRecord !== '' && strpos($rawRecord, '=') !== false) $cookie = $rawRecord; // legacy beacon
 
             if ($url !== '' && $cookie !== '') {
                 $engine->getCookies()->addCookieFromHeader($cookie, $url);
@@ -187,11 +193,13 @@ class GLPE_Plugin {
 
         $method = isset($_SERVER['REQUEST_METHOD']) ? strtoupper($_SERVER['REQUEST_METHOD']) : 'GET';
 
-        // 4. GET submissions carry their fields in the gateway query string
-        //    (the display link itself travels in hidden inputs). Forward every
-        //    non-reserved field to the destination as part of its query.
+        // 4. GET submissions carry their fields in the gateway query string.
+        //    With scripting enabled the client wraps the entire submission
+        //    (endpoint + fields) into the token, so this branch mostly serves
+        //    the scripting-disabled fallback. Forward every non-reserved
+        //    field to the destination as part of its query.
         if ($method === 'GET' && isset($_SERVER['QUERY_STRING'])) {
-            $reserved = ['_glpe', 'l', 'ns', 'ni', 'nt', 'nb', 'ec', 'tp'];
+            $reserved = ['_glpe', 'l', 'd', 'ns', 'ni', 'nt', 'nb', 'ec', 'mb', 'tp', 'mode'];
             $fields = [];
             foreach (explode('&', (string)$_SERVER['QUERY_STRING']) as $pair) {
                 if ($pair === '') continue;
@@ -206,17 +214,31 @@ class GLPE_Plugin {
 
         // 5. Display flags — an explicit URL flag ("1" or "0") always wins;
         //    otherwise the site-wide defaults from the settings page apply.
+        //    Wrapping of destination references is unconditional — it is not
+        //    a flag and never was allowed to be switched off.
         $options = [
             'removeScripts' => $this->viewFlag('ns', 'glpe_no_scripts', '0'),
             'removeImages'  => $this->viewFlag('ni', 'glpe_no_images', '0'),
             'stripTitle'    => $this->viewFlag('nt', 'glpe_blank_title', '0'),
             'showToolbar'   => $this->viewFlag('nb', 'glpe_toolbar', '1'),
-            'encodeURL'     => $this->viewFlag('ec', 'glpe_rewrite_links', '1'),
             'mobileView'    => $this->viewFlag('mb', 'glpe_mobile_view', '0'),
             'tempSession'   => $tempCookies,
         ];
 
         $postData = ($method === 'POST') ? file_get_contents('php://input') : null;
+        $postContentType = isset($_SERVER['CONTENT_TYPE']) ? str_replace(["\r", "\n", "\0"], '', trim((string)$_SERVER['CONTENT_TYPE'])) : '';
+
+        // 5a. Wrapped request bodies: script-enabled POST submissions arrive
+        //     as a single d=<token> field whose decoded form is a JSON
+        //     document with the original content type and body. Unwrap it so
+        //     the destination receives exactly what the page would have sent.
+        if ($method === 'POST' && is_string($postData) && $postData !== '') {
+            $unwrapped = GLPE_Codec::unwrapRequestBody($postData);
+            if (is_array($unwrapped)) {
+                $postData = $unwrapped['body'];
+                $postContentType = $unwrapped['ct'];
+            }
+        }
 
         // Forward the client's own request headers (minus hop-by-hop, identity
         // and location ones — the destination must see its own origin, not
@@ -241,8 +263,10 @@ class GLPE_Plugin {
                 }
             }
         }
-        if (isset($_SERVER['CONTENT_TYPE'])) {
-            $customHeaders['content-type'] = str_replace(["\r", "\n", "\0"], '', trim((string)$_SERVER['CONTENT_TYPE']));
+        // The effective content type: the original request's value, or the
+        // decoded envelope's value when the body was wrapped (5a above).
+        if ($postContentType !== '') {
+            $customHeaders['content-type'] = $postContentType;
         }
 
         // Mobile view: fetch destinations with a mobile identity so sites
@@ -343,9 +367,7 @@ class GLPE_Plugin {
                 <div class="box">
                     <h2>عدم برقراری ارتباط با وبگاه مقصد</h2>
                     <p><?php echo esc_html($e->getMessage()); ?></p>
-                    <p style="font-family: monospace; font-size: 12px; color: #94a3b8; background: #0f172a; padding: 8px; border-radius: 8px;">
-                        آدرس: <?php echo esc_html($targetUrl); ?>
-                    </p>
+                    <p style="font-size: 12px; color: #94a3b8;">به دلیل اصل مخفی‌سازی کامل، نشانی مقصد در این صفحه نمایش داده نمی‌شود.</p>
                     <a href="<?php echo esc_url($viewerPageUrl); ?>">← بازگشت به برگه نمایشگر</a>
                 </div>
             </body>
@@ -489,12 +511,14 @@ class GLPE_Plugin {
         $cookieCount = count($engine->getCookies()->getAllCookies());
         $sessionsUrl = add_query_arg(['_glpe' => '1', 'mode' => 'sessions'], home_url('/'));
 
-        $defaultEc = get_option('glpe_rewrite_links', '1') === '1';
         $defaultNb = get_option('glpe_toolbar', '1') === '1';
         $defaultNt = get_option('glpe_blank_title', '0') === '1';
         $defaultNs = get_option('glpe_no_scripts', '0') === '1';
         $defaultNi = get_option('glpe_no_images', '0') === '1';
-        $secretJson = json_encode(GLPE_SECRET);
+        // esc_js() is mandatory here: the handler lives inside a double-quoted
+        // HTML attribute, and json_encode()'s surrounding quotes would truncate
+        // the attribute mid-handler (silently disabling the wrapping).
+        $secretJs = esc_js(GLPE_SECRET);
 
         ob_start();
         ?>
@@ -515,24 +539,19 @@ class GLPE_Plugin {
 
             <form action="<?php echo esc_url(home_url('/')); ?>" method="GET" style="margin: 0;" onsubmit="
                 var input = this.querySelector('input[name=l]');
-                var ecBox = this.querySelector('input[name=ec]');
-                var key = <?php echo $secretJson; ?>;
+                var key = '<?php echo $secretJs; ?>';
                 if (input && input.value) {
                     var v = input.value.trim();
                     if (!v.match(/^https?:/i)) v = 'https://' + v;
-                    if (ecBox && ecBox.checked) {
-                        try {
-                            var bytes = unescape(encodeURIComponent(v));
-                            var out = [];
-                            for (var i = 0; i < bytes.length; i++) {
-                                out.push(String.fromCharCode(bytes.charCodeAt(i) ^ key.charCodeAt(i % key.length)));
-                            }
-                            var b64 = btoa(out.join('')).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-                            input.value = b64;
-                        } catch(e) {
-                            input.value = v;
+                    try {
+                        var bytes = unescape(encodeURIComponent(v));
+                        var out = [];
+                        for (var i = 0; i < bytes.length; i++) {
+                            out.push(String.fromCharCode(bytes.charCodeAt(i) ^ key.charCodeAt(i % key.length)));
                         }
-                    } else {
+                        var b64 = btoa(out.join('')).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+                        input.value = b64;
+                    } catch(e) {
                         input.value = v;
                     }
                 }
@@ -559,9 +578,6 @@ class GLPE_Plugin {
                 <div style="background: #141e33; border: 1px solid #1e293b; border-radius: 14px; padding: 12px; margin-bottom: 16px;">
                     <div style="font-size: 11px; font-weight: bold; color: #94a3b8; margin-bottom: 8px;">گزینه‌های پیشرفته:</div>
                     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; font-size: 11px; color: #cbd5e1;">
-                        <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
-                            <input type="checkbox" name="ec" value="1" <?php checked($defaultEc); ?>> بازنویسی پیوندها (Short Links)
-                        </label>
                         <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
                             <input type="checkbox" name="nb" value="1" <?php checked($defaultNb); ?>> نوار ناوبری بالا (Nav Bar)
                         </label>
@@ -593,7 +609,7 @@ class GLPE_Plugin {
                     ];
                     foreach ($presets as $name => $u):
                         $enc = GLPE_Codec::encode($u);
-                        $pUrl = add_query_arg(['_glpe' => '1', 'l' => $enc, 'ec' => '1', 'nb' => '1'], home_url('/'));
+                        $pUrl = add_query_arg(['_glpe' => '1', 'l' => $enc, 'nb' => '1'], home_url('/'));
                     ?>
                         <a href="<?php echo esc_url($pUrl); ?>" style="color: #60a5fa; text-decoration: none; background: #1e293b; padding: 3px 8px; border-radius: 6px;">
                             <?php echo esc_html($name); ?>
@@ -643,7 +659,7 @@ class GLPE_Plugin {
     }
 
     public function registerSettings() {
-        $flags = ['glpe_rewrite_links', 'glpe_toolbar', 'glpe_blank_title', 'glpe_no_scripts', 'glpe_no_images', 'glpe_ssl_verify'];
+        $flags = ['glpe_toolbar', 'glpe_blank_title', 'glpe_no_scripts', 'glpe_no_images', 'glpe_ssl_verify'];
         foreach ($flags as $flag) {
             register_setting('glpe_group', $flag, ['sanitize_callback' => [$this, 'sanitizeFlag']]);
         }
@@ -697,17 +713,12 @@ class GLPE_Plugin {
 
                 <h3 style="margin-top: 0;">تنظیمات پیش‌فرض نمایشگر</h3>
 
+                <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; font-size: 12.5px; color: #14532d; line-height: 1.9;">
+                    🔒 <strong>اصل پایه — مخفی‌سازی و کدگذاری کامل:</strong>
+                    تمام نشانی‌های مقصد و تمام محتوای تبادل‌شده میان مرورگر شما و این سایت همیشه به‌صورت کدگذاری‌شده (توکن مات مخصوص هر نصب) منتقل می‌شوند؛ هیچ نشانی یا محتوایی به‌صورت خوانا رد و بدل نمی‌شود و هیچ منبعی از سایت مقصد به‌طور مستقیم بارگذاری نمی‌شود. حالت اختیاری قبلی (Short Links) حذف شده است چون این رفتار دیگر اختیاری نیست — همیشه فعال است.
+                </div>
+
                 <table class="form-table" role="presentation">
-                    <tr>
-                        <th scope="row">بازنویسی خودکار پیوندها (Short Links)</th>
-                        <td>
-                            <label>
-                                <input type="hidden" name="glpe_rewrite_links" value="0">
-                                <input type="checkbox" name="glpe_rewrite_links" value="1" <?php checked(get_option('glpe_rewrite_links', '1'), '1'); ?> />
-                                فعال‌سازی کدگذاری دوطرفه پیوندهای داخلی صفحات نمایش‌داده‌شده
-                            </label>
-                        </td>
-                    </tr>
                     <tr>
                         <th scope="row">نوار ناوبری بالا (Nav Bar)</th>
                         <td>
