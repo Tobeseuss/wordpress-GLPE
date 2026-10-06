@@ -228,9 +228,13 @@ class GLPE_Engine {
     private function generateToolbarHtml($targetUrl, $options = []) {
         $slug = trim((string)(function_exists('get_option') ? get_option('glpe_slug', 'view') : 'view'), '/');
         $homeUrl = home_url('/' . ($slug !== '' ? $slug : 'view') . '/');
-        // The readable destination is deliberately NOT echoed into the markup
-        // (core tenet: no readable address in any exchange); the Go box starts
-        // empty and every submission is wrapped by the inline handler below.
+        // Core tenet: the readable destination is never rendered into the
+        // markup — no readable address may ride any exchange between browser
+        // and server. The Go box starts empty server-side; client.js decodes
+        // the token already sitting in the address bar and fills the box
+        // locally, so the current-address display lives only in the user's
+        // browser and the rebuilt string never travels back. Every submission
+        // from the box is wrapped by the inline handler below.
         $nsChecked = !empty($options['removeScripts']) ? 'checked' : '';
         $niChecked = !empty($options['removeImages']) ? 'checked' : '';
         $ntChecked = !empty($options['stripTitle']) ? 'checked' : '';
@@ -245,7 +249,7 @@ class GLPE_Engine {
                     🏠 صفحه اصلی
                 </a>
                 <form action="' . $gw . '" method="GET" style="display:flex; gap:6px; flex:1; margin:0;" onsubmit="event.preventDefault(); var gw=\'' . $gw . '\'; var sep = gw.indexOf(\'?\') !== -1 ? \'&\' : \'?\'; var v = this.l.value; if(!v.match(/^https?:/i)) v=\'https://\'+v; var bytes = unescape(encodeURIComponent(v)); var out = []; var key = (window.__glpe_ctx__ && window.__glpe_ctx__.k) || \'glpe-local-key\'; for (var i = 0; i < bytes.length; i++) { out.push(String.fromCharCode(bytes.charCodeAt(i) ^ key.charCodeAt(i % key.length))); } var payload = btoa(out.join(\'\')).replace(/\\+/g, \'-\').replace(/\\//g, \'_\').replace(/=+$/, \'\'); var q = sep + \'l=\' + payload + \'&nb=1\'; ' . ($nsChecked ? 'q+=\'&ns=1\';' : '') . ' ' . ($niChecked ? 'q+=\'&ni=1\';' : '') . ' ' . ($ntChecked ? 'q+=\'&nt=1\';' : '') . ' ' . ($mbChecked ? 'q+=\'&mb=1\';' : '') . ' window.location.href = gw + q;">
-                    <input type="text" name="l" value="" style="flex:1; background:#1e293b; border:1px solid #475569; color:#f8fafc; padding:4px 10px; border-radius:6px; font-size:12px; font-family:monospace; outline:none;" placeholder="https://...">
+                    <input type="text" name="l" value="" autocomplete="off" autocapitalize="off" spellcheck="false" style="flex:1; background:#1e293b; border:1px solid #475569; color:#f8fafc; padding:4px 10px; border-radius:6px; font-size:12px; font-family:monospace; outline:none;" placeholder="https://...">
                     <input type="hidden" name="_glpe" value="1">
                     <input type="hidden" name="nb" value="1">
                     ' . ($mbChecked ? '<input type="hidden" name="mb" value="1">' : '') . '

@@ -3,7 +3,7 @@
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
  * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با کدگذاری کامل تبادلات، بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 5.0.0
+ * Version: 5.1.0
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '5.0.0');
+define('GLPE_VERSION', '5.1.0');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -714,8 +714,8 @@ class GLPE_Plugin {
                 <h3 style="margin-top: 0;">تنظیمات پیش‌فرض نمایشگر</h3>
 
                 <div style="background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 10px; padding: 12px 16px; margin-bottom: 16px; font-size: 12.5px; color: #14532d; line-height: 1.9;">
-                    🔒 <strong>اصل پایه — مخفی‌سازی و کدگذاری کامل:</strong>
-                    تمام نشانی‌های مقصد و تمام محتوای تبادل‌شده میان مرورگر شما و این سایت همیشه به‌صورت کدگذاری‌شده (توکن مات مخصوص هر نصب) منتقل می‌شوند؛ هیچ نشانی یا محتوایی به‌صورت خوانا رد و بدل نمی‌شود و هیچ منبعی از سایت مقصد به‌طور مستقیم بارگذاری نمی‌شود. حالت اختیاری قبلی (Short Links) حذف شده است چون این رفتار دیگر اختیاری نیست — همیشه فعال است.
+                    🔒 <strong>اصل پایه — مخفی‌سازی کامل تبادل‌ها:</strong>
+                    تمام نشانی‌های مقصد و تمام محتوای تبادل‌شده میان مرورگر شما و سرور همیشه به‌صورت کدگذاری‌شده (توکن مات مخصوص هر نصب) منتقل می‌شوند؛ هیچ نشانی یا محتوایی به‌صورت خوانا روی خط رد و بدل نمی‌شود و هیچ منبعی از سایت مقصد به‌طور مستقیم بارگذاری نمی‌شود. نشانی صفحهٔ فعلی فقط «در مرورگر خودِ کاربر» نمایش داده می‌شود — جاوااسکریپت افزونه آن را محلی از روی توکن نوار آدرس بازسازی می‌کند و همین مقدار بازسازی‌شده هرگز در هیچ درخواست یا پاسخی منتقل نمی‌گردد. حالت اختیاری قبلی (Short Links) حذف شده است چون این رفتار دیگر اختیاری نیست — همیشه فعال است.
                 </div>
 
                 <table class="form-table" role="presentation">
@@ -725,7 +725,7 @@ class GLPE_Plugin {
                             <label>
                                 <input type="hidden" name="glpe_toolbar" value="0">
                                 <input type="checkbox" name="glpe_toolbar" value="1" <?php checked(get_option('glpe_toolbar', '1'), '1'); ?> />
-                                نمایش نوار ناوبری شناور بالای صفحه با قابلیت جستجوی جدید و دکمه صفحه اصلی
+                                نمایش نوار ناوبری شناور بالای صفحه با قابلیت جستجوی جدید، دکمه صفحه اصلی و نمایش محلی نشانی صفحهٔ فعلی (فقط در مرورگر کاربر)
                             </label>
                         </td>
                     </tr>

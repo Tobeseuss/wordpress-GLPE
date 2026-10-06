@@ -465,7 +465,9 @@
         if (!protoDesc || !protoDesc.configurable || typeof protoDesc.value !== 'function') return;
         var nativeFn = protoDesc.value;
         var wrapped = function(state, title, url) {
-          return nativeFn.call(this, state, title, normalizeNavUrl(url));
+          var r = nativeFn.call(this, state, title, normalizeNavUrl(url));
+          try { syncBarAddress(); } catch (e) {}
+          return r;
         };
         Object.defineProperty(History.prototype, key, {
           value: wrapped, writable: protoDesc.writable !== false, configurable: true
@@ -589,6 +591,54 @@
     });
     observer.observe(document.documentElement, { childList: true, subtree: true });
   } catch(e) {}
+
+  // 8a. Current-address display — strictly local.
+  // Refined tenet: the readable destination MAY be shown inside the user's
+  // own browser, but it must NEVER ride an exchange between browser and
+  // server. The server renders no readable destination into the markup;
+  // instead the opaque token already sitting in the address bar is decoded
+  // here, locally, and painted into the navigation box. The rebuilt string
+  // never travels back — submissions from the box are re-wrapped by the
+  // inline handler embedded in the bar itself.
+  var lastBarAddress = '';
+  function syncBarAddress() {
+    try {
+      var bar = document.getElementById('__glpe_bar');
+      if (!bar) return;
+      var input = bar.querySelector('input[name="l"]');
+      if (!input) return;
+      var m = String(window.location.href).match(/[?&]l=([A-Za-z0-9_-]+)/);
+      var dest = m ? cipherDecode(m[1]) : '';
+      if (!dest) dest = currentTargetUrl || '';
+      if (!dest) return;
+      if (document.activeElement === input) return; // never clobber typing
+      input.value = dest;
+      lastBarAddress = dest;
+    } catch (e) {}
+  }
+  try {
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', syncBarAddress);
+    } else {
+      syncBarAddress();
+    }
+    window.addEventListener('popstate', syncBarAddress);
+    // Back/forward restores from the back-forward cache skip DOMContentLoaded
+    // and popstate (different document) — pageshow is the only hook there.
+    window.addEventListener('pageshow', syncBarAddress);
+  } catch (e) {}
+  // Typing aid: focusing the box while it still shows the current address
+  // selects the whole value, so the visitor can overwrite it in one stroke.
+  try {
+    document.addEventListener('focusin', function(e) {
+      try {
+        var t = e.target;
+        if (!t || t.tagName !== 'INPUT' || t.name !== 'l') return;
+        if (!(t.closest && t.closest('#__glpe_bar'))) return;
+        if (t.value === lastBarAddress) t.select();
+      } catch (err) {}
+    }, true);
+  } catch (e) {}
 
   // 8. Navigation bar toggle
   window.__toggleGlpeBar = function() {

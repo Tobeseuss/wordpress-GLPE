@@ -311,5 +311,36 @@ check('ctx config carries no readable destination', $ctxLine !== '' && strpos($c
 check('ctx config has no enc key', strpos($ctxLine, '"enc"') === false, $ctxLine);
 check('ctx destination token decodes back', (bool)preg_match('/"u":"([A-Za-z0-9_-]+)"/', $ctxLine, $mCtx) && GLPE_Codec::decode($mCtx[1]) === 'https://target-site.test/page', isset($mCtx[1]) ? GLPE_Codec::decode($mCtx[1]) : $ctxLine);
 
+echo "\n== 14. Local current-address display (client-side only, v5.1.0) ==\n";
+$tb2 = $engine->rewriteHtml('<html><body>x</body></html>', 'https://target-site.test/page?q=1', ['showToolbar' => true]);
+check('server markup ships an empty Go box', (bool)preg_match('/<input type="text" name="l" value=""/', $tb2));
+check('Go box disables autocomplete history', strpos($tb2, 'autocomplete="off"') !== false);
+check('server markup still carries no readable destination', strpos($tb2, 'target-site.test') === false);
+$jsSrc = (string)file_get_contents($root . '/glpe-viewer/includes/client.js');
+check('client syncBarAddress exists', strpos($jsSrc, 'function syncBarAddress()') !== false);
+check('display is decoded locally from the address-bar token', strpos($jsSrc, 'match(/[?&]l=([A-Za-z0-9_-]+)/)') !== false && strpos($jsSrc, 'cipherDecode(m[1])') !== false);
+check('display refreshes after SPA history pushes', substr_count($jsSrc, 'try { syncBarAddress(); } catch (e) {}') >= 1);
+check('display refreshes on back/forward + bfcache restores', strpos($jsSrc, "addEventListener('popstate', syncBarAddress)") !== false && strpos($jsSrc, "addEventListener('pageshow', syncBarAddress)") !== false);
+check('focused Go box selects the stale address for overwrite', strpos($jsSrc, "'focusin'") !== false && strpos($jsSrc, 't.select()') !== false);
+check('rebuilt address is never transmitted', strpos($jsSrc, 'lastBarAddress') !== false && preg_match('/(send|beacon)\([^)]*lastBarAddress/', $jsSrc) === 0);
+// Wire parity: a token minted by PHP must decode to the original with the
+// browser-side algorithm too — this is exactly what the local display does.
+$parityUrl = 'https://display-parity.test/p?a=1&b=%D8%AF%D9%88';
+$parityToken = GLPE_Codec::encode($parityUrl);
+$nodeBin = trim((string)@shell_exec('command -v node 2>/dev/null'));
+if ($nodeBin !== '') {
+    $nodeScript = 'const t=process.argv[1],k=process.argv[2];'
+        . 'const b=t.replace(/-/g,"+").replace(/_/g,"/");'
+        . 'const raw=Buffer.from(b,"base64");let o="";'
+        . 'for(let i=0;i<raw.length;i++){o+=String.fromCharCode(raw[i]^k.charCodeAt(i%k.length));}'
+        . 'process.stdout.write(Buffer.from(o,"binary").toString("utf8"));';
+    $parityOut = (string)@shell_exec(
+        'node -e ' . escapeshellarg($nodeScript) . ' ' . escapeshellarg($parityToken) . ' ' . escapeshellarg(GLPE_Codec::secret()) . ' 2>/dev/null'
+    );
+    check('PHP token decodes back via browser-side algorithm', trim($parityOut) === $parityUrl, $parityOut);
+} else {
+    echo "  SKIP  PHP token decodes back via browser-side algorithm (node not available)\n";
+}
+
 echo "\n== RESULT: $pass passed, $fail failed ==\n";
 exit($fail > 0 ? 1 : 0);
