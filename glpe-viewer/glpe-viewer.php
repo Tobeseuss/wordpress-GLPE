@@ -3,7 +3,7 @@
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
  * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با کدگذاری کامل تبادلات، بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 5.1.0
+ * Version: 5.2.0
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '5.1.0');
+define('GLPE_VERSION', '5.2.0');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -340,6 +340,11 @@ class GLPE_Plugin {
             } elseif (stripos($contentType, 'text/css') !== false) {
                 $body = $engine->rewriteCss($body, $rewriteBase, $options);
             } elseif (stripos($contentType, 'javascript') !== false) {
+                $body = $engine->rewriteJs($body, $rewriteBase, $options);
+            } elseif (stripos($contentType, 'manifest') !== false) {
+                // PWA manifests are consumed by the browser itself (never
+                // through a script hook), so icon/start_url references must
+                // be wrapped server-side or they load around the gateway.
                 $body = $engine->rewriteJs($body, $rewriteBase, $options);
             }
 

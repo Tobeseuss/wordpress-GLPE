@@ -63,6 +63,27 @@
     ownAppPathRe = /^(\/(wp-admin|wp-login|wp-json|wp-content|wp-includes|feed|view)(\/|$)|\/\?)/i;
   } catch (e) {}
 
+  // SPA router support. Routers read location.pathname — which initially
+  // shows the gateway path (e.g. /view/) — and 404 because that route does
+  // not exist in the application. Swap the visible path to the destination's
+  // own path BEFORE any application script boots. replaceState is purely
+  // local (no exchange rides it); the host and all identity-bearing parts
+  // stay inside the opaque token in the query. Destination query params are
+  // placed first so our reserved params always win duplicate-name collisions
+  // (PHP takes the last duplicate).
+  try {
+    if (ctx.u && isProxiedPage && window.history && window.history.replaceState) {
+      var bootDest = new URL(currentTargetUrl, window.location.href);
+      var bootDestQ = bootDest.search.replace(/^\?/, '');
+      var bootOurs = window.location.search.replace(/^\?/, '');
+      var bootMerged = bootDestQ ? (bootDestQ + '&' + bootOurs) : bootOurs;
+      var bootHref = window.location.origin + bootDest.pathname + '?' + bootMerged + window.location.hash;
+      if (window.location.pathname !== bootDest.pathname || bootDestQ) {
+        window.history.replaceState(window.history.state, '', bootHref);
+      }
+    }
+  } catch (e) {}
+
   function isOwnAppRef(absObj) {
     if (absObj.search.indexOf('_glpe=') !== -1) return true;
     return ownAppPathRe ? ownAppPathRe.test(absObj.pathname + absObj.search) : false;
@@ -79,6 +100,29 @@
     if (ctx.tb) flags += '&nb=1';
     if (ctx.mb) flags += '&mb=1';
     return viewScript + sep + 'l=' + cipherEncode(destHref) + flags;
+  }
+
+  // History-entry variant: SPA routers read location.pathname + location.search,
+  // so pushed/replaced entries carry the destination's PATH (and query) in the
+  // visible URL while the host and full address remain inside the token.
+  // pushState/replaceState never touch the wire — this form exists so routers
+  // recognise their own routes; a reload of such an entry still dispatches
+  // through the gateway (_glpe + token in the query, path ignored).
+  function buildHistoryUrl(destHref) {
+    try {
+      var u = new URL(destHref, currentTargetUrl);
+      var ours = '_glpe=1&l=' + cipherEncode(u.href);
+      if (ctx.rs) ours += '&ns=1';
+      if (ctx.ri) ours += '&ni=1';
+      if (ctx.st) ours += '&nt=1';
+      if (ctx.tb) ours += '&nb=1';
+      if (ctx.mb) ours += '&mb=1';
+      var destQ = u.search.replace(/^\?/, '');
+      var search = destQ ? destQ + '&' + ours : ours;
+      return window.location.origin + u.pathname + '?' + search + u.hash;
+    } catch (e) {
+      return buildGatewayUrl(destHref);
+    }
   }
 
   function resolveViewUrl(url) {
@@ -455,6 +499,22 @@
       if (url instanceof URL) return resolveViewUrl(url.href);
       return url;
     }
+    // History entries are upgraded to the path-carrying form so routers see
+    // their own routes after the swap: the token (unchanged) validates the
+    // destination, the pathname/search mirror the destination locally.
+    function toHistoryUrl(url) {
+      var resolved = normalizeNavUrl(url);
+      try {
+        if (typeof resolved === 'string') {
+          var tm = resolved.match(/[?&]l=([A-Za-z0-9_-]+)/);
+          if (tm) {
+            var dest = cipherDecode(tm[1]);
+            if (dest) return buildHistoryUrl(dest);
+          }
+        }
+      } catch (e) {}
+      return resolved;
+    }
     // Patch BOTH the prototype and the instance with the SAME wrapper:
     // frameworks call history.replaceState(...) directly AND make
     // prototype-level calls (History.prototype.replaceState.call(history,
@@ -465,7 +525,7 @@
         if (!protoDesc || !protoDesc.configurable || typeof protoDesc.value !== 'function') return;
         var nativeFn = protoDesc.value;
         var wrapped = function(state, title, url) {
-          var r = nativeFn.call(this, state, title, normalizeNavUrl(url));
+          var r = nativeFn.call(this, state, title, toHistoryUrl(url));
           try { syncBarAddress(); } catch (e) {}
           return r;
         };

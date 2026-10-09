@@ -342,5 +342,43 @@ if ($nodeBin !== '') {
     echo "  SKIP  PHP token decodes back via browser-side algorithm (node not available)\n";
 }
 
+echo "\n== 15. Unquoted-attribute pages + ES module graphs (v5.2.0) ==\n";
+// Sites like CDN-hosted bundler apps emit attributes WITHOUT quotes and
+// reference chunks as protocol-relative or module-relative specifiers.
+$unq = '<!doctype html><html lang=en><head><meta charset=UTF-8>'
+     . '<script src=//o-cdn.test/lib/jquery.min.js captchatype=qwen></script>'
+     . '<link rel=icon href=//assets-cdn.test/app/0.0.1/favicon.png>'
+     . '<link rel=manifest href=//assets-cdn.test/app/0.0.1/manifest.json crossorigin=anonymous></head>'
+     . '<body><div id=root><div id=splash style=position:fixed;top:0;left:0></div></div>'
+     . '<script type=module crossorigin src=//assets-cdn.test/app/0.0.1/js/main.js></script>'
+     . '<script>var keep="x=y plain text stays";</script></body></html>';
+$r15 = $engine->rewriteHtml($unq, 'https://qwen-like.test/', []);
+check('unquoted module src gets wrapped', (bool)preg_match('/<script type="module" crossorigin src="[^"]*l=([A-Za-z0-9_-]+)"/', $r15, $m15a) && GLPE_Codec::decode($m15a[1]) === 'https://assets-cdn.test/app/0.0.1/js/main.js', isset($m15a[1]) ? GLPE_Codec::decode($m15a[1]) : substr($r15, 0, 300));
+check('unquoted jquery src gets wrapped', (bool)preg_match('/src="[^"]*l=([A-Za-z0-9_-]+)" captchatype="qwen"/', $r15, $m15b) && GLPE_Codec::decode($m15b[1]) === 'https://o-cdn.test/lib/jquery.min.js', isset($m15b[1]) ? GLPE_Codec::decode($m15b[1]) : 'no match');
+check('unquoted manifest href gets wrapped', (bool)preg_match('/rel="manifest" href="[^"]*l=([A-Za-z0-9_-]+)"/', $r15, $m15c) && GLPE_Codec::decode($m15c[1]) === 'https://assets-cdn.test/app/0.0.1/manifest.json', isset($m15c[1]) ? GLPE_Codec::decode($m15c[1]) : 'no match');
+check('unquoted style attr preserved', strpos($r15, 'style="position:fixed;top:0;left:0"') !== false, '');
+check('bare attrs stay bare', strpos($r15, 'crossorigin') !== false && strpos($r15, 'id="root"') !== false);
+check('script body untouched by quoting pass', strpos($r15, 'var keep="x=y plain text stays"') !== false);
+check('no direct cdn reference remains', strpos($r15, '//o-cdn.test') === false && strpos($r15, '//assets-cdn.test') === false);
+
+$j15 = $engine->rewriteJs('import {A}from"./react-vendor.js";var d=()=>import("./chunk-1.js").then(e=>e.b);const u=new URL("./ts.worker-abc.js",import.meta.url);var w=new Worker(new URL("../core/w.js",import.meta.url));var o={from:"./locale"};var s="//x-cdn.test/lib.js";var n="not//a.host/path";var k="plain string";', 'https://assets-cdn.test/app/0.0.1/js/main.js', []);
+check('static import specifier wrapped', (bool)preg_match('/from"([^"]*l=([A-Za-z0-9_-]+))"/', $j15, $m15d) && GLPE_Codec::decode($m15d[2]) === 'https://assets-cdn.test/app/0.0.1/js/react-vendor.js', isset($m15d[2]) ? GLPE_Codec::decode($m15d[2]) : $j15);
+check('dynamic import specifier wrapped', (bool)preg_match('/import\("([^"]*l=([A-Za-z0-9_-]+))"\)/', $j15, $m15e) && GLPE_Codec::decode($m15e[2]) === 'https://assets-cdn.test/app/0.0.1/js/chunk-1.js', isset($m15e[2]) ? GLPE_Codec::decode($m15e[2]) : $j15);
+check('new URL(import.meta.url) wrapped', (bool)preg_match('/new URL\("([^"]*l=([A-Za-z0-9_-]+))", import\.meta\.url\)/', $j15, $m15f) && GLPE_Codec::decode($m15f[2]) === 'https://assets-cdn.test/app/0.0.1/js/ts.worker-abc.js', isset($m15f[2]) ? GLPE_Codec::decode($m15f[2]) : $j15);
+check('worker URL relative-to-module wrapped', (bool)preg_match('/new Worker\(new URL\("([^"]*l=([A-Za-z0-9_-]+))", import\.meta\.url\)\)/', $j15, $m15g) && GLPE_Codec::decode($m15g[2]) === 'https://assets-cdn.test/app/0.0.1/core/w.js', isset($m15g[2]) ? GLPE_Codec::decode($m15g[2]) : $j15);
+check('object literal from: untouched', strpos($j15, '{from:"./locale"}') !== false, $j15);
+check('protocol-relative string wrapped', (bool)preg_match('/var s="([^"]*l=([A-Za-z0-9_-]+))"/', $j15, $m15h) && GLPE_Codec::decode($m15h[2]) === 'https://x-cdn.test/lib.js', isset($m15h[2]) ? GLPE_Codec::decode($m15h[2]) : $j15);
+check('non-host double-slash string untouched', strpos($j15, '"not//a.host/path"') !== false);
+check('plain strings untouched', strpos($j15, '"plain string"') !== false);
+$mf = $engine->rewriteJs('{"name":"app","icons":[{"src":"//assets-cdn.test/app/0.0.1/i.png","sizes":"192x192"}],"start_url":"https://qwen-like.test/"}', 'https://qwen-like.test/manifest.json', []);
+check('manifest icons wrapped', (bool)preg_match('/"src":"[^"]*l=([A-Za-z0-9_-]+)"/', $mf, $m15i) && GLPE_Codec::decode($m15i[1]) === 'https://assets-cdn.test/app/0.0.1/i.png', isset($m15i[1]) ? GLPE_Codec::decode($m15i[1]) : $mf);
+
+echo "\n== 16. SPA router support (local pathname swap, v5.2.0) ==\n";
+$js16 = (string)file_get_contents($root . '/glpe-viewer/includes/client.js');
+check('boot pathname swap present (local replaceState)', strpos($js16, 'SPA router support') !== false && strpos($js16, 'window.history.replaceState(window.history.state, \'\', bootHref)') !== false);
+check('history entries upgraded to path-carrying form', strpos($js16, 'function buildHistoryUrl(destHref)') !== false && strpos($js16, 'toHistoryUrl(url)') !== false);
+check('history URLs keep the token in the query', strpos($js16, "'_glpe=1&l=' + cipherEncode(u.href)") !== false);
+check('full navigations stay path-free', substr_count($js16, 'buildGatewayUrl(destHref)') >= 1);
+
 echo "\n== RESULT: $pass passed, $fail failed ==\n";
 exit($fail > 0 ? 1 : 0);

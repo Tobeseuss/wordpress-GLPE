@@ -193,7 +193,12 @@ class GLPE_Engine {
      */
     public function rewriteJs($js, $baseUrl, $options = []) {
         if (empty($js)) return $js;
-        return preg_replace_callback('/([\'"])(https?:\/\/[^\'"]+)\1/i', function($matches) use ($baseUrl, $options) {
+        // 1. Absolute AND protocol-relative references in string literals.
+        // Bundler-era sites (e.g. CDN-hosted module graphs) reference their
+        // chunks as "//host/path" — protocol-relative strings would resolve
+        // against the page origin inside the browser and leave the gateway
+        // entirely, so they are wrapped exactly like absolute URLs.
+        $js = preg_replace_callback('/([\'"])(https?:\/\/[^\'"]+|\/\/[a-z0-9][a-z0-9.\-]*\.[a-z]{2,}[^\'"]*)\1/i', function($matches) use ($baseUrl, $options) {
             $quote = $matches[1];
             $url = $matches[2];
             // Inline JSON payloads embed ampersands as \u0026 escapes (e.g.
@@ -220,6 +225,44 @@ class GLPE_Engine {
             $link = $this->makeViewUrl($url, $baseUrl, $options);
             return $quote . $link . $quote;
         }, $js);
+
+        // 2. ES module graph — relative specifiers only.
+        // The browser's module loader resolves import/export specifiers
+        // against the module's own URL and ignores every client-side hook,
+        // so once a module rides the gateway its specifiers must ride it
+        // too — otherwise the next chunk resolves against this site's own
+        // paths and 404s, killing the whole app boot. Static form
+        // (from"./x.js") and dynamic form (import("./x.js")) are covered;
+        // the specifier must end in a module-ish extension so plain object
+        // literals like {from:"./locale"} stay untouched.
+        $js = preg_replace_callback(
+            '/\b(from|import)\s*(\(\s*)?([\'"])(\.{1,2}\/[^\'"]{2,2048}|\/[^\'"]{2,2048})\3/',
+            function($m) use ($baseUrl, $options) {
+                $spec = $m[4];
+                if (!preg_match('/\.(?:js|mjs|cjs|json|css|wasm|svg|png|jpe?g|webp|gif|woff2?|ttf|mp4|webm|m3u8)(?:[?#][^\'"()]*)?$/i', $spec)) {
+                    return $m[0];
+                }
+                $link = $this->makeViewUrl($spec, $baseUrl, $options);
+                return $m[1] . $m[2] . $m[3] . $link . $m[3];
+            },
+            $js
+        );
+
+        // 3. Bundler worker/asset pattern — new URL("./x.js", import.meta.url)
+        // resolves against the module's own URL exactly like a specifier.
+        $js = preg_replace_callback(
+            '/new\s+URL\(\s*([\'"])(\.{1,2}\/[^\'"]{2,2048}|\/[^\'"]{2,2048})\1\s*,\s*import\.meta\.url\s*(?:,\s*([\'"])\w+\3)?\)/i',
+            function($m) use ($baseUrl, $options) {
+                $spec = $m[2];
+                if (!preg_match('/\.(?:js|mjs|cjs|wasm)(?:[?#][^\'"]*)?$/i', $spec)) {
+                    return $m[0];
+                }
+                $link = $this->makeViewUrl($spec, $baseUrl, $options);
+                return 'new URL(' . $m[1] . $link . $m[1] . ', import.meta.url' . (isset($m[3]) ? ',' . $m[3] . $m[3] : '') . ')';
+            },
+            $js
+        );
+        return $js;
     }
 
     /**
@@ -300,6 +343,70 @@ class GLPE_Engine {
     }
 
     /**
+     * Normalises unquoted attribute values to quoted form before the
+     * rewriting passes run. Script/style bodies and comments are split out
+     * first — quoting values inside code text would change program
+     * semantics (e.g. an HTML string literal compared verbatim).
+     */
+    private function quoteUnquotedAttributes($html) {
+        if (strpos($html, '=') === false || strpos($html, '<') === false) {
+            return $html;
+        }
+        $parts = preg_split(
+            '/(<script\b[^>]*>[\s\S]*?<\/script\s*>|<style\b[^>]*>[\s\S]*?<\/style\s*>|<!--[\s\S]*?-->)/i',
+            $html, -1, PREG_SPLIT_DELIM_CAPTURE
+        );
+        if (count($parts) === 1) {
+            return $this->quoteUnquotedInTags($html);
+        }
+        $out = '';
+        foreach ($parts as $i => $part) {
+            if ($i % 2 === 1) {
+                // Protected span. Quote ONLY its opening tag (attributes must
+                // reach the downstream quote-anchored rewriters) and keep the
+                // code body plus closing tag byte-identical.
+                if (preg_match('/^((?:<script|<style)\b[^>]*>)([\s\S]*)$/i', $part, $pm)) {
+                    $out .= $this->quoteUnquotedInTags($pm[1]) . $pm[2];
+                } else {
+                    $out .= $part;
+                }
+                continue;
+            }
+            $out .= $this->quoteUnquotedInTags($part);
+        }
+        return $out;
+    }
+
+    /**
+     * Walks tag openings inside one markup chunk and quotes any bare
+     * attr=value pair. The tag scanner crosses quoted attribute values in
+     * one step (they may legally contain >) and stops at the first unquoted
+     * >, so only genuine tag interiors are touched — never plain text.
+     */
+    private function quoteUnquotedInTags($chunk) {
+        if (strpos($chunk, '=') === false) {
+            return $chunk;
+        }
+        return preg_replace_callback(
+            '/<[a-zA-Z](?:"[^"]*"|\'[^\']*\'|[^>"\'])*>/',
+            function($tag) {
+                return preg_replace_callback(
+                    '/([^\s"\'>=]+)=("[^"]*"|\'[^\']*\'|[^\s"\'>=]+)/',
+                    function($m) {
+                        $v = $m[2];
+                        if ($v === '' || $v[0] === '"' || $v[0] === "'") {
+                            return $m[0];
+                        }
+                        return $m[1] . '="' . $v . '"';
+                    },
+                    $tag[0]
+                );
+            },
+            $chunk
+        );
+    }
+
+    /**
      * Full document rewriter:
      * - internal short links for references, forms, styles, sources
      * - frame-buster defeat
@@ -309,6 +416,13 @@ class GLPE_Engine {
      * - floating navigation bar injection
      */
     public function rewriteHtml($html, $targetUrl, $options = []) {
+        // Some sites emit attributes without quotes (e.g.
+        // <script type=module crossorigin src=//cdn.example.com/app.js>).
+        // Every downstream pass is quote-anchored, so those references would
+        // ride out of the viewer untouched and the browser would load them
+        // directly around the gateway. Normalising to quoted form up front
+        // makes the whole pipeline cover this page style as well.
+        $html = $this->quoteUnquotedAttributes($html);
         $removeScripts = !empty($options['removeScripts']);
         $removeImages  = !empty($options['removeImages']);
         $stripTitle    = !empty($options['stripTitle']);
