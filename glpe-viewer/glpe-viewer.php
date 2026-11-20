@@ -3,7 +3,7 @@
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
  * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با کدگذاری کامل تبادلات، بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 6.2.0
+ * Version: 6.3.0
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '6.2.0');
+define('GLPE_VERSION', '6.3.0');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -79,6 +79,11 @@ require_once GLPE_DIR . 'includes/Codec.php';
 require_once GLPE_DIR . 'includes/Engine.php';
 require_once GLPE_DIR . 'includes/Access.php';
 require_once GLPE_DIR . 'includes/Hub.php';
+// Remote-diagnostics API (v6.3.0): optional by design — a missing file only
+// removes the diag card + endpoint, never the site.
+if (file_exists(GLPE_DIR . 'includes/DiagApi.php')) {
+    require_once GLPE_DIR . 'includes/DiagApi.php';
+}
 // Host evaluation is an admin-only surface — never loaded on front-end
 // requests (one less file that can break the visitor path).
 if (is_admin()) {
@@ -162,6 +167,19 @@ class GLPE_Plugin {
         // reads its enabled flag from the handoff file, not from the DB.
         add_action('update_option_glpe_hub_enabled', ['GLPE_Hub', 'syncNodeStore'], 10, 0);
 
+        // Remote-diagnostics API (v6.3.0): key management, card and handoff
+        // sync. The endpoint itself (diag-endpoint.php) is fully standalone.
+        if (class_exists('GLPE_Diag_Api')) {
+            add_action('admin_post_glpe_diag_gen', ['GLPE_Diag_Api', 'handleGen']);
+            add_action('admin_post_glpe_diag_off', ['GLPE_Diag_Api', 'handleOff']);
+            add_action('admin_post_glpe_diag_self', ['GLPE_Diag_Api', 'handleSelfTest']);
+            add_action('admin_init', ['GLPE_Diag_Api', 'maybeSyncStore']);
+            // Key rotations and disable/enable must reach the standalone
+            // endpoint instantly (it never boots the CMS for authentication).
+            add_action('update_option_glpe_diag_enabled', ['GLPE_Diag_Api', 'syncStore'], 10, 0);
+            add_action('update_option_glpe_diag_key', ['GLPE_Diag_Api', 'syncStore'], 10, 0);
+        }
+
         // Per-account session isolation: a browser's jar belongs to exactly
         // one account — logging out drops it, logging in restores the
         // account's own saved jar (never another user's).
@@ -212,7 +230,12 @@ class GLPE_Plugin {
     }
 
     public function deactivate() {
-        // Safe deactivation
+        // Deactivating the plugin withdraws the remote-diagnostics handoff
+        // immediately — the standalone endpoint must stop answering with the
+        // old key even though its file still exists until deletion.
+        if (class_exists('GLPE_Diag_Api')) {
+            GLPE_Diag_Api::disable();
+        }
     }
 
     /**
@@ -825,9 +848,24 @@ class GLPE_Plugin {
                 'hub-token-regen' => 'کلید گرهٔ ارتباطی جدید ساخته شد — باید config.json کلاینت‌ها را به‌روزرسانی کنید.',
                 'hub-log-clear'  => 'گزارش پایش هستهٔ ارتباطی پاک شد.',
                 'hub-nozip'      => 'ساخت ZIP روی این هاست در دسترس نیست؛ فایل‌های کلاینت را جداگانه دانلود کنید.',
+                'diag-gen'       => 'کلید تشخیص از راه دور ساخته شد — کلید کامل اتصال را کپی و به دستیار خود بدهید.',
+                'diag-off'       => 'رابط تشخیص از راه دور غیرفعال شد و فایل واگذاری آن حذف شد.',
             ];
             if ($cpNotice !== '' && isset($cpNotices[$cpNotice])) {
                 echo '<div class="notice notice-success is-dismissible"><p>' . esc_html($cpNotices[$cpNotice]) . '</p></div>';
+            }
+            if ($cpNotice === 'diag-self-code') {
+                $dcode = isset($_GET['dcode']) ? (int)$_GET['dcode'] : 0;
+                $dms = isset($_GET['dms']) ? (int)$_GET['dms'] : 0;
+                if ($dcode === 200) {
+                    echo '<div class="notice notice-success is-dismissible"><p>تست پایانهٔ تشخیص موفق بود — پاسخ 200 در ' . (int)$dms . ' میلی‌ثانیه.</p></div>';
+                } else {
+                    echo '<div class="notice notice-error is-dismissible"><p>تست پایانهٔ تشخیص پاسخ ' . (int)$dcode . ' گرفت — اگر 403 یا خطای دیگری بود، همان لایه مشکل‌ساز برای درخواست‌های بیرونی هم هست؛ خروجی تشخیص را به دستیار بدهید.</p></div>';
+                }
+            }
+            if ($cpNotice === 'diag-self-fail') {
+                $derr = isset($_GET['derr']) ? sanitize_text_field(wp_unslash($_GET['derr'])) : '';
+                echo '<div class="notice notice-error is-dismissible"><p>تست پایانهٔ تشخیص ناموفق بود' . ($derr !== '' ? ' — ' . esc_html($derr) : '') . '</p></div>';
             }
             ?>
 
@@ -965,6 +1003,8 @@ class GLPE_Plugin {
             </form>
 
             <?php $this->renderAccessCard(); ?>
+
+            <?php if (class_exists('GLPE_Diag_Api')) { GLPE_Diag_Api::renderCard(); } ?>
 
             <?php GLPE_Hub_Admin::renderRelayPointer(); ?>
         </div>

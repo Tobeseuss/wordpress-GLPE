@@ -1192,5 +1192,221 @@ foreach ((array)@scandir($diagDir) as $diagNode) {
 GLPE_Diag::$testDir = null;
 update_option('glpe_hub_max_streams', '6');
 
+echo "\n== 21. Remote-diagnostics API (v6.3.0) ==\n";
+
+if (!defined('GLPE_DIR')) { define('GLPE_DIR', $root . '/glpe-viewer/'); }
+require $root . '/glpe-viewer/includes/DiagApi.php';
+
+$diagStoreDir = sys_get_temp_dir() . '/glpe-diagapi-selftest-' . getmypid();
+if (is_dir($diagStoreDir)) {
+    foreach ((array)@scandir($diagStoreDir) as $n) { if ($n !== '.' && $n !== '..') { @unlink($diagStoreDir . '/' . $n); } }
+} else {
+    @mkdir($diagStoreDir, 0755, true);
+}
+$diagEmptyDir = $diagStoreDir . '-empty';
+if (!is_dir($diagEmptyDir)) { @mkdir($diagEmptyDir, 0755, true); }
+GLPE_Hub::$testDir = $diagStoreDir;
+GLPE_Diag_Api::$testDir = $diagStoreDir;
+
+// 21a. key lifecycle — ships disabled, explicit generation enables it
+update_option('glpe_diag_enabled', '0');
+update_option('glpe_diag_key', '');
+check('diag: feature ships disabled', GLPE_Diag_Api::enabled() === false);
+$genKey = GLPE_Diag_Api::generateKey();
+check('diag: generated key matches format', is_string($genKey) && preg_match('/^glpe_[a-zA-Z0-9]{40,64}$/', $genKey) === 1, var_export($genKey, true));
+check('diag: generation enables the endpoint', GLPE_Diag_Api::enabled() === true && GLPE_Diag_Api::key() === $genKey);
+update_option('glpe_diag_key', 'glpe_short');
+check('diag: malformed stored key is ignored', GLPE_Diag_Api::key() === '' && GLPE_Diag_Api::enabled() === false);
+// wp_generate_password() emits mixed case (a-zA-Z0-9) — the format check
+// must accept it (caught live on the rig: lowercase-only regex silently
+// dropped every real key and the handoff was never written).
+update_option('glpe_diag_key', 'glpe_c6xmEhwF7uboq3EqD2wJyx50sLmDDg0sCt4eCBNIr7UlG5l1');
+check('diag: mixed-case key accepted (real generator output)', GLPE_Diag_Api::key() === 'glpe_c6xmEhwF7uboq3EqD2wJyx50sLmDDg0sCt4eCBNIr7UlG5l1');
+$genKey = GLPE_Diag_Api::generateKey();
+check('diag: connection string is home#key', GLPE_Diag_Api::connectionString() === 'https://site.test#' . $genKey);
+
+// 21b. guarded handoff store
+check('diag: syncStore writes the handoff file', GLPE_Diag_Api::syncStore() === true && file_exists($diagStoreDir . '/diag_key.php'));
+$handoffRaw = (string)file_get_contents($diagStoreDir . '/diag_key.php');
+check('diag: handoff starts with the self-exit guard', strpos($handoffRaw, '<?php exit;') === 0);
+$handoff = json_decode((string)substr($handoffRaw, GLPE_Hub::guardLen()), true);
+check('diag: handoff carries key + enabled + paths', is_array($handoff) && $handoff['key'] === $genKey && $handoff['enabled'] === '1'
+    && $handoff['home'] === 'https://site.test' && isset($handoff['plugin_url'], $handoff['abspath'], $handoff['uploads_dir'], $handoff['ver'], $handoff['gen']));
+clearstatcache();
+$mtimeBefore = filemtime($diagStoreDir . '/diag_key.php');
+check('diag: repeated sync does not rewrite (content compare)', GLPE_Diag_Api::syncStore() === true);
+clearstatcache();
+check('diag: unchanged sync keeps mtime', filemtime($diagStoreDir . '/diag_key.php') === $mtimeBefore);
+GLPE_Diag_Api::disable();
+check('diag: disable removes the handoff', !file_exists($diagStoreDir . '/diag_key.php') && get_option('glpe_diag_enabled') === '0');
+$genKey = GLPE_Diag_Api::generateKey();
+
+// 21c. audit journal (remote mutations are always visible to the admin)
+GLPE_Diag_Api::appendAudit('set', 'glpe_dns_mode: auto ← system');
+GLPE_Diag_Api::appendAudit('clear', 'fatals');
+$aud = GLPE_Diag_Api::lastAudits();
+check('diag: audit journal roundtrip', count($aud) === 2 && $aud[0]['action'] === 'set' && strpos($aud[1]['detail'], 'fatals') !== false);
+for ($i = 0; $i < 34; $i++) { GLPE_Diag_Api::appendAudit('set', 'filler' . $i); }
+check('diag: audit journal is a rolling window', count(GLPE_Diag_Api::lastAudits()) === GLPE_Diag_Api::AUDIT_LIMIT);
+$auditRaw = (string)file_get_contents($diagStoreDir . '/diag_audit.php');
+check('diag: audit file starts with the self-exit guard', strpos($auditRaw, '<?php exit;') === 0);
+
+// 21d. set-whitelist validation (pure function)
+$v = GLPE_Diag_Api::validateSet('glpe_dns_mode', 'doh_first');
+check('set: dns mode accepts valid value', $v[0] === true && $v[1] === 'doh_first');
+$v = GLPE_Diag_Api::validateSet('glpe_dns_mode', 'evil');
+check('set: dns mode rejects invalid value', $v[0] === false);
+$v = GLPE_Diag_Api::validateSet('glpe_dns_ttl', '900');
+check('set: dns ttl accepts in-range', $v[0] === true && $v[1] === '900');
+$v = GLPE_Diag_Api::validateSet('glpe_dns_ttl', '999999');
+check('set: dns ttl rejects out-of-range', $v[0] === false);
+$v = GLPE_Diag_Api::validateSet('glpe_dns_ttl', 'abc');
+check('set: dns ttl rejects non-numeric', $v[0] === false);
+$v = GLPE_Diag_Api::validateSet('glpe_fetch_retries', '2');
+check('set: retries accepts 1..3', $v[0] === true && $v[1] === '2');
+$v = GLPE_Diag_Api::validateSet('glpe_fetch_retries', '9');
+check('set: rejects retries 9', $v[0] === false);
+$v = GLPE_Diag_Api::validateSet('glpe_hub_max_streams', '1');
+check('set: cap below minimum rejected', $v[0] === false);
+$v = GLPE_Diag_Api::validateSet('glpe_hub_max_streams', '32');
+check('set: cap at maximum accepted', $v[0] === true && $v[1] === '32');
+$v = GLPE_Diag_Api::validateSet('glpe_hub_max_streams', '33');
+check('set: cap above maximum rejected', $v[0] === false);
+$v = GLPE_Diag_Api::validateSet('glpe_toolbar', '1');
+check('set: flag accepts 1', $v[0] === true && $v[1] === '1');
+$v = GLPE_Diag_Api::validateSet('glpe_toolbar', 'x');
+check('set: flag rejects garbage', $v[0] === false);
+$v = GLPE_Diag_Api::validateSet('cfg.max_pool_connections', '20');
+check('set: cfg pool accepts in-range', $v[0] === true && $v[1] === 20);
+$v = GLPE_Diag_Api::validateSet('cfg.max_pool_connections', '65');
+check('set: cfg pool rejects out-of-range', $v[0] === false);
+$v = GLPE_Diag_Api::validateSet('cfg.write_timeout', '20');
+check('set: cfg timeout accepts numeric', $v[0] === true && $v[1] === 20.0);
+$v = GLPE_Diag_Api::validateSet('cfg.prefer_fast_endpoint', '0');
+check('set: cfg prefer flag accepts 0', $v[0] === true && $v[1] === '0');
+$v = GLPE_Diag_Api::validateSet('cfg.unknown_key', '1');
+check('set: unknown cfg key rejected', $v[0] === false);
+$v = GLPE_Diag_Api::validateSet('glpe_secret', 'evil');
+check('set: secrets are not writable', $v[0] === false);
+$v = GLPE_Diag_Api::validateSet('siteurl', 'https://evil');
+check('set: CMS options are not writable', $v[0] === false);
+
+// 21e. applySet through the option shim + journal + node-store refresh
+list($okA, $oldA, $newA, $errA) = GLPE_Diag_Api::applySet('glpe_dns_mode', 'system');
+check('apply: writes the validated option', $okA === true && get_option('glpe_dns_mode') === 'system' && $newA === 'system');
+list($okB) = GLPE_Diag_Api::applySet('cfg.max_pool_connections', '12');
+$cfgNow = get_option('glpe_hub_cfg', []);
+check('apply: cfg sub-key lands in glpe_hub_cfg', $okB === true && isset($cfgNow['max_pool_connections']) && $cfgNow['max_pool_connections'] === 12);
+check('apply: node handoff refreshed after mutation', file_exists($diagStoreDir . '/node_info.php'));
+check('apply: remote writes are journaled', strpos(json_encode(GLPE_Diag_Api::lastAudits()), 'glpe_dns_mode') !== false);
+list($okC) = GLPE_Diag_Api::applySet('glpe_dns_mode', 'evil');
+check('apply: invalid value writes nothing', $okC === false && get_option('glpe_dns_mode') === 'system');
+
+// 21f. endpoint subprocess runner (fresh process per call, like the web SAPI)
+$diagRunner = $diagStoreDir . '/runner.php';
+file_put_contents($diagRunner, <<<'RUN'
+<?php
+define('GLPE_DIAG_STORE_DIR', $argv[1]);
+$_SERVER['REQUEST_METHOD'] = 'GET';
+$_GET = [];
+if ($argc > 4 && $argv[4] !== '') { parse_str($argv[4], $parsed); $_GET = $parsed; }
+if (!isset($_GET['action'])) { $_GET['action'] = $argv[3]; }
+$_REQUEST = $_GET;
+if (substr($argv[2], 0, 7) === 'query::') { $_GET['k'] = substr($argv[2], 7); }
+else { $_SERVER['HTTP_X_GLPE_KEY'] = $argv[2]; }
+require $argv[5] . '/glpe-viewer/diag-endpoint.php';
+RUN
+);
+$diagRun = function ($storeDir, $key, $action, $extra = '') use ($root, $diagRunner) {
+    $outFile = $diagRunner . '.out';
+    @file_put_contents($outFile, '');
+    $spec = [1 => ['file', $outFile, 'w'], 2 => ['file', $outFile, 'a']];
+    $proc = @proc_open([PHP_BINARY, $diagRunner, $storeDir, $key, $action, $extra, $root], $spec, $pipes);
+    if (!is_resource($proc)) { return '__PROC_FAIL__'; }
+    proc_close($proc);
+    return (string)file_get_contents($outFile);
+};
+$diagJson = function ($storeDir, $key, $action, $extra = '') use ($diagRun) {
+    return json_decode($diagRun($storeDir, $key, $action, $extra), true);
+};
+
+$out = $diagRun($diagEmptyDir, $genKey, 'info');
+check('endpoint: missing handoff answers nothing (404)', trim($out) === '');
+$out = $diagRun($diagStoreDir, 'glpe_' . str_repeat('z', 48), 'info');
+check('endpoint: wrong key answers nothing (404)', trim($out) === '');
+$out = $diagRun($diagStoreDir, 'query::glpe_' . str_repeat('z', 48), 'info');
+check('endpoint: wrong query key answers nothing (404)', trim($out) === '');
+$j = $diagJson($diagStoreDir, $genKey, 'info');
+$hdrSeen = false;
+if (is_array($j) && !empty($j['data']['request']['headers']) && is_array($j['data']['request']['headers'])) {
+    foreach ($j['data']['request']['headers'] as $h) {
+        if (is_array($h) && count($h) === 2 && $h[0] === 'X-GLPE-KEY') { $hdrSeen = true; }
+    }
+}
+check('endpoint: info returns a JSON profile', is_array($j) && $j['ok'] === true && $j['action'] === 'info'
+    && isset($j['data']['server']['php'], $j['data']['ini']['memory_limit'], $j['data']['extensions'], $j['data']['store']['home']));
+check('endpoint: info echoes the exact request headers', $hdrSeen);
+$j = $diagJson($diagStoreDir, $genKey, 'help');
+check('endpoint: help lists the closed action set', is_array($j) && isset($j['data']['actions'])
+    && in_array('probe', $j['data']['actions'], true) && in_array('fetch', $j['data']['actions'], true)
+    && count($j['data']['actions']) === 10);
+$out = $diagRun($diagStoreDir, $genKey, 'explode');
+check('endpoint: unknown action is silent', trim($out) === '');
+$j = $diagJson($diagStoreDir, $genKey, 'fetch', 'url=' . urlencode('ftp://example.com/x'));
+check('endpoint: fetch rejects non-http schemes', is_array($j) && $j['ok'] === false && strpos((string)$j['error'], 'scheme') !== false);
+$j = $diagJson($diagStoreDir, $genKey, 'fetch', 'url=' . urlencode('http://example.com:22/x'));
+check('endpoint: fetch rejects non-web ports', is_array($j) && $j['ok'] === false && strpos((string)$j['error'], 'port') !== false);
+$j = $diagJson($diagStoreDir, $genKey, 'fetch', 'url=' . urlencode('https://x.example.org/a') . '&method=TRACE');
+check('endpoint: fetch rejects exotic methods', is_array($j) && $j['ok'] === false && strpos((string)$j['error'], 'method') !== false);
+$j = $diagJson($diagStoreDir, $genKey, 'wp');
+check('endpoint: wp action degrades gracefully without a CMS', is_array($j) && $j['ok'] === false && strpos((string)$j['error'], 'wp-load') !== false);
+$j = $diagJson($diagStoreDir, $genKey, 'set', 'key=glpe_dns_mode&value=system');
+check('endpoint: set degrades gracefully without a CMS', is_array($j) && $j['ok'] === false && strpos((string)$j['error'], 'wp-load') !== false);
+$j = $diagJson($diagStoreDir, 'query::' . $genKey, 'help');
+check('endpoint: key also accepted through the query param', is_array($j) && $j['ok'] === true);
+$j = $diagJson($diagStoreDir, $genKey, 'probe', 'v=fast_plain_wp');
+$probeRow = is_array($j) && isset($j['data']['rows'][0]) ? $j['data']['rows'][0] : null;
+check('endpoint: probe returns a structured variation row', is_array($probeRow) && $probeRow['id'] === 'fast_plain_wp'
+    && isset($probeRow['code'], $probeRow['ms'], $probeRow['err'], $probeRow['headers'], $probeRow['body_snippet'], $probeRow['body_len']));
+
+// lockout: ten failures lock for the CORRECT key too, then the lock file clears it
+for ($i = 0; $i < 10; $i++) { $diagRun($diagStoreDir, 'glpe_wrong' . $i, 'info'); }
+$j = $diagJson($diagStoreDir, $genKey, 'info');
+check('endpoint: ten failures lock the endpoint', is_array($j) && $j['ok'] === false && $j['error'] === 'locked' && (int)$j['retry_after'] > 0);
+@unlink($diagStoreDir . '/diag_lock.php');
+$j = $diagJson($diagStoreDir, $genKey, 'info');
+check('endpoint: removing the lock file restores access', is_array($j) && $j['ok'] === true);
+
+// 21g. wiring + hygiene
+$mainSrc21 = (string)file_get_contents($root . '/glpe-viewer/glpe-viewer.php');
+check('wiring: diag admin-post handlers registered', strpos($mainSrc21, 'admin_post_glpe_diag_gen') !== false
+    && strpos($mainSrc21, 'admin_post_glpe_diag_off') !== false && strpos($mainSrc21, 'admin_post_glpe_diag_self') !== false);
+check('wiring: diag card rendered on the settings page', strpos($mainSrc21, 'GLPE_Diag_Api::renderCard()') !== false);
+check('wiring: diag handoff synced on option updates', strpos($mainSrc21, "add_action('update_option_glpe_diag_enabled'") !== false
+    && strpos($mainSrc21, "add_action('update_option_glpe_diag_key'") !== false);
+check('wiring: deactivation withdraws the diag handoff', strpos($mainSrc21, 'GLPE_Diag_Api::disable();') !== false);
+check('manifest: diag files are optional payload', in_array('diag-endpoint.php', GLPE_Diag::optionalManifest(), true)
+    && in_array('includes/DiagApi.php', GLPE_Diag::optionalManifest(), true));
+$unSrc21 = (string)file_get_contents($root . '/glpe-viewer/uninstall.php');
+check('uninstall: diag options removed', strpos($unSrc21, "'glpe_diag_key'") !== false && strpos($unSrc21, "'glpe_diag_enabled_at'") !== false);
+$tuneSrc21 = (string)file_get_contents($root . '/glpe-viewer/includes/HubTune.php');
+check('tune: both-endpoint failure points to the remote diag card', strpos($tuneSrc21, 'کلید تشخیص از راه دور') !== false);
+$epSrc21 = (string)file_get_contents($root . '/glpe-viewer/diag-endpoint.php');
+check('endpoint: auth uses constant-time compare', strpos($epSrc21, 'hash_equals') !== false);
+check('endpoint: no code-execution primitives', strpos($epSrc21, 'eval(') === false && strpos($epSrc21, 'assert(') === false
+    && strpos($epSrc21, 'create_function') === false && strpos($epSrc21, 'system(') === false && strpos($epSrc21, 'proc_open') === false);
+check('endpoint: store override exists for the selftest', strpos($epSrc21, 'GLPE_DIAG_STORE_DIR') !== false);
+check('endpoint: probe matrix reproduces the tuner request shape', strpos($epSrc21, "fast . '?_v=' . \$envq") !== false && strpos($epSrc21, '127.0.0.1') !== false);
+
+// section cleanup
+foreach ((array)@scandir($diagStoreDir) as $n21) { if ($n21 !== '.' && $n21 !== '..') { @unlink($diagStoreDir . '/' . $n21); } }
+@rmdir($diagStoreDir);
+foreach ((array)@scandir($diagEmptyDir) as $n21) { if ($n21 !== '.' && $n21 !== '..') { @unlink($diagEmptyDir . '/' . $n21); } }
+@rmdir($diagEmptyDir);
+GLPE_Hub::$testDir = null;
+GLPE_Diag_Api::$testDir = null;
+update_option('glpe_diag_enabled', '0');
+update_option('glpe_diag_key', '');
+
 echo "\n== RESULT: $pass passed, $fail failed ==\n";
 exit($fail > 0 ? 1 : 0);

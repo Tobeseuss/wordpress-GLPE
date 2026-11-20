@@ -55,6 +55,8 @@ class GLPE_Diag {
             'hub-client/client.py',
             'hub-client/geoip_ir.txt',
             'hub-client/geosite_ir.txt',
+            'diag-endpoint.php',
+            'includes/DiagApi.php',
         ];
     }
 

@@ -34,6 +34,9 @@ $glpe_options = [
     'glpe_fetch_retries',
     'glpe_ipresolve_v4',
     'glpe_db_version',
+    'glpe_diag_enabled',
+    'glpe_diag_key',
+    'glpe_diag_enabled_at',
 ];
 
 foreach ($glpe_options as $glpe_option) {
