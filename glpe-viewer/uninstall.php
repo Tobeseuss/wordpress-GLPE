@@ -22,6 +22,16 @@ $glpe_options = [
     'glpe_ssl_verify',
     'glpe_hub_enabled',
     'glpe_hub_token',
+    'glpe_hub_cfg',
+    'glpe_hub_nodes',
+    'glpe_hub_tuning',
+    'glpe_dns_mode',
+    'glpe_dns_ttl',
+    'glpe_doh_endpoint',
+    'glpe_fetch_connect_timeout',
+    'glpe_fetch_timeout',
+    'glpe_fetch_retries',
+    'glpe_ipresolve_v4',
     'glpe_db_version',
 ];
 

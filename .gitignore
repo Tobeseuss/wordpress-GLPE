@@ -27,3 +27,7 @@ vendor/
 *.pem
 github_pat_*
 dist/
+
+# Python runtime artifacts
+__pycache__/
+*.pyc

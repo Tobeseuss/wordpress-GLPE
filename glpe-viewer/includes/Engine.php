@@ -8,6 +8,7 @@
 
 require_once __DIR__ . '/Cookies.php';
 require_once __DIR__ . '/Codec.php';
+require_once __DIR__ . '/Dns.php';
 
 class GLPE_Engine {
     private $cookies;
@@ -816,22 +817,44 @@ class GLPE_Engine {
             $currentBody   = ($currentMethod === 'POST') ? $postData : null;
             $result        = null;
 
+            $dnsCfg    = GLPE_Dns::settings();
+            $dnsBudget = max(1, (int)$dnsCfg['retries'] + 1); // one extra attempt carries a fresh DoH pin
+
             for ($hop = 0; $hop < 6 && $result === null; $hop++) {
                 $hopHeaders = $this->hopHeaders($headers, $currentUrl, $currentMethod);
 
-                $response = wp_remote_request($currentUrl, [
-                    'method'             => $currentMethod,
-                    'body'               => (!empty($currentBody)) ? $currentBody : null,
-                    'headers'            => $hopHeaders,
-                    'timeout'            => 15,
-                    'redirection'        => 0,
-                    'sslverify'          => $sslVerify,
-                    'reject_unsafe_urls' => true,
-                    'user-agent'         => isset($hopHeaders['User-Agent']) ? $hopHeaders['User-Agent'] : $this->userAgent,
-                ]);
+                // Resolve-repair loop: a resolver stall on the host (classic
+                // "Resolving timed out after 10001 milliseconds") gets ONE
+                // transparent retry with a fresh DoH-pinned address instead
+                // of surfacing a dead page to the visitor.
+                $response = null;
+                $lastDnsError = '';
+                for ($try = 0; $try < $dnsBudget; $try++) {
+                    GLPE_Dns::planHop($currentUrl, $try > 0);
+                    $response = wp_remote_request($currentUrl, [
+                        'method'             => $currentMethod,
+                        'body'               => (!empty($currentBody)) ? $currentBody : null,
+                        'headers'            => $hopHeaders,
+                        'timeout'            => (int)$dnsCfg['timeout'],
+                        'redirection'        => 0,
+                        'sslverify'          => $sslVerify,
+                        'reject_unsafe_urls' => true,
+                        'user-agent'         => isset($hopHeaders['User-Agent']) ? $hopHeaders['User-Agent'] : $this->userAgent,
+                    ]);
+                    if (!is_wp_error($response)) {
+                        break;
+                    }
+                    $lastDnsError = (string)$response->get_error_message();
+                    if (!GLPE_Dns::isResolveError($lastDnsError)) {
+                        break;
+                    }
+                }
 
                 if (is_wp_error($response)) {
-                    throw new Exception("ارتباط با مقصد برقرار نشد: " . $response->get_error_message());
+                    $hint = GLPE_Dns::isResolveError($lastDnsError)
+                        ? ' — کارساز میزبان فعلاً نام‌ها را حل نمی‌کند؛ در تنظیمات بخش «سرعت اتصال و DNS» حالت DoH را برگزینید یا ارزیابی هاست را در صفحهٔ هستهٔ ارتباطی اجرا کنید.'
+                        : '';
+                    throw new Exception("ارتباط با مقصد برقرار نشد: " . $lastDnsError . $hint);
                 }
 
                 $status      = (int) wp_remote_retrieve_response_code($response);
@@ -898,28 +921,40 @@ class GLPE_Engine {
                     $rawHeaders[] = $k . ': ' . $v;
                 }
 
-                $ch = curl_init();
-                curl_setopt($ch, CURLOPT_URL, $currentUrl);
-                curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $currentMethod);
-                curl_setopt($ch, CURLOPT_HTTPHEADER, $rawHeaders);
-                curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-                curl_setopt($ch, CURLOPT_HEADER, true);
-                curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
-                curl_setopt($ch, CURLOPT_TIMEOUT, 15);
-                $sslVerify = function_exists('get_option') ? (get_option('glpe_ssl_verify', '1') === '1') : false;
-                curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, $sslVerify);
-                curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, $sslVerify ? 2 : 0);
-                curl_setopt($ch, CURLOPT_ENCODING, '');
+                $rawResponse = false;
+                for ($try = 0, $tries = max(1, GLPE_Dns::settings()['retries'] + 1); $try < $tries; $try++) {
+                    $ch = curl_init();
+                    curl_setopt($ch, CURLOPT_URL, $currentUrl);
+                    curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $currentMethod);
+                    curl_setopt($ch, CURLOPT_HTTPHEADER, $rawHeaders);
+                    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+                    curl_setopt($ch, CURLOPT_HEADER, true);
+                    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
+                    curl_setopt($ch, CURLOPT_TIMEOUT, (int)GLPE_Dns::settings()['timeout']);
+                    GLPE_Dns::applyCurl($ch, $currentUrl, $try > 0);
+                    $sslVerify = function_exists('get_option') ? (get_option('glpe_ssl_verify', '1') === '1') : false;
+                    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, $sslVerify);
+                    curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, $sslVerify ? 2 : 0);
+                    curl_setopt($ch, CURLOPT_ENCODING, '');
 
-                if ($currentMethod === 'POST' && !empty($currentBody)) {
-                    curl_setopt($ch, CURLOPT_POSTFIELDS, $currentBody);
+                    if ($currentMethod === 'POST' && !empty($currentBody)) {
+                        curl_setopt($ch, CURLOPT_POSTFIELDS, $currentBody);
+                    }
+
+                    $rawResponse = curl_exec($ch);
+                    if ($rawResponse === false) {
+                        $err = curl_error($ch);
+                        curl_close($ch);
+                        if ($try + 1 < $tries && GLPE_Dns::isResolveError($err)) {
+                            GLPE_Dns::forceResolve($currentUrl);
+                            continue; // fresh pin and try the same hop again
+                        }
+                        throw new Exception("خطای اتصال شبکه: " . $err);
+                    }
+                    break;
                 }
-
-                $rawResponse = curl_exec($ch);
                 if ($rawResponse === false) {
-                    $err = curl_error($ch);
-                    curl_close($ch);
-                    throw new Exception("خطای اتصال شبکه: " . $err);
+                    throw new Exception("خطای اتصال شبکه: انتقال ناموفق.");
                 }
 
                 $headerSize  = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
@@ -1044,6 +1079,7 @@ class GLPE_Engine {
 
         $currentUrl = $targetUrl;
         $outStream = null;
+        $dnsRetried = false; // one transparent DoH-pinned retry per request
         for ($hop = 0; $hop < 4; $hop++) {
             $headers = $this->hopHeaders($customHeaders, $currentUrl, 'GET');
             $cookieHeader = $this->cookies->getCookieHeader($currentUrl);
@@ -1078,6 +1114,7 @@ class GLPE_Engine {
             curl_setopt($ch, CURLOPT_TIMEOUT, 0);
             curl_setopt($ch, CURLOPT_BUFFERSIZE, 262144);
             curl_setopt($ch, CURLOPT_ENCODING, '');
+            GLPE_Dns::applyCurl($ch, $currentUrl, false);
             $sslVerify = function_exists('get_option') ? (get_option('glpe_ssl_verify', '1') === '1') : false;
             curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, $sslVerify);
             curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, $sslVerify ? 2 : 0);
@@ -1115,6 +1152,7 @@ class GLPE_Engine {
             $errNo   = curl_errno($ch);
             $nextUrl = curl_getinfo($ch, CURLINFO_REDIRECT_URL);
             $status  = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+            $errMsg  = $errNo !== 0 ? (string)curl_error($ch) : '';
             curl_close($ch);
 
             if ($status >= 300 && $status < 400 && $nextUrl && $hop < 3) {
@@ -1122,6 +1160,11 @@ class GLPE_Engine {
                 continue;
             }
             if ($errNo !== 0 && !$headersSent) {
+                if (!$dnsRetried && GLPE_Dns::isResolveError($errMsg) && GLPE_Dns::forceResolve($currentUrl)) {
+                    $dnsRetried = true; // one pinned retry before giving up
+                    $hop--;              // stay on this URL
+                    continue;
+                }
                 return false; // let the caller fall back to the buffered path
             }
             $sendHeaders();

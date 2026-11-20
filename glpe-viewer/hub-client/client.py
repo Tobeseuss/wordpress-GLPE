@@ -46,11 +46,17 @@ except FileNotFoundError:
     exit(1)
 
 MAX_DELAY = CFG.get("max_adaptive_delay", 1.0)
-IDLE_TIMEOUT = CFG.get("idle_timeout", 8.0)
+IDLE_TIMEOUT = CFG.get("idle_timeout", 15.0)
 MAX_UPTIME = CFG.get("max_tunnel_uptime", 3600.0)
-LOW_TRAFFIC_TIMEOUT = CFG.get("low_traffic_timeout", 30.0)
-LOW_TRAFFIC_THRESHOLD_BYTES = CFG.get("low_traffic_threshold_mb", 0.1) * 1024 * 1024
+LOW_TRAFFIC_TIMEOUT = CFG.get("low_traffic_timeout", 45.0)
+LOW_TRAFFIC_THRESHOLD_BYTES = CFG.get("low_traffic_threshold_mb", 0.25) * 1024 * 1024
 ACTIVE_TRANSFER_THRESHOLD = CFG.get("active_transfer_threshold_kbps", 10.0) * 1024
+
+# Split timeouts: on slow shared hosts a full node exchange may take seconds
+# (that used to silently kill TLS handshakes inside the old single 10s cap).
+CONNECT_TIMEOUT = CFG.get("connect_timeout", 15.0)
+STREAM_READ_TIMEOUT = CFG.get("stream_read_timeout", CFG.get("request_timeout", 30.0))
+WRITE_TIMEOUT = CFG.get("write_timeout", 20.0)
 
 RELAY_PORT = CFG.get("relay_port", 41927)
 SESSION_ID = uuid.uuid4().hex[:12]
@@ -181,23 +187,41 @@ class RoutingEngine:
 # 2. Node management (multi-node round-robin + failover)
 # ======================================================================
 class ServerManager:
-    def __init__(self, cfg):
-        self.servers = []
-        if "servers" in cfg and isinstance(cfg["servers"], list):
-            self.servers = cfg["servers"]
-        elif "server_url" in cfg and "auth_token" in cfg:
-            self.servers = [{"url": cfg["server_url"], "token": cfg["auth_token"]}]
+    """Round-robin across nodes; every node keeps its address + optional
+    fallback address (CMS path) and autonomously switches to the fallback
+    after repeated hard failures (404/timeout/network) — self-healing."""
 
-        if not self.servers:
+    FAIL_LIMIT = 3
+
+    def __init__(self, cfg):
+        self.nodes = []
+        if "servers" in cfg and isinstance(cfg["servers"], list):
+            raw = cfg["servers"]
+        elif "server_url" in cfg and "auth_token" in cfg:
+            raw = [{"url": cfg["server_url"], "token": cfg["auth_token"]}]
+        else:
+            raw = []
+        for s in raw:
+            if not isinstance(s, dict) or not s.get("url") or not s.get("token"):
+                continue
+            self.nodes.append({
+                "url": s["url"].rstrip("/"),
+                "fallback": (s.get("fallback_url") or "").rstrip("/"),
+                "token": s["token"],
+                "active": s["url"].rstrip("/"),
+                "fails": 0,
+            })
+
+        if not self.nodes:
             print("[!] ERROR: no nodes defined in config.json")
             exit(1)
 
         self.sessions = {}
-        for s in self.servers:
-            self.sessions[s["url"]] = self._build_session(s["token"], cfg)
-
-        self._cycle = itertools.cycle(self.servers)
         self.lock = threading.Lock()
+        for n in self.nodes:
+            self.sessions[n["active"]] = self._build_session(n["token"], cfg)
+
+        self._cycle = itertools.cycle(range(len(self.nodes)))
 
     def _build_session(self, token, cfg):
         session = requests.Session()
@@ -206,26 +230,62 @@ class ServerManager:
         session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "*/*",
-            "Authorization": f"Bearer {token}",
-            "X-System-Token": token,
+            # Identity transport: intermediaries (LiteSpeed, CDN edges) must
+            # NOT compress the stream — compressed responses buffer in chunks
+            # and stall interactive TLS handshakes.
+            "Accept-Encoding": "identity",
             "Connection": "keep-alive"
         })
-        retry_strategy = Retry(total=cfg.get('max_retries', 1), backoff_factor=0.3,
+        retry_strategy = Retry(total=CFG.get('max_retries', 2), backoff_factor=0.3,
                                status_forcelist=[429, 500, 502, 503, 504])
-        adapter = HTTPAdapter(pool_connections=cfg.get('max_pool_connections', 30),
-                              pool_maxsize=cfg.get('max_pool_connections', 30),
+        adapter = HTTPAdapter(pool_connections=min(10, CFG.get('max_pool_connections', 50)),
+                              pool_maxsize=CFG.get('max_pool_connections', 50),
                               max_retries=retry_strategy)
         session.mount('https://', adapter)
         session.mount('http://', adapter)
         return session
 
+    def _session_for(self, url):
+        sess = self.sessions.get(url)
+        if sess is None:
+            # Token rides the obfuscated envelope, not headers — any node's
+            # session builder is identical.
+            sess = self._build_session("", CFG)
+            self.sessions[url] = sess
+        return sess
+
     def get_next_node(self):
+        """Returns (active_url, token, session) of the next healthy node."""
         with self.lock:
-            srv = next(self._cycle)
-        return srv["url"], srv["token"], self.sessions[srv["url"]]
+            node = self.nodes[next(self._cycle)]
+            url = node["active"]
+        return url, node["token"], self._session_for(url)
 
     def get_all_nodes(self):
-        return self.servers
+        return self.nodes
+
+    def report_success(self, url):
+        with self.lock:
+            for n in self.nodes:
+                if n["active"] == url:
+                    n["fails"] = 0
+
+    def report_failure(self, url):
+        """Hard failure on the active address: after FAIL_LIMIT strikes the
+        node transparently moves to its fallback address (CMS path)."""
+        swapped = False
+        with self.lock:
+            for n in self.nodes:
+                if n["active"] != url:
+                    continue
+                n["fails"] += 1
+                if n["fails"] >= self.FAIL_LIMIT and n["fallback"] and n["fallback"] != n["active"]:
+                    old = n["active"]
+                    n["active"] = n["fallback"]
+                    n["fails"] = 0
+                    swapped = True
+                    print(f"[*] Node {old} failing repeatedly -> switching to fallback {n['active']}")
+        return swapped
 
 # ======================================================================
 # 3. Telemetry, watchdogs and console dashboard
@@ -370,11 +430,13 @@ class CoreTelemetry:
                 self.remove_tunnel(t_id)
 
     def _notify_server_session_clear(self, old_sess_id):
-        for srv in self.server_manager.get_all_nodes():
-            meta = {"a": "c", "s": old_sess_id, "t": "", "k": srv["token"]}
+        for n in self.server_manager.get_all_nodes():
+            meta = {"a": "c", "s": old_sess_id, "t": "", "k": n["token"]}
             b64_meta = base64.b64encode(json.dumps(meta).encode()).decode()[::-1]
             try:
-                requests.get(f"{srv['url']}?_v={urllib.parse.quote(b64_meta, safe='')}", timeout=5, verify=False)
+                requests.get(f"{n['active']}?_v={urllib.parse.quote(b64_meta, safe='')}",
+                             timeout=(CONNECT_TIMEOUT, 8), verify=False,
+                             headers={"Accept-Encoding": "identity"})
             except Exception:
                 pass
 
@@ -430,7 +492,7 @@ class CoreTelemetry:
                         print(f"   -> {domain}: {count} active channels")
                     print("-" * 75)
 
-                print(f"[OK] Active channels ({active_count} / {CFG.get('max_pool_connections', 30)}):")
+                print(f"[OK] Active channels ({active_count} / {CFG.get('max_pool_connections', 50)}):")
                 if active_count == 0:
                     print("   [System is idle]")
                 else:
@@ -458,7 +520,7 @@ class StatefulRelayCore:
         self.router = RoutingEngine(CFG)
         self.server_manager = ServerManager(CFG)
         self.stats = CoreTelemetry(self.server_manager)
-        self.pool_size = CFG.get('max_pool_connections', 30)
+        self.pool_size = CFG.get('max_pool_connections', 50)
         self.connection_semaphore = threading.Semaphore(self.pool_size)
         threading.Thread(target=self.stats.print_dashboard, daemon=True).start()
 
@@ -530,10 +592,13 @@ class StatefulRelayCore:
     def php_reader_loop(self, session, srv_url, srv_token, tunnel_id, host, port, client_socket, protocol="tcp"):
         try:
             obfuscated_param = self._encode_meta("t", tunnel_id, srv_token, host, port, protocol)
-            response = session.get(f"{srv_url}?_v={urllib.parse.quote(obfuscated_param, safe='')}", stream=True,
-                                   timeout=CFG.get('request_timeout', 10), verify=False)
+            response = session.get(
+                f"{srv_url}?_v={urllib.parse.quote(obfuscated_param, safe='')}",
+                stream=True,
+                timeout=(CONNECT_TIMEOUT, STREAM_READ_TIMEOUT), verify=False)
 
             if response.status_code == 200:
+                self.server_manager.report_success(srv_url)
                 self.stats.register_tunnel(tunnel_id, host, port, client_socket, session, srv_url, protocol)
                 self.stats.decrease_delay(0.05)
 
@@ -551,16 +616,19 @@ class StatefulRelayCore:
                     except Exception:
                         break
             elif response.status_code == 404:
+                self.server_manager.report_failure(srv_url)
                 self.stats.mark_failed_queue()
-                self.stats.add_error(f"[DPI Block] 404 token mismatch on {srv_url}")
+                self.stats.add_error(f"[Node Reject] 404 on {srv_url} (wrong token or endpoint unreachable)")
             else:
+                self.server_manager.report_failure(srv_url)
                 self.stats.mark_failed_queue()
                 self.stats.increase_delay(0.5)
                 self.stats.add_error(f"[Hub Load] HTTP {response.status_code} on {srv_url}")
         except Exception as e:
+            self.server_manager.report_failure(srv_url)
             self.stats.mark_failed_queue()
             if "Pool" not in str(e):
-                self.stats.add_error(f"[Network] Err: {type(e).__name__} on {srv_url}")
+                self.stats.add_error(f"[Network] {type(e).__name__} on {srv_url}")
         finally:
             self.stats.remove_tunnel(tunnel_id)
             try:
@@ -594,15 +662,17 @@ class StatefulRelayCore:
 
             if initial_data:
                 self.stats.update_tx(tunnel_id, len(initial_data))
-                srv_sess.post(target_url, data=base64.b64encode(initial_data).decode('utf-8')[::-1], timeout=10, verify=False)
+                srv_sess.post(target_url, data=base64.b64encode(initial_data).decode('utf-8')[::-1],
+                              timeout=(CONNECT_TIMEOUT, WRITE_TIMEOUT), verify=False)
 
-            client_socket.settimeout(60)
+            client_socket.settimeout(120)
             while True:
                 data = client_socket.recv(16384)
                 if not data:
                     break
                 self.stats.update_tx(tunnel_id, len(data))
-                srv_sess.post(target_url, data=base64.b64encode(data).decode('utf-8')[::-1], timeout=10, verify=False)
+                srv_sess.post(target_url, data=base64.b64encode(data).decode('utf-8')[::-1],
+                              timeout=(CONNECT_TIMEOUT, WRITE_TIMEOUT), verify=False)
 
         finally:
             self.connection_semaphore.release()

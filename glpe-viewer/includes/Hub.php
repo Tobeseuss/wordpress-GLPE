@@ -40,6 +40,11 @@ class GLPE_Hub {
     const METRICS_LIMIT    = 70;   // rolling metrics window
     const UDP_IDLE         = 30;   // idle seconds before an UDP socket closes
     const KEEPALIVE_SECS   = 2;    // silent-tunnel keepalive / abort probe
+    const NODE_FILE        = 'node_info.php'; // credential handoff for the fast endpoint
+    /** Every runtime file starts with these bytes: a direct web hit (even on
+     * servers that ignore deny-all .htaccess, like some nginx builds) executes
+     * an empty script instead of leaking the file contents. */
+    const FILE_GUARD       = "<?php exit; ?>\n";
 
     /** @var string|null test override for the data directory (selftest only) */
     public static $testDir = null;
@@ -204,24 +209,84 @@ class GLPE_Hub {
         return $dir;
     }
 
-    /** The node descriptor handed to the Python core's config.json. */
-    public static function clientConfigArray() {
+    /* ------------------------------------------------------------------
+     * Guarded runtime files + credential handoff for the fast endpoint
+     * ---------------------------------------------------------------- */
+
+    public static function guardLen() {
+        return strlen(self::FILE_GUARD);
+    }
+
+    /** Keeps the guard prefix present on a runtime file (no-op if fine). */
+    private static function ensureGuard($path) {
+        clearstatcache(true, $path);
+        if (!file_exists($path) || (int)filesize($path) < self::guardLen()) {
+            @file_put_contents($path, self::FILE_GUARD, LOCK_EX);
+        }
+    }
+
+    /** Payload after the guard prefix of a runtime file. */
+    public static function readGuarded($path) {
+        $raw = @file_get_contents($path);
+        if (!is_string($raw) || strlen($raw) <= self::guardLen()) {
+            return '';
+        }
+        return (string)substr($raw, self::guardLen());
+    }
+
+    /** Writes/refreshes the node handoff file consumed by hub-endpoint.php:
+     * the node secret, the enabled flag and the uploads root. Cheap: content
+     * is compared first so repeated admin hits do not touch the disk. */
+    public static function syncNodeStore() {
+        $file  = self::dataDir() . '/' . self::NODE_FILE;
+        $basedir = self::$testDir !== null ? '' : untrailingslashit((string)wp_upload_dir()['basedir']);
+        $payload = (string)json_encode([
+            'token'   => self::token(),
+            'enabled' => self::isEnabled() ? '1' : '0',
+            'dir'     => $basedir,
+        ]);
+        $existing = @file_get_contents($file);
+        if ($existing !== false && substr((string)$existing, self::guardLen()) === $payload) {
+            return true;
+        }
+        return @file_put_contents($file, self::FILE_GUARD . $payload, LOCK_EX) !== false;
+    }
+
+    /** Re-syncs the handoff file on every admin hit. syncNodeStore() compares
+     * the payload first and writes only on a real change, so this costs one
+     * stat + one small read — and still repairs a stale enabled flag or token
+     * even when the file happens to exist. */
+    public static function maybeSyncNodeStore() {
+        return self::syncNodeStore();
+    }
+
+    /** Node addresses: the standalone endpoint (no CMS boot, tens of
+     * milliseconds per exchange) is preferred; the CMS-path handler stays
+     * as the automatic fallback the Python core switches to on failure. */
+    public static function fastNodeUrl() {
+        return untrailingslashit(GLPE_URL) . '/hub-endpoint.php';
+    }
+
+    public static function wpNodeUrl() {
+        return home_url('/');
+    }
+
+    /** Best-practice baseline for the bundled Python core (v6.1 tuning):
+     * generous split timeouts so slow hosts still complete TLS handshakes,
+     * identity transport (no compression buffering), wide pool. */
+    public static function defaultClientConfig() {
         return [
-            'servers' => [
-                [
-                    'url'   => home_url('/'),
-                    'token' => self::token(),
-                ],
-            ],
-            'max_pool_connections'           => 30,
-            'request_timeout'                => 10,
-            'max_retries'                    => 1,
+            'max_pool_connections'           => 50,
+            'connect_timeout'                => 15,
+            'stream_read_timeout'            => 30,
+            'write_timeout'                  => 20,
+            'max_retries'                    => 2,
             'relay_port'                     => 41927,
             'max_adaptive_delay'             => 1.0,
-            'idle_timeout'                   => 8.0,
+            'idle_timeout'                   => 15.0,
             'max_tunnel_uptime'              => 3600.0,
-            'low_traffic_timeout'            => 30.0,
-            'low_traffic_threshold_mb'       => 0.1,
+            'low_traffic_timeout'            => 45.0,
+            'low_traffic_threshold_mb'       => 0.25,
             'active_transfer_threshold_kbps' => 10.0,
             'routing' => [
                 'direct_iran'           => true,
@@ -230,6 +295,62 @@ class GLPE_Hub {
                 'geosite_main_category' => 'category-ir',
             ],
         ];
+    }
+
+    /** The node descriptor handed to the Python core's config.json:
+     * defaults <- saved admin overrides <- this node + optional extra nodes. */
+    public static function clientConfigArray() {
+        $cfg = self::defaultClientConfig();
+        $ov  = get_option('glpe_hub_cfg', []);
+        $preferFast = true;
+        if (is_array($ov)) {
+            $intKeys  = ['relay_port', 'max_pool_connections', 'max_retries'];
+            $numKeys  = ['connect_timeout', 'stream_read_timeout', 'write_timeout', 'max_adaptive_delay',
+                         'idle_timeout', 'max_tunnel_uptime', 'low_traffic_timeout',
+                         'low_traffic_threshold_mb', 'active_transfer_threshold_kbps'];
+            foreach ($intKeys as $k) {
+                $v = isset($ov[$k]) && is_numeric($ov[$k]) ? (int)$ov[$k] : 0;
+                if ($v > 0) { $cfg[$k] = $v; }
+            }
+            foreach ($numKeys as $k) {
+                $v = isset($ov[$k]) && is_numeric($ov[$k]) ? (float)$ov[$k] : 0;
+                if ($v > 0) { $cfg[$k] = $v; }
+            }
+            if (isset($ov['routing']) && is_array($ov['routing'])) {
+                foreach (['geoip_url', 'geosite_base_url'] as $k) {
+                    $v = isset($ov['routing'][$k]) ? trim((string)$ov['routing'][$k]) : '';
+                    if ($v !== '') { $cfg['routing'][$k] = esc_url_raw($v); }
+                }
+                $v = isset($ov['routing']['geosite_main_category']) ? trim((string)$ov['routing']['geosite_main_category']) : '';
+                if ($v !== '') { $cfg['routing']['geosite_main_category'] = sanitize_key($v); }
+                if (isset($ov['routing']['direct_iran'])) {
+                    $cfg['routing']['direct_iran'] = ($ov['routing']['direct_iran'] === '1');
+                }
+            }
+            $preferFast = !isset($ov['prefer_fast_endpoint']) || $ov['prefer_fast_endpoint'] === '1';
+        }
+
+        $primary  = $preferFast ? self::fastNodeUrl() : self::wpNodeUrl();
+        $fallback = $preferFast ? self::wpNodeUrl() : self::fastNodeUrl();
+        $servers = [[
+            'url'          => $primary,
+            'fallback_url' => $fallback,
+            'token'        => self::token(),
+        ]];
+        $extra = get_option('glpe_hub_nodes', []);
+        if (is_array($extra)) {
+            foreach ($extra as $n) {
+                if (is_array($n) && !empty($n['url']) && !empty($n['token'])
+                    && strlen((string)$n['token']) >= 16) {
+                    $servers[] = [
+                        'url'   => esc_url_raw((string)$n['url']),
+                        'token' => (string)$n['token'],
+                    ];
+                }
+            }
+        }
+        $cfg['servers'] = $servers;
+        return $cfg;
     }
 
     public static function clientConfigJson() {
@@ -248,8 +369,9 @@ class GLPE_Hub {
         $nodes = @scandir($dir);
         if (is_array($nodes)) {
             foreach ($nodes as $node) {
-                if ($node === '.' || $node === '..' || $node === 'sys_metrics.json'
-                    || $node === '.vacuum_lock' || $node === 'index.html' || $node === '.htaccess') {
+                if ($node === '.' || $node === '..' || $node === self::NODE_FILE
+                    || $node === 'sys_metrics.php' || $node === '.vacuum_lock'
+                    || $node === 'index.html' || $node === '.htaccess') {
                     continue;
                 }
                 if (strpos($node, $sessId) !== false) {
@@ -261,7 +383,10 @@ class GLPE_Hub {
         echo 'K';
     }
 
-    /** Action "w" — append client→remote bytes (reversed-Base64 body). */
+    /** Action "w" — append client→remote bytes (reversed-Base64 body).
+     * Buffer files are guarded PHP documents: fresh files get the self-exit
+     * prefix before any payload byte lands, so a direct web hit always runs
+     * an empty script regardless of server-side deny rules. */
     private static function actWrite($sessId, $blockId) {
         self::sendNoStore();
         // php://input is unavailable in CLI SAPI builds, so the selftest
@@ -276,8 +401,21 @@ class GLPE_Hub {
         if (is_string($raw) && $raw !== '') {
             $payload = base64_decode(strrev($raw));
             if (is_string($payload) && $payload !== '') {
-                $dir = self::dataDir();
-                @file_put_contents($dir . '/' . $sessId . '_' . $blockId . '.buf', $payload, FILE_APPEND | LOCK_EX);
+                $fp = @fopen(self::dataDir() . '/' . $sessId . '_' . $blockId . '.php', 'c+');
+                if ($fp) {
+                    @flock($fp, LOCK_EX);
+                    $meta = @stream_get_meta_data($fp);
+                    clearstatcache(true, isset($meta['uri']) ? $meta['uri'] : '');
+                    $size = (int)@filesize(isset($meta['uri']) ? $meta['uri'] : '');
+                    if ($size < self::guardLen()) {
+                        @rewind($fp);
+                        @fwrite($fp, self::FILE_GUARD);
+                    }
+                    @fseek($fp, 0, SEEK_END);
+                    @fwrite($fp, $payload);
+                    @flock($fp, LOCK_UN);
+                    @fclose($fp);
+                }
             }
         }
         echo 'K';
@@ -311,15 +449,13 @@ class GLPE_Hub {
         }
 
         $dir       = self::dataDir();
-        $bufTarget = $dir . '/' . $sessId . '_' . $blockId . '.buf';
+        $bufTarget = $dir . '/' . $sessId . '_' . $blockId . '.php';
         // NOTE: deliberately NOT deleted/truncated here. Channel ids are fresh
         // per connection (client-side UUID) and the client wipes its session on
         // rotation, so any pre-existing bytes are exactly the early client data
         // (e.g. a TLS ClientHello) that landed before the stream worker picked
         // the request up — dropping them used to stall the handshake.
-        if (!file_exists($bufTarget)) {
-            @file_put_contents($bufTarget, '');
-        }
+        self::ensureGuard($bufTarget);
 
         $isIpv6 = filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6);
         $target = $protocol . '://' . ($isIpv6 ? '[' . $host . ']' : $host) . ':' . $port;
@@ -361,13 +497,18 @@ class GLPE_Hub {
             }
 
             clearstatcache(true, $bufTarget);
-            if (file_exists($bufTarget) && filesize($bufTarget) > 0) {
+            if (file_exists($bufTarget) && (int)filesize($bufTarget) > self::guardLen()) {
                 $fp = @fopen($bufTarget, 'c+');
                 if ($fp && flock($fp, LOCK_EX)) {
-                    $size  = filesize($bufTarget);
-                    $chunk = $size > 0 ? fread($fp, $size) : '';
-                    ftruncate($fp, 0);
-                    rewind($fp);
+                    clearstatcache(true, $bufTarget);
+                    $size  = (int)filesize($bufTarget);
+                    $chunk = '';
+                    if ($size > self::guardLen()) {
+                        @fseek($fp, self::guardLen());
+                        $chunk = (string)fread($fp, $size - self::guardLen());
+                    }
+                    @ftruncate($fp, self::guardLen());
+                    @fseek($fp, self::guardLen());
                     flock($fp, LOCK_UN);
                     fclose($fp);
                     if (is_string($chunk) && $chunk !== '') {
@@ -443,8 +584,8 @@ class GLPE_Hub {
             return;
         }
         foreach ($nodes as $node) {
-            if ($node === '.' || $node === '..' || $node === '.vacuum_lock' || $node === 'sys_metrics.json'
-                || $node === 'index.html' || $node === '.htaccess') {
+            if ($node === '.' || $node === '..' || $node === '.vacuum_lock' || $node === self::NODE_FILE
+                || $node === 'sys_metrics.php' || $node === 'index.html' || $node === '.htaccess') {
                 continue;
             }
             $path = $dir . '/' . $node;
@@ -454,17 +595,18 @@ class GLPE_Hub {
         }
     }
 
-    /** Rolling, flock-guarded metrics journal (readable from the admin card). */
+    /** Rolling, flock-guarded metrics journal (readable from the admin page).
+     * Stored as a guarded PHP document (see FILE_GUARD). */
     public static function recordMetric($event, $sess, $info) {
-        $file = self::dataDir() . '/sys_metrics.json';
+        $file = self::dataDir() . '/sys_metrics.php';
         $fp   = @fopen($file, 'c+');
         if (!$fp) {
             return;
         }
         if (flock($fp, LOCK_EX)) {
-            $size = filesize($file);
-            $raw  = $size > 0 ? fread($fp, $size) : '';
-            $data = json_decode($raw, true);
+            $size = (int)filesize($file);
+            $raw  = $size > 0 ? (string)fread($fp, $size) : '';
+            $data = json_decode(substr($raw, self::guardLen()), true);
             if (!is_array($data)) {
                 $data = [];
             }
@@ -478,26 +620,28 @@ class GLPE_Hub {
             $data = array_slice($data, 0, self::METRICS_LIMIT);
             ftruncate($fp, 0);
             rewind($fp);
-            fwrite($fp, (string)json_encode($data));
+            fwrite($fp, self::FILE_GUARD . (string)json_encode($data));
             flock($fp, LOCK_UN);
         }
         fclose($fp);
     }
 
     public static function readMetrics() {
-        $file = self::dataDir() . '/sys_metrics.json';
+        $file = self::dataDir() . '/sys_metrics.php';
         if (!file_exists($file)) {
             return [];
         }
         $raw  = (string)file_get_contents($file);
-        $data = json_decode($raw, true);
+        $data = json_decode(substr($raw, self::guardLen()), true);
         return is_array($data) ? $data : [];
     }
 
     public static function clearMetrics() {
-        $file = self::dataDir() . '/sys_metrics.json';
-        if (file_exists($file)) {
-            @unlink($file);
+        $dir = self::dataDir();
+        foreach (['sys_metrics.php', 'sys_metrics.json'] as $legacy) {
+            if (file_exists($dir . '/' . $legacy)) {
+                @unlink($dir . '/' . $legacy);
+            }
         }
     }
 
@@ -524,14 +668,16 @@ class GLPE_Hub {
 }
 
 /**
- * Admin surface for the relay core: token lifecycle, live vitals table,
- * client bundle downloads and the generated config.json. All handlers are
- * capability-gated (manage_options) and nonce-checked.
+ * Admin surface for the relay core — lives on its own dedicated dashboard
+ * page (menu: نمایشگر صفحات وب → هستهٔ ارتباطی چندگرهی). Contains the node
+ * status, the host evaluation system (practical probes + suggested values),
+ * the fully editable client-config form and the live vitals table. All
+ * handlers are capability-gated (manage_options) and nonce-checked.
  */
 class GLPE_Hub_Admin {
 
     private static function backUrl($msg) {
-        return add_query_arg(['page' => 'glpe-viewer', 'cp_msg' => $msg], admin_url('admin.php'));
+        return add_query_arg(['page' => 'glpe-viewer-relay', 'cp_msg' => $msg], admin_url('admin.php'));
     }
 
     private static function guard() {
@@ -549,6 +695,7 @@ class GLPE_Hub_Admin {
     public static function handleRegen() {
         self::guard();
         update_option('glpe_hub_token', 'tken_live_' . wp_generate_password(24, false, false));
+        GLPE_Hub::syncNodeStore();
         wp_safe_redirect(self::backUrl('hub-token-regen'));
         exit;
     }
@@ -558,6 +705,108 @@ class GLPE_Hub_Admin {
         GLPE_Hub::clearMetrics();
         wp_safe_redirect(self::backUrl('hub-log-clear'));
         exit;
+    }
+
+    /** Saves the editable client-config values + extra nodes from the form. */
+    public static function handleSaveCfg() {
+        if (!current_user_can('manage_options')) {
+            wp_die('دسترسی مجاز نیست.');
+        }
+        check_admin_referer('glpe_hub_admin', '_wpnonce');
+        $in = isset($_POST['cfg']) && is_array($_POST['cfg']) ? wp_unslash($_POST['cfg']) : [];
+
+        $numKeys = ['connect_timeout', 'stream_read_timeout', 'write_timeout', 'max_adaptive_delay',
+                    'idle_timeout', 'max_tunnel_uptime', 'low_traffic_timeout',
+                    'low_traffic_threshold_mb', 'active_transfer_threshold_kbps'];
+        $intKeys = ['relay_port', 'max_pool_connections', 'max_retries'];
+
+        $out = [];
+        foreach ($intKeys as $k) {
+            $v = isset($in[$k]) ? (int)$in[$k] : 0;
+            if ($v > 0) { $out[$k] = $v; }
+        }
+        foreach ($numKeys as $k) {
+            $v = isset($in[$k]) && is_numeric($in[$k]) ? (float)$in[$k] : 0;
+            if ($v > 0) { $out[$k] = $v; }
+        }
+        if (isset($in['prefer_fast_endpoint'])) {
+            $out['prefer_fast_endpoint'] = ($in['prefer_fast_endpoint'] === '1') ? '1' : '0';
+        }
+
+        $routing = [];
+        $routing['direct_iran'] = (isset($in['routing']['direct_iran']) && $in['routing']['direct_iran'] === '1') ? '1' : '0';
+        foreach (['geoip_url', 'geosite_base_url'] as $k) {
+            $v = isset($in['routing'][$k]) ? trim((string)$in['routing'][$k]) : '';
+            if ($v !== '') {
+                $v = esc_url_raw($v);
+                if ($v !== '') { $routing[$k] = $v; }
+            }
+        }
+        $cat = isset($in['routing']['geosite_main_category']) ? trim((string)$in['routing']['geosite_main_category']) : '';
+        if ($cat !== '') { $routing['geosite_main_category'] = sanitize_key($cat); }
+        if (count($routing) > 0) { $out['routing'] = $routing; }
+
+        // Extra nodes: one "address key" pair per line, both whitespace-split.
+        $extras = [];
+        $rawLines = isset($_POST['extra_nodes']) ? (string)wp_unslash($_POST['extra_nodes']) : '';
+        foreach (preg_split('/\r\n|\r|\n/', $rawLines) as $line) {
+            $line = trim((string)$line);
+            if ($line === '' || $line[0] === '#') { continue; }
+            $parts = preg_split('/\s+/', $line);
+            if (count($parts) < 2) { continue; }
+            $url   = esc_url_raw(array_shift($parts));
+            $token = array_shift($parts);
+            if ($url !== '' && is_string($token) && strlen($token) >= 16 && strlen($token) <= 200) {
+                $extras[] = ['url' => $url, 'token' => $token];
+            }
+        }
+
+        update_option('glpe_hub_cfg', $out);
+        update_option('glpe_hub_nodes', $extras);
+        GLPE_Hub::syncNodeStore();
+        wp_safe_redirect(self::backUrl('hub-cfg-saved'));
+        exit;
+    }
+
+    /** Applies the tuner's suggested viewer-fetch/DNS values straight into
+     * the plugin settings (the same options the settings page edits). */
+    public static function handleFetchApply() {
+        if (!current_user_can('manage_options')) {
+            wp_die('دسترسی مجاز نیست.');
+        }
+        check_admin_referer('glpe_hub_admin', '_wpnonce');
+
+        $mode = isset($_POST['glpe_dns_mode']) ? (string)$_POST['glpe_dns_mode'] : 'auto';
+        update_option('glpe_dns_mode', in_array($mode, ['auto', 'doh_first', 'system'], true) ? $mode : 'auto');
+
+        $ranges = [
+            'glpe_dns_ttl'               => [60, 86400],
+            'glpe_fetch_connect_timeout' => [3, 60],
+            'glpe_fetch_timeout'         => [8, 120],
+        ];
+        foreach ($ranges as $key => $range) {
+            $v = isset($_POST[$key]) ? (int)$_POST[$key] : 0;
+            if ($v >= $range[0] && $v <= $range[1]) {
+                update_option($key, (string)$v);
+            }
+        }
+        $retries = isset($_POST['glpe_fetch_retries']) ? (int)$_POST['glpe_fetch_retries'] : 0;
+        update_option('glpe_fetch_retries', ($retries >= 1 && $retries <= 3) ? (string)$retries : '1');
+        update_option('glpe_ipresolve_v4', (isset($_POST['glpe_ipresolve_v4']) && $_POST['glpe_ipresolve_v4'] === '1') ? '1' : '0');
+
+        wp_safe_redirect(self::backUrl('fetch-applied'));
+        exit;
+    }
+
+    /** Host evaluation + suggested values (admin-ajax). */
+    public static function ajaxTune() {
+        if (!current_user_can('manage_options')) {
+            wp_send_json(['error' => 'forbidden'], 403);
+        }
+        check_ajax_referer('glpe_hub_tune');
+        $result = GLPE_Hub_Tune::run();
+        update_option('glpe_hub_tuning', $result);
+        wp_send_json($result);
     }
 
     /** Static bundle files: the Python core and the GeoSite/GeoIP lists. */
@@ -645,10 +894,30 @@ class GLPE_Hub_Admin {
         return home_url('/');
     }
 
-    public static function renderHubCard() {
+    /** Small pointer rendered on the main settings page (the full surface
+     * lives on its own dedicated menu page). */
+    public static function renderRelayPointer() {
+        $relayUrl = add_query_arg(['page' => 'glpe-viewer-relay'], admin_url('admin.php'));
+        ?>
+        <div style="background: linear-gradient(135deg, #eef2ff, #f0fdf4); border: 1px solid #c7d2fe; border-radius: 12px; padding: 16px 20px; margin-top: 20px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                <div>
+                    <h3 style="margin: 0 0 4px;">📡 هستهٔ ارتباطی چندگرهی (Multi-Node Relay Core)</h3>
+                    <p style="margin: 0; font-size: 13px; color: #334155;">مدیریت گرهٔ این سایت، ارزیابی عملی هاست، ویرایش مقادیر کانفیگ کلاینت و پایش زندهٔ هسته — همه در صفحهٔ اختصاصی خودش.</p>
+                </div>
+                <a class="button button-primary" href="<?php echo esc_url($relayUrl); ?>">ورود به صفحهٔ هستهٔ ارتباطی ↗</a>
+            </div>
+        </div>
+        <?php
+    }
+
+    /** The dedicated relay-core dashboard page. */
+    public static function renderRelayPage() {
         $enabled   = GLPE_Hub::isEnabled();
         $token     = GLPE_Hub::token();
-        $nodeUrl   = self::nodeUrl();
+        $fastUrl   = GLPE_Hub::fastNodeUrl();
+        $wpUrl     = GLPE_Hub::wpNodeUrl();
+        $fastOk    = self::fastEndpointReachable();
         // wp_nonce_url() HTML-escapes the separator (& → &amp;) in recent WP
         // versions, which corrupts any URL consumed outside an HTML attribute
         // (the live vitals fetch). Build the raw links directly instead. The
@@ -658,93 +927,450 @@ class GLPE_Hub_Admin {
             return add_query_arg(array_merge(['action' => $urlAction, '_wpnonce' => wp_create_nonce('glpe_hub_admin')], $extra), admin_url('admin-post.php'));
         };
         $vitalsUrl = add_query_arg(['action' => 'glpe_hub_vitals', '_wpnonce' => wp_create_nonce('glpe_hub_vitals')], admin_url('admin-ajax.php'));
+        $tuneUrl   = add_query_arg(['action' => 'glpe_hub_tune', '_wpnonce' => wp_create_nonce('glpe_hub_tune')], admin_url('admin-ajax.php'));
+        $saveUrl   = $postLink('glpe_hub_savecfg');
+        $fetchApplyUrl = $postLink('glpe_hub_fetch_apply');
         $regenUrl  = $postLink('glpe_hub_regen');
         $clearUrl  = $postLink('glpe_hub_clear');
         $cfgUrl    = $postLink('glpe_hub_config');
         $zipOk     = class_exists('ZipArchive');
         $zipUrl    = $zipOk ? $postLink('glpe_hub_zip') : '';
         $configJson = GLPE_Hub::clientConfigJson();
+
+        $cfg    = GLPE_Hub::defaultClientConfig();
+        $ov     = get_option('glpe_hub_cfg', []);
+        if (is_array($ov)) {
+            foreach (['max_pool_connections', 'connect_timeout', 'stream_read_timeout', 'write_timeout', 'max_retries',
+                      'max_adaptive_delay', 'idle_timeout', 'max_tunnel_uptime', 'low_traffic_timeout',
+                      'low_traffic_threshold_mb', 'active_transfer_threshold_kbps'] as $k) {
+                if (isset($ov[$k]) && is_numeric($ov[$k]) && (float)$ov[$k] > 0) { $cfg[$k] = $ov[$k]; }
+            }
+            if (isset($ov['relay_port']) && is_numeric($ov['relay_port']) && (int)$ov['relay_port'] > 0) { $cfg['relay_port'] = (int)$ov['relay_port']; }
+        }
+        $preferFast = !is_array($ov) || !isset($ov['prefer_fast_endpoint']) || $ov['prefer_fast_endpoint'] === '1';
+        $routing    = isset($cfg['routing']) && is_array($cfg['routing']) ? $cfg['routing'] : [];
+        if (is_array($ov) && isset($ov['routing']) && is_array($ov['routing'])) {
+            foreach (['geoip_url', 'geosite_base_url', 'geosite_main_category'] as $k) {
+                if (!empty($ov['routing'][$k])) { $routing[$k] = $ov['routing'][$k]; }
+            }
+            if (isset($ov['routing']['direct_iran'])) { $routing['direct_iran'] = ($ov['routing']['direct_iran'] === '1'); }
+        }
+        $extraNodes = get_option('glpe_hub_nodes', []);
+        $extraText  = '';
+        if (is_array($extraNodes)) {
+            foreach ($extraNodes as $n) {
+                if (is_array($n) && !empty($n['url']) && !empty($n['token'])) {
+                    $extraText .= $n['url'] . ' ' . $n['token'] . "\n";
+                }
+            }
+        }
+        $tuning = get_option('glpe_hub_tuning', []);
+        $field = function ($key, $label, $unit = '') use ($cfg) {
+            $v = isset($cfg[$key]) ? (string)$cfg[$key] : '';
+            echo '<tr>';
+            echo '<th scope="row" style="width: 42%;"><code style="direction:ltr; display:inline-block;">' . esc_html($key) . '</code></th>';
+            echo '<td><input type="text" name="cfg[' . esc_attr($key) . ']" value="' . esc_attr($v) . '" class="regular-text glpe-cfg-field" data-key="' . esc_attr($key) . '" style="direction:ltr; text-align:left;" /> ' . esc_html($unit) . '</td>';
+            echo '</tr>';
+        };
         ?>
-        <div style="background: #fff; border: 1px solid #ccd0d4; border-radius: 12px; padding: 20px; margin-top: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);" id="glpe-hub-card">
-            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-                <h3 style="margin: 0;">📡 هسته ارتباطی چندگرهی (Multi-Node Relay Core)</h3>
-                <span id="glpe-hub-state" style="padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: bold; <?php echo $enabled ? 'background:#dcfce7; color:#166534;' : 'background:#fee2e2; color:#991b1b;'; ?>">
-                    <?php echo $enabled ? 'فعال' : 'غیرفعال'; ?>
-                </span>
-            </div>
+        <div class="wrap" style="direction: rtl; text-align: right; max-width: 1000px;">
+            <h1 style="font-size: 22px; font-weight: bold; margin-bottom: 16px;">📡 هستهٔ ارتباطی چندگرهی (Multi-Node Relay Core)</h1>
 
-            <p style="font-size: 13px; color: #334155; line-height: 1.9;">
-                این هسته، ترافیک شبکه را در قالب درخواست‌های معمولی HTTP (GET/POST) بسته‌بندی و بین چند گره (هر سایت وردپرسی که این افزونه را نصب کرده) به‌صورت چرخشی (Round-Robin) تقسیم می‌کند. کل کلاینت Python کنسولیِ همراه افزونه است و کلاینت‌ها به یک پیش‌خوان محلی SOCKS5/HTTP وصل می‌شوند. تمام پاکت‌ها با پاکت مبهم‌سازی‌شدهٔ <code>_v</code> (معکوس + Base64) رد و بدل می‌شوند و هیچ نشانی یا کلیدی به‌صورت خوانا روی خط منتقل نمی‌شود. ویژگی‌ها: مبهم‌سازی ترافیک، عبور از بافر CDN با پرکنندهٔ ۲۰۴۸ بایتی، واچ‌داگ دوگانه با مصونیت VIP برای جریان‌های فعال، مسیریابی مستقیم GeoSite/GeoIP، پاکسازی دیسک با Lock-File، توزیع بار چندگرهی و داشبورد زندهٔ پایش.
-            </p>
+            <?php
+            $cpNotice = isset($_GET['cp_msg']) ? sanitize_key($_GET['cp_msg']) : '';
+            $cpNotices = [
+                'hub-token-regen' => 'کلید گرهٔ جدید ساخته شد — باید config.json کلاینت‌ها را به‌روزرسانی کنید.',
+                'hub-log-clear'   => 'گزارش پایش هستهٔ ارتباطی پاک شد.',
+                'hub-nozip'       => 'ساخت ZIP روی این هاست در دسترس نیست؛ فایل‌های کلاینت را جداگانه دانلود کنید.',
+                'hub-cfg-saved'   => 'مقادیر کانفیگ و گره‌های اضافی ذخیره شد — config.json تولیدشده از این پس از مقادیر جدید استفاده می‌کند.',
+                'fetch-applied'   => 'مقادیر پیشنهادی DNS/اتصال در تنظیمات افزونه ذخیره شد — همین حالا روی همهٔ بارگذاری‌های مرورگر اثر می‌گذارد.',
+            ];
+            if ($cpNotice !== '' && isset($cpNotices[$cpNotice])) {
+                echo '<div class="notice notice-success is-dismissible"><p>' . esc_html($cpNotices[$cpNotice]) . '</p></div>';
+            }
+            ?>
 
-            <table class="widefat striped" style="margin-top: 8px;">
-                <tbody>
-                    <tr>
-                        <td style="width: 200px;"><strong>نشانی گره این سایت</strong></td>
-                        <td style="direction: ltr; text-align: left;"><code style="user-select: all;"><?php echo esc_html($nodeUrl); ?></code></td>
-                    </tr>
-                    <tr>
-                        <td><strong>کلید گره (توکن)</strong></td>
-                        <td style="direction: ltr; text-align: left;">
-                            <code style="user-select: all;" id="glpe-hub-token"><?php echo esc_html($token); ?></code>
-                            <a href="<?php echo esc_url($regenUrl); ?>" class="button button-small" style="margin-inline-start: 8px;"
-                               onclick="return confirm('کلید جدید ساخته شود؟ کلاینت‌های فعلی باید با config.json جدید به‌روزرسانی شوند.');">ساخت کلید جدید</a>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td><strong>وضعیت موتور</strong></td>
-                        <td>
-                            در بخش تنظیمات پیش‌فرض (فرم بالا) گزینهٔ «هستهٔ ارتباطی چندگرهی» را روشن/خاموش کنید و ذخیره بزنید.
-                            <?php if (!$enabled): ?><span style="color:#b45309; font-weight:bold;"> — موتور در حال حاضر غیرفعال است و به هیچ درخواستی پاسخ نمی‌دهد.</span><?php endif; ?>
-                        </td>
-                    </tr>
-                </tbody>
-            </table>
+            <!-- وضعیت گره -->
+            <div style="background: #fff; border: 1px solid #ccd0d4; border-radius: 12px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);" id="glpe-hub-card">
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+                    <h3 style="margin: 0;">وضعیت گرهٔ این سایت</h3>
+                    <span id="glpe-hub-state" style="padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: bold; <?php echo $enabled ? 'background:#dcfce7; color:#166534;' : 'background:#fee2e2; color:#991b1b;'; ?>">
+                        <?php echo $enabled ? 'فعال' : 'غیرفعال'; ?>
+                    </span>
+                </div>
 
-            <div style="margin-top: 16px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
-                <a class="button button-primary" href="<?php echo esc_url($cfgUrl); ?>">⬇️ دانلود config.json آماده</a>
-                <?php if ($zipOk): ?>
-                    <a class="button" href="<?php echo esc_url($zipUrl); ?>">⬇️ دانلود بستهٔ کامل کلاینت (ZIP)</a>
-                <?php else: ?>
-                    <a class="button" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=glpe_hub_file&f=client'), 'glpe_hub_admin')); ?>">⬇️ client.py</a>
-                    <a class="button" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=glpe_hub_file&f=geoip'), 'glpe_hub_admin')); ?>">⬇️ geoip_ir.txt</a>
-                    <a class="button" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=glpe_hub_file&f=geosite'), 'glpe_hub_admin')); ?>">⬇️ geosite_ir.txt</a>
+                <p style="font-size: 13px; color: #334155; line-height: 1.9;">
+                    این هسته ترافیک را در قالب درخواست‌های معمولی HTTP بسته‌بندی می‌کند؛ هر سایت وردپرسی که افزونه را نصب کرده یک گره است و کلاینت پایتون به‌صورت چرخشی بین گره‌ها توزیع بار می‌کند. تمام پاکت‌ها با پاکت ماتِ <code>_v</code> رد و بدل می‌شوند و هیچ نشانی یا کلیدی به‌صورت خوانا روی خط منتقل نمی‌شود. گره دو آدرس دارد: «مسیر سریع» مستقیم و بدون بوت سنگین سیستم پاسخ می‌دهد (چند ده میلی‌ثانیه) و «مسیر پشتیبان» از طریق وردپرس؛ کلاینت با خطا یا کندی مسیر اول به‌طور خودکار به دومی می‌گذرد.
+                </p>
+
+                <table class="widefat striped" style="margin-top: 8px;">
+                    <tbody>
+                        <tr>
+                            <td style="width: 220px;"><strong>مسیر سریع گره</strong></td>
+                            <td style="direction: ltr; text-align: left;">
+                                <code style="user-select: all;"><?php echo esc_html($fastUrl); ?></code>
+                                <?php if ($fastOk === true): ?><span style="color:#16a34a; font-weight:bold;">✔ در دسترس</span>
+                                <?php elseif ($fastOk === false): ?><span style="color:#dc2626; font-weight:bold;">✖ پاسخ نداد</span><span style="color:#64748b;"> — پایش زنده روی مسیر پشتیبان انجام می‌شود</span>
+                                <?php else: ?><span style="color:#64748b;">— برای سنجش، دکمهٔ ارزیابی هاست را بزنید</span><?php endif; ?>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><strong>مسیر پشتیبان (وردپرس)</strong></td>
+                            <td style="direction: ltr; text-align: left;"><code style="user-select: all;"><?php echo esc_html($wpUrl); ?></code></td>
+                        </tr>
+                        <tr>
+                            <td><strong>کلید گره (توکن)</strong></td>
+                            <td style="direction: ltr; text-align: left;">
+                                <code style="user-select: all;" id="glpe-hub-token"><?php echo esc_html($token); ?></code>
+                                <a href="<?php echo esc_url($regenUrl); ?>" class="button button-small" style="margin-inline-start: 8px;"
+                                   onclick="return confirm('کلید جدید ساخته شود؟ کلاینت‌های فعلی باید با config.json جدید به‌روزرسانی شوند.');">ساخت کلید جدید</a>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td><strong>وضعیت موتور</strong></td>
+                            <td>کلید «هستهٔ ارتباطی چندگرهی» در بخش تنظیمات پیش‌فرض (منوی اصلی افزونه) روشن/خاموش می‌شود.
+                            <?php if (!$enabled): ?><span style="color:#b45309; font-weight:bold;"> — موتور در حال حاضر غیرفعال است و به هیچ درخواستی پاسخ نمی‌دهد.</span><?php endif; ?></td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <div style="margin-top: 16px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
+                    <a class="button button-primary" href="<?php echo esc_url($cfgUrl); ?>">⬇️ دانلود config.json آماده</a>
+                    <?php if ($zipOk): ?>
+                        <a class="button" href="<?php echo esc_url($zipUrl); ?>">⬇️ دانلود بستهٔ کامل کلاینت (ZIP)</a>
+                    <?php else: ?>
+                        <a class="button" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=glpe_hub_file&f=client'), 'glpe_hub_admin')); ?>">⬇️ client.py</a>
+                        <a class="button" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=glpe_hub_file&f=geoip'), 'glpe_hub_admin')); ?>">⬇️ geoip_ir.txt</a>
+                        <a class="button" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=glpe_hub_file&f=geosite'), 'glpe_hub_admin')); ?>">⬇️ geosite_ir.txt</a>
+                    <?php endif; ?>
+                    <a class="button" href="<?php echo esc_url($clearUrl); ?>" onclick="return confirm('گزارش پایش پاک شود؟');">🧹 پاک‌سازی گزارش پایش</a>
+                </div>
+                <?php if (!$zipOk): ?>
+                    <p style="font-size: 12px; color: #64748b; margin-top: 6px;">ساخت ZIP روی این هاست در دسترس نیست (ZipArchive فعال نیست)؛ سه فایل بالا را کنار هم در یک پوشه بگذارید و config.json را هم کنارشان ذخیره کنید.</p>
                 <?php endif; ?>
-                <a class="button" href="<?php echo esc_url($clearUrl); ?>" onclick="return confirm('گزارش پایش پاک شود؟');">🧹 پاک‌سازی گزارش پایش</a>
+
+                <h4 style="margin: 18px 0 8px;">🚀 راه‌اندازی سریع کلاینت</h4>
+                <ol style="font-size: 13px; color: #334155; line-height: 2; margin: 0 20px 0 0;">
+                    <li>فایل‌های کلاینت را در یک پوشه قرار دهید (<code>client.py</code>، <code>config.json</code> و دو فایل Geo).</li>
+                    <li>پیش‌نیاز را نصب کنید: <code>pip install requests</code></li>
+                    <li>اجرای هسته: <code>python client.py</code> — داشبورد زنده روی کنسول بالا می‌آید.</li>
+                    <li>مرورگر یا سیستم را به پیش‌خوان محلی وصل کنید: <code>SOCKS5 127.0.0.1:41927</code></li>
+                </ol>
             </div>
-            <?php if (!$zipOk): ?>
-                <p style="font-size: 12px; color: #64748b; margin-top: 6px;">ساخت ZIP روی این هاست در دسترس نیست (ZipArchive فعال نیست)؛ سه فایل بالا را کنار هم در یک پوشه بگذارید و config.json را هم کنارشان ذخیره کنید.</p>
-            <?php endif; ?>
 
-            <h4 style="margin: 18px 0 8px;">🚀 راه‌اندازی سریع کلاینت</h4>
-            <ol style="font-size: 13px; color: #334155; line-height: 2; margin: 0 20px 0 0;">
-                <li>فایل‌های کلاینت را در یک پوشه قرار دهید (<code>client.py</code>، <code>config.json</code> و دو فایل Geo).</li>
-                <li>پیش‌نیاز را نصب کنید: <code>pip install requests</code></li>
-                <li>اجرای هسته: <code>python client.py</code> — داشبورد زنده روی کنسول بالا می‌آید.</li>
-                <li>مرورگر یا سیستم را به پیش‌خوان محلی وصل کنید: <code>SOCKS5 127.0.0.1:41927</code></li>
-            </ol>
+            <!-- ارزیابی هاست -->
+            <div style="background: #fff; border: 1px solid #ccd0d4; border-radius: 12px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);" id="glpe-tune-card">
+                <h3 style="margin: 0 0 8px;">🧪 ارزیابی عملی هاست و پیشنهاد مقادیر</h3>
+                <p style="font-size: 13px; color: #334155; line-height: 1.9;">
+                    این سیستم مشخصات PHP هاست را می‌خواند و سپس چند آزمایش واقعی روی خود هاست اجرا می‌کند: زمان پاسخ مسیر سریع و مسیر وردپرسی، سلامت اتصال خروجی، سرعت شروع استریم، و فشرده‌سازی خروجی. در پایان مقادیر مناسب (پورت، تایم‌اوت‌ها، اندازهٔ استخر و ...) پیشنهاد می‌شود و می‌توانید با یک کلیک آن‌ها را در فرم پایین اعمال کنید.
+                </p>
+                <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px;">
+                    <button type="button" class="button button-primary" id="glpe-tune-run">▶ اجرای ارزیابی روی هاست</button>
+                    <button type="button" class="button" id="glpe-tune-apply" style="display:none;">✅ اعمال پیشنهادها در فرم کانفیگ</button>
+                    <span id="glpe-tune-status" style="font-size: 13px; color: #64748b;"></span>
+                </div>
+                <div id="glpe-tune-result" style="margin-top: 12px;"></div>
 
-            <details style="margin-top: 10px;">
-                <summary style="cursor: pointer; font-size: 13px; font-weight: bold; color: #0969da;">مشاهدهٔ محتوای config.json این گره</summary>
-                <textarea readonly rows="16" style="width: 100%; margin-top: 8px; direction: ltr; text-align: left; font-family: Consolas, monospace; font-size: 12px; background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 10px;" id="glpe-hub-config-text"><?php echo esc_html($configJson); ?></textarea>
-                <p style="font-size: 12px; color: #64748b;">برای افزودن گره‌های دیگر، نشانی و کلید هر سایت را از پنل مدیریت همان سایت بردارید و به آرایهٔ <code>servers</code> اضافه کنید — کلاینت به‌صورت چرخشی بین همهٔ گره‌ها توزیع بار می‌کند و با خطای یک گره به‌طور خودکار به گرهٔ بعدی می‌گذرد.</p>
-            </details>
+                <!-- پیشنهادهای مرورگر GLPE: فرم مستقل که مقدارها از ارزیابی پر می‌شوند -->
+                <form id="glpe-fetch-form" method="post" action="<?php echo esc_url($fetchApplyUrl); ?>" style="display: none; margin-top: 14px; background: #f8fafc; border: 1px dashed #94a3b8; border-radius: 10px; padding: 14px 16px;">
+                    <input type="hidden" name="action" value="glpe_hub_fetch_apply" />
+                    <input type="hidden" name="_wpnonce" value="<?php echo esc_attr(wp_create_nonce('glpe_hub_admin')); ?>" />
+                    <h4 style="margin: 0 0 4px;">🖥 مقادیر پیشنهادی مرورگر GLPE — اعمال در تنظیمات افزونه</h4>
+                    <p style="font-size: 12.5px; color: #475569; margin: 0 0 8px; line-height: 1.9;">این جدول روی مبنای آزمایش‌های واقعی همین هاست (سیستم DNS و دو پایانهٔ DoH) ساخته می‌شود؛ می‌توانید مقدارها را قبل از ذخیره دستی اصلاح کنید. مقادیر نهایی در <a href="<?php echo esc_url(add_query_arg(['page' => 'glpe-viewer'], admin_url('admin.php'))); ?>">تنظیمات پیش‌فرض افزونه</a> ذخیره می‌شوند.</p>
+                    <table class="form-table" role="presentation" style="margin-bottom: 0;">
+                        <tr>
+                            <th scope="row">حالت حل نام (glpe_dns_mode)</th>
+                            <td>
+                                <select id="glpe-fetch-mode" name="glpe_dns_mode" style="direction:ltr;">
+                                    <option value="auto">auto — سیستم + ترمیم خودکار DoH</option>
+                                    <option value="doh_first">doh_first — همیشه DoH با نشانی ثابت</option>
+                                    <option value="system">system — فقط DNS هاست</option>
+                                </select>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row">TTL کش نشانی‌ها (glpe_dns_ttl)</th>
+                            <td><input type="number" min="60" max="86400" id="glpe-fetch-ttl" name="glpe_dns_ttl" style="direction:ltr; width:120px;" /> ثانیه</td>
+                        </tr>
+                        <tr>
+                            <th scope="row">سقف اتصال (glpe_fetch_connect_timeout)</th>
+                            <td><input type="number" min="3" max="60" id="glpe-fetch-connect" name="glpe_fetch_connect_timeout" style="direction:ltr; width:120px;" /> ثانیه</td>
+                        </tr>
+                        <tr>
+                            <th scope="row">سقف کل درخواست (glpe_fetch_timeout)</th>
+                            <td><input type="number" min="8" max="120" id="glpe-fetch-timeout" name="glpe_fetch_timeout" style="direction:ltr; width:120px;" /> ثانیه</td>
+                        </tr>
+                        <tr>
+                            <th scope="row">دفعات ترمیم (glpe_fetch_retries)</th>
+                            <td><input type="number" min="1" max="3" id="glpe-fetch-retries" name="glpe_fetch_retries" style="direction:ltr; width:120px;" /> بار</td>
+                        </tr>
+                        <tr>
+                            <th scope="row">فقط IPv4 (glpe_ipresolve_v4)</th>
+                            <td>
+                                <label>
+                                    <input type="hidden" name="glpe_ipresolve_v4" value="0" />
+                                    <input type="checkbox" id="glpe-fetch-ipv4" name="glpe_ipresolve_v4" value="1" />
+                                    فعال
+                                </label>
+                            </td>
+                        </tr>
+                    </table>
+                    <?php submit_button('💾 ذخیرهٔ این مقادیر در تنظیمات افزونه', 'primary', 'glpe-fetch-submit'); ?>
+                </form>
 
-            <h4 style="margin: 18px 0 8px;">🖥️ پایش زندهٔ هسته (به‌روزرسانی خودکار هر ۲ ثانیه)</h4>
-            <table class="widefat striped" id="glpe-hub-vitals-table">
-                <thead>
-                    <tr>
-                        <th>زمان ثبت</th>
-                        <th>عملیات</th>
-                        <th>آی‌پی کلاینت</th>
-                        <th>شناسه نشست</th>
-                        <th>توضیحات</th>
-                    </tr>
-                </thead>
-                <tbody id="glpe-hub-vitals-body">
-                    <tr><td colspan="5" style="text-align:center; color:#71717a;">در حال بارگذاری گزارش زنده...</td></tr>
-                </tbody>
-            </table>
+                <script>
+                (function () {
+                    var url = <?php echo wp_json_encode($tuneUrl); ?>;
+                    var saved = <?php echo wp_json_encode(is_array($tuning) ? $tuning : []); ?>;
+                    function esc(s) {
+                        var d = document.createElement('div');
+                        d.textContent = s == null ? '' : String(s);
+                        return d.innerHTML;
+                    }
+                    function fmtMs(v) { return (v === null || v === undefined) ? '—' : (Math.round(v) + ' ms'); }
+                    function render(res) {
+                        var box = document.getElementById('glpe-tune-result');
+                        if (!res || !res.php) { box.innerHTML = ''; return; }
+                        var html = '';
+                        html += '<h4 style="margin: 14px 0 6px;">مشخصات PHP هاست</h4>';
+                        html += '<table class="widefat striped"><tbody>';
+                        var rows = [
+                            ['نوع اجرا (SAPI)', res.php.sapi],
+                            ['نسخهٔ PHP', res.php.php],
+                            ['محدودیت حافظه', res.php.memory_limit],
+                            ['حداکثر زمان اجرا', res.php.max_execution_time + ' ثانیه'],
+                            ['فشرده‌سازی خروجی zlib', res.php.zlib_output_compression ? 'روشن (بهتر است خاموش باشد)' : 'خاموش'],
+                            ['بافر خروجی', res.php.output_buffering],
+                            ['توابع سوکت مسدود شده', res.php.socket_functions_disabled ? 'بله — هستهٔ رله روی این هاست کار نمی‌کند!' : 'خیر'],
+                            ['پشتیبانی ZIP', res.php.zip_archive ? 'موجود' : 'ناموجود'],
+                            ['OPcache', res.php.opcache ? 'فعال' : 'غیرفعال (کندی پاسخ گره)'],
+                            ['نرم‌افزار وب‌سرور', res.php.server]
+                        ];
+                        for (var i = 0; i < rows.length; i++) {
+                            html += '<tr><td style="width:40%;">' + esc(rows[i][0]) + '</td><td style="direction:ltr; text-align:left;">' + esc(rows[i][1]) + '</td></tr>';
+                        }
+                        html += '</tbody></table>';
+
+                        if (res.probes) {
+                            html += '<h4 style="margin: 14px 0 6px;">نتایج آزمایش‌های عملی</h4>';
+                            html += '<table class="widefat striped"><tbody>';
+                            var probes = [
+                                ['مسیر سریع (بدون بوت سیستم)', res.probes.fast_endpoint],
+                                ['مسیر وردپرسی', res.probes.wp_endpoint],
+                                ['اتصال خروجی (سوکت TCP)', res.probes.outbound_socket],
+                                ['شروع استریم (پرکنندهٔ ضدبافر CDN)', res.probes.stream_fill],
+                                ['DNS سیستم هاست', res.probes.dns_system],
+                                ['DoH — Cloudflare (1.1.1.1)', res.probes.doh_cloudflare],
+                                ['DoH — Google (8.8.4.4)', res.probes.doh_google]
+                            ];
+                            for (var j = 0; j < probes.length; j++) {
+                                var p = probes[j][1];
+                                var mark = (!p) ? '—' : (p.ok ? '<span style="color:#16a34a;font-weight:bold;">✔ موفق</span>' : '<span style="color:#dc2626;font-weight:bold;">✖ ناموفق</span>');
+                                var detail = (!p) ? '' : (p.note ? esc(p.note) : '');
+                                html += '<tr><td style="width:40%;">' + esc(probes[j][0]) + '</td><td>' + mark + '</td><td style="direction:ltr; text-align:left;">' + (p && p.ok ? fmtMs(p.ms) : '') + '</td><td>' + detail + '</td></tr>';
+                            }
+                            html += '</tbody></table>';
+                        }
+
+                        if (res.suggestions) {
+                            html += '<h4 style="margin: 14px 0 6px;">مقادیر پیشنهادی هستهٔ ارتباطی برای این هاست</h4>';
+                            html += '<table class="widefat striped"><tbody>';
+                            var s = res.suggestions;
+                            var sug = [
+                                ['prefer_fast_endpoint', s.prefer_fast_endpoint === '1' ? '1 (مسیر سریع)' : '0 (مسیر وردپرسی)'],
+                                ['max_pool_connections', s.max_pool_connections],
+                                ['connect_timeout', s.connect_timeout],
+                                ['stream_read_timeout', s.stream_read_timeout],
+                                ['write_timeout', s.write_timeout],
+                                ['max_retries', s.max_retries],
+                                ['max_adaptive_delay', s.max_adaptive_delay],
+                                ['idle_timeout', s.idle_timeout],
+                                ['low_traffic_timeout', s.low_traffic_timeout],
+                                ['low_traffic_threshold_mb', s.low_traffic_threshold_mb]
+                            ];
+                            for (var k = 0; k < sug.length; k++) {
+                                html += '<tr><td style="width:40%;"><code style="direction:ltr;display:inline-block;">' + esc(sug[k][0]) + '</code></td><td style="direction:ltr; text-align:left;">' + esc(sug[k][1]) + '</td></tr>';
+                            }
+                            html += '</tbody></table>';
+                            var btn = document.getElementById('glpe-tune-apply');
+                            if (btn) { btn.style.display = 'inline-block'; }
+                        }
+
+                        if (res.fetch_suggestions) {
+                            var f = res.fetch_suggestions;
+                            html += '<h4 style="margin: 14px 0 6px;">مقادیر پیشنهادی مرورگر GLPE (DNS و اتصال)</h4>';
+                            html += '<table class="widefat striped"><tbody>';
+                            var fs = [
+                                ['glpe_dns_mode', f.glpe_dns_mode === 'doh_first' ? 'doh_first (همیشه DoH)' : (f.glpe_dns_mode === 'system' ? 'system (فقط DNS هاست)' : 'auto (سیستم + ترمیم DoH)')],
+                                ['glpe_dns_ttl', f.glpe_dns_ttl],
+                                ['glpe_fetch_connect_timeout', f.glpe_fetch_connect_timeout],
+                                ['glpe_fetch_timeout', f.glpe_fetch_timeout],
+                                ['glpe_fetch_retries', f.glpe_fetch_retries],
+                                ['glpe_ipresolve_v4', f.glpe_ipresolve_v4 === '1' ? '1 (فقط IPv4)' : '0']
+                            ];
+                            for (var k2 = 0; k2 < fs.length; k2++) {
+                                html += '<tr><td style="width:40%;"><code style="direction:ltr;display:inline-block;">' + esc(fs[k2][0]) + '</code></td><td style="direction:ltr; text-align:left;">' + esc(fs[k2][1]) + '</td></tr>';
+                            }
+                            html += '</tbody></table>';
+                            var form = document.getElementById('glpe-fetch-form');
+                            if (form) {
+                                form.style.display = 'block';
+                                setFetch('glpe-fetch-mode', f.glpe_dns_mode);
+                                setFetch('glpe-fetch-ttl', f.glpe_dns_ttl);
+                                setFetch('glpe-fetch-connect', f.glpe_fetch_connect_timeout);
+                                setFetch('glpe-fetch-timeout', f.glpe_fetch_timeout);
+                                setFetch('glpe-fetch-retries', f.glpe_fetch_retries);
+                                var v4 = document.getElementById('glpe-fetch-ipv4');
+                                if (v4) { v4.checked = (String(f.glpe_ipresolve_v4) === '1'); }
+                            }
+                        }
+
+                        if (res.warnings && res.warnings.length) {
+                            html += '<div style="margin-top: 10px;">';
+                            for (var w = 0; w < res.warnings.length; w++) {
+                                html += '<p style="font-size:12.5px; color:#b45309; margin:4px 0;">⚠ ' + esc(res.warnings[w]) + '</p>';
+                            }
+                            html += '</div>';
+                        }
+                        box.innerHTML = html;
+                    }
+                    function setFetch(id, val) {
+                        var el = document.getElementById(id);
+                        if (el && val !== undefined && val !== null && String(val) !== '') { el.value = String(val); }
+                    }
+                    function applySuggestions(res) {
+                        if (!res || !res.suggestions) return;
+                        var s = res.suggestions;
+                        var fields = document.querySelectorAll('.glpe-cfg-field');
+                        for (var i = 0; i < fields.length; i++) {
+                            var key = fields[i].getAttribute('data-key');
+                            if (s[key] !== undefined && s[key] !== null) { fields[i].value = String(s[key]); }
+                        }
+                        var fast = document.querySelector('input[name="cfg[prefer_fast_endpoint]"]');
+                        if (fast) { fast.checked = String(s.prefer_fast_endpoint) === '1'; }
+                        document.getElementById('glpe-tune-status').textContent = 'پیشنهادها در فرم اعمال شد — برای ثبت، «ذخیرهٔ مقادیر کانفیگ» را بزنید.';
+                    }
+                    var btn = document.getElementById('glpe-tune-run');
+                    if (btn) {
+                        btn.addEventListener('click', function () {
+                            var st = document.getElementById('glpe-tune-status');
+                            st.textContent = 'در حال اجرای آزمایش‌ها... (تا چند ثانیه طول می‌کشد)';
+                            fetch(url, { cache: 'no-store' })
+                                .then(function (r) { return r.json(); })
+                                .then(function (res) {
+                                    if (res.error) { st.textContent = 'خطا: ' + res.error; return; }
+                                    st.textContent = 'ارزیابی انجام شد.';
+                                    window.glpeTuning = res;
+                                    render(res);
+                                    if (res.at) {
+                                        var d = new Date(res.at * 1000);
+                                        st.textContent = 'ارزیابی انجام شد (' + d.toLocaleString('fa-IR') + ').';
+                                    }
+                                })
+                                .catch(function () { st.textContent = 'ارزیابی ناموفق بود — دوباره تلاش کنید.'; });
+                        });
+                    }
+                    var apply = document.getElementById('glpe-tune-apply');
+                    if (apply) {
+                        apply.addEventListener('click', function () {
+                            applySuggestions(window.glpeTuning || saved);
+                        });
+                    }
+                    if (saved && saved.php && saved.suggestions) { render(saved); }
+                })();
+                </script>
+            </div>
+
+            <!-- فرم ویرایش کانفیگ -->
+            <div style="background: #fff; border: 1px solid #ccd0d4; border-radius: 12px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);" id="glpe-cfg-card">
+                <h3 style="margin: 0 0 8px;">⚙️ ویرایش مقادیر کانفیگ کلاینت</h3>
+                <p style="font-size: 13px; color: #334155;">مقادیر زیر دقیقاً همان کلیدهای <code>config.json</code> تولیدشده برای کلاینت پایتون هستند؛ بعد از ذخیره، فایل دانلودشده از این مقادیر ساخته می‌شود. مقادیر خالی یعنی «بهترین مقدار پیش‌فرض افزونه».</p>
+                <form method="post" action="<?php echo esc_url($saveUrl); ?>">
+                    <input type="hidden" name="action" value="glpe_hub_savecfg" />
+                    <input type="hidden" name="_wpnonce" value="<?php echo esc_attr(wp_create_nonce('glpe_hub_admin')); ?>" />
+                    <table class="form-table" role="presentation">
+                        <tr>
+                            <th scope="row">ترجیح مسیر سریع <code style="direction:ltr;">prefer_fast_endpoint</code></th>
+                            <td>
+                                <label>
+                                    <input type="hidden" name="cfg[prefer_fast_endpoint]" value="0" />
+                                    <input type="checkbox" name="cfg[prefer_fast_endpoint]" value="1" <?php checked($preferFast, true); ?> class="glpe-cfg-field" data-key="prefer_fast_endpoint" />
+                                    کلاینت ابتدا مسیر سریع را امتحان می‌کند و با خطا خودکار به مسیر وردپرسی می‌گذرد
+                                </label>
+                            </td>
+                        </tr>
+                        <?php
+                        $field('relay_port', '', '');
+                        $field('max_pool_connections', '', '');
+                        $field('max_retries', '', '');
+                        $field('connect_timeout', '', 'ثانیه');
+                        $field('stream_read_timeout', '', 'ثانیه');
+                        $field('write_timeout', '', 'ثانیه');
+                        $field('max_adaptive_delay', '', 'ثانیه');
+                        $field('idle_timeout', '', 'ثانیه');
+                        $field('max_tunnel_uptime', '', 'ثانیه');
+                        $field('low_traffic_timeout', '', 'ثانیه');
+                        $field('low_traffic_threshold_mb', '', 'مگابایت');
+                        $field('active_transfer_threshold_kbps', '', 'کیلوبایت بر ثانیه');
+                        ?>
+                        <tr>
+                            <th scope="row">مسیریابی مستقیم GeoSite/GeoIP <code style="direction:ltr;">routing.direct_iran</code></th>
+                            <td>
+                                <label>
+                                    <input type="hidden" name="cfg[routing][direct_iran]" value="0" />
+                                    <input type="checkbox" name="cfg[routing][direct_iran]" value="1" <?php checked(!empty($routing['direct_iran'])); ?> />
+                                    دامنه‌ها و شبکه‌های داخلی از گره‌ها عبور نکنند و مستقیم وصل شوند
+                                </label>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><code style="direction:ltr;">routing.geoip_url</code></th>
+                            <td><input type="text" name="cfg[routing][geoip_url]" value="<?php echo esc_attr(isset($routing['geoip_url']) ? (string)$routing['geoip_url'] : ''); ?>" class="large-text" style="direction:ltr; text-align:left;" /></td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><code style="direction:ltr;">routing.geosite_base_url</code></th>
+                            <td><input type="text" name="cfg[routing][geosite_base_url]" value="<?php echo esc_attr(isset($routing['geosite_base_url']) ? (string)$routing['geosite_base_url'] : ''); ?>" class="large-text" style="direction:ltr; text-align:left;" /></td>
+                        </tr>
+                        <tr>
+                            <th scope="row"><code style="direction:ltr;">routing.geosite_main_category</code></th>
+                            <td><input type="text" name="cfg[routing][geosite_main_category]" value="<?php echo esc_attr(isset($routing['geosite_main_category']) ? (string)$routing['geosite_main_category'] : ''); ?>" class="regular-text" style="direction:ltr; text-align:left;" /></td>
+                        </tr>
+                        <tr>
+                            <th scope="row">گره‌های اضافی<br /><span style="font-weight:normal; font-size:11px; color:#64748b;">هر خط: نشانی و کلید</span></th>
+                            <td>
+                                <textarea name="extra_nodes" rows="4" class="large-text code" style="direction:ltr; text-align:left; font-size:12px;" placeholder="https://node2.example.com/ tken_live_xxxxxxxxxxxxxxxx"><?php echo esc_textarea($extraText); ?></textarea>
+                                <p style="font-size:12px; color:#64748b;">نشانی و کلید هر سایت دیگر را از صفحهٔ هستهٔ ارتباطی همان سایت بردارید. کلاینت به‌صورت چرخشی بین همهٔ گره‌ها توزیع بار می‌کند.</p>
+                            </td>
+                        </tr>
+                    </table>
+                    <?php submit_button('💾 ذخیرهٔ مقادیر کانفیگ', 'primary', 'glpe-cfg-submit'); ?>
+                </form>
+
+                <details style="margin-top: 6px;">
+                    <summary style="cursor: pointer; font-size: 13px; font-weight: bold; color: #0969da;">پیش‌نمایش زندهٔ config.json با مقادیر فعلی</summary>
+                    <textarea readonly rows="18" style="width: 100%; margin-top: 8px; direction: ltr; text-align: left; font-family: Consolas, monospace; font-size: 12px; background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 10px;" id="glpe-hub-config-text"><?php echo esc_html($configJson); ?></textarea>
+                    <p style="font-size: 12px; color: #64748b;">برای افزودن گره از طریق همین فرم (کادر «گره‌های اضافی») اقدام کنید — مقادیر به‌صورت ایمن پالایش می‌شوند.</p>
+                </details>
+            </div>
+
+            <!-- پایش زنده -->
+            <div style="background: #fff; border: 1px solid #ccd0d4; border-radius: 12px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+                <h3 style="margin: 0 0 8px;">🖥️ پایش زندهٔ هسته (به‌روزرسانی خودکار هر ۲ ثانیه)</h3>
+                <table class="widefat striped" id="glpe-hub-vitals-table">
+                    <thead>
+                        <tr>
+                            <th>زمان ثبت</th>
+                            <th>عملیات</th>
+                            <th>آی‌پی کلاینت</th>
+                            <th>شناسه نشست</th>
+                            <th>توضیحات</th>
+                        </tr>
+                    </thead>
+                    <tbody id="glpe-hub-vitals-body">
+                        <tr><td colspan="5" style="text-align:center; color:#71717a;">در حال بارگذاری گزارش زنده...</td></tr>
+                    </tbody>
+                </table>
+            </div>
 
             <script>
             (function () {
@@ -794,5 +1420,14 @@ class GLPE_Hub_Admin {
             </script>
         </div>
         <?php
+    }
+
+    /** Practical liveness check of the fast endpoint (null = unknown/never run). */
+    public static function fastEndpointReachable() {
+        $tuning = get_option('glpe_hub_tuning', []);
+        if (is_array($tuning) && isset($tuning['probes']['fast_endpoint']['ok'], $tuning['at'])) {
+            return (bool)$tuning['probes']['fast_endpoint']['ok'];
+        }
+        return null;
     }
 }

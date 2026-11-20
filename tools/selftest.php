@@ -12,17 +12,11 @@ $root = dirname(__DIR__);
 if (!function_exists('home_url')) {
     function home_url($path = '') { return 'https://site.test' . $path; }
 }
-if (!function_exists('get_option')) {
-    function get_option($name, $default = false) { return $default; }
-}
 if (!function_exists('esc_attr')) {
     function esc_attr($text) { return htmlspecialchars((string)$text, ENT_QUOTES, 'UTF-8'); }
 }
 if (!function_exists('esc_url')) {
     function esc_url($url) { return (string)$url; }
-}
-if (!function_exists('update_option')) {
-    function update_option($name, $value) { return true; }
 }
 if (!function_exists('wp_generate_password')) {
     function wp_generate_password($length, $special = false, $extra = false) { return str_repeat('x', (int)$length); }
@@ -33,7 +27,32 @@ if (!function_exists('wp_upload_dir')) {
 if (!function_exists('untrailingslashit')) {
     function untrailingslashit($value) { return rtrim((string)$value, '/'); }
 }
+if (!function_exists('esc_url_raw')) {
+    function esc_url_raw($url) { return trim((string)$url); }
+}
+if (!function_exists('sanitize_key')) {
+    function sanitize_key($key) { return preg_replace('/[^a-z0-9_\-]/', '', strtolower((string)$key)); }
+}
+if (!function_exists('esc_textarea')) {
+    function esc_textarea($text) { return htmlspecialchars((string)$text, ENT_QUOTES, 'UTF-8'); }
+}
+if (!defined('GLPE_URL')) { define('GLPE_URL', 'https://site.test/wp-content/plugins/glpe-viewer/'); }
 
+// Options store shim — mirrors the tiny WP-option subset the suite needs.
+$__glpe_options = [];
+if (!function_exists('get_option')) {
+    function get_option($name, $default = false) {
+        global $__glpe_options;
+        return array_key_exists($name, $__glpe_options) ? $__glpe_options[$name] : $default;
+    }
+}
+if (!function_exists('update_option')) {
+    function update_option($name, $value) { global $__glpe_options; $__glpe_options[$name] = $value; return true; }
+}
+// Guard markers in the shipped includes exit silently when ABSPATH is
+// missing — the suite must define it BEFORE requiring the engine stack
+// (Engine.php pulls Dns.php, which is guarded too).
+if (!defined('ABSPATH')) { define('ABSPATH', __FILE__); }
 require $root . '/glpe-viewer/includes/Cookies.php';
 require $root . '/glpe-viewer/includes/Codec.php';
 require $root . '/glpe-viewer/includes/Engine.php';
@@ -395,6 +414,7 @@ check('full navigations stay path-free', substr_count($js16, 'buildGatewayUrl(de
 echo "\n== 17. Relay core engine (v6.0.0) ==\n";
 if (!defined('ABSPATH')) { define('ABSPATH', __FILE__); }
 require $root . '/glpe-viewer/includes/Hub.php';
+require $root . '/glpe-viewer/includes/HubTune.php';
 
 GLPE_Hub::$testDir = sys_get_temp_dir() . '/glpe-hub-selftest-' . getmypid();
 if (!is_dir(GLPE_Hub::$testDir)) { @mkdir(GLPE_Hub::$testDir, 0777, true); }
@@ -472,9 +492,9 @@ check('unknown action rejected silently', $out === '');
 
 // 17d. vacuum (lock-file GC with cooldown) + session clear action
 @unlink(GLPE_Hub::$testDir . '/.vacuum_lock'); // reset GC cooldown created by earlier probes
-$oldFile = GLPE_Hub::$testDir . '/other_old.buf';
-$newFile = GLPE_Hub::$testDir . '/other_new.buf';
-$sessFile = GLPE_Hub::$testDir . '/sessV_a.buf';
+$oldFile = GLPE_Hub::$testDir . '/other_old.php';
+$newFile = GLPE_Hub::$testDir . '/other_new.php';
+$sessFile = GLPE_Hub::$testDir . '/sessV_a.php';
 file_put_contents($oldFile, 'stale');
 file_put_contents($newFile, 'fresh');
 file_put_contents($sessFile, 'V');
@@ -521,7 +541,11 @@ GLPE_Hub::handleRequest($wEnv);
 $out = ob_get_clean();
 GLPE_Hub::$testRequestBody = null;
 check('write action echoes K', $out === 'K', var_export($out, true));
-check('write stored exact payload bytes', file_exists(GLPE_Hub::$testDir . '/sessW_chW.buf') && file_get_contents(GLPE_Hub::$testDir . '/sessW_chW.buf') === $payload);
+$bufFile = GLPE_Hub::$testDir . '/sessW_chW.php';
+$bufRaw = file_exists($bufFile) ? (string)file_get_contents($bufFile) : '';
+check('write stored guarded payload (exact bytes)', substr($bufRaw, GLPE_Hub::guardLen()) === $payload);
+check('buffer file starts with self-exit guard', substr($bufRaw, 0, GLPE_Hub::guardLen()) === GLPE_Hub::FILE_GUARD);
+check('buffer file executes empty on direct hit', PHP_OS === 'Linux' ? trim((string)@shell_exec(PHP_BINARY . ' ' . escapeshellarg($bufFile) . ' 2>/dev/null')) === '' : true);
 
 // 17g. stream action against a local echo peer (fill + framed echo + cleanup)
 $streamTested = false;
@@ -558,14 +582,14 @@ exit(0);
         $chan = 'chanT';
         // Prefill the buffer: early client bytes (e.g. a TLS ClientHello) that
         // land before the stream worker picks the request up must survive.
-        file_put_contents(GLPE_Hub::$testDir . '/' . $sess . '_' . $chan . '.buf', 'HELLO');
+        file_put_contents(GLPE_Hub::$testDir . '/' . $sess . '_' . $chan . '.php', GLPE_Hub::FILE_GUARD . 'HELLO');
         $tEnv = GLPE_Hub::encodeEnvelope(['a' => 't', 's' => $sess, 't' => $chan, 'h' => '127.0.0.1', 'p' => (int)$peerPort, 'k' => $hubToken, 'net' => 'tcp']);
         $outFile = GLPE_Hub::$testDir . '/stream-out.txt';
         $out = $runProc($tEnv, '/dev/null', $outFile);
         $streamTested = true;
         check('stream output starts with CDN-breaking fill', strpos($out, str_repeat(' ', 2048)) === 0);
         check('stream echoed peer data in framed chunks', strpos($out, GLPE_Hub::frameChunk('PONG:HELLO') . "\n") !== false);
-        check('stream consumed buffer file', !file_exists(GLPE_Hub::$testDir . '/' . $sess . '_' . $chan . '.buf'));
+        check('stream consumed buffer file', !file_exists(GLPE_Hub::$testDir . '/' . $sess . '_' . $chan . '.php'));
     }
 }
 if (!$streamTested) {
@@ -583,14 +607,84 @@ check('metrics capped at rolling window', count(GLPE_Hub::readMetrics()) <= 70, 
 
 // 17i. generated client config mirrors the bundled core expectations
 $hubCfg = GLPE_Hub::clientConfigArray();
-check('config exposes this node first', count($hubCfg['servers']) === 1 && $hubCfg['servers'][0]['url'] === 'https://site.test/' && $hubCfg['servers'][0]['token'] === $hubToken);
+$expectedFast = 'https://site.test/wp-content/plugins/glpe-viewer/hub-endpoint.php';
+check('config exposes fast endpoint first', count($hubCfg['servers']) === 1 && $hubCfg['servers'][0]['url'] === $expectedFast && $hubCfg['servers'][0]['token'] === $hubToken, $hubCfg['servers'][0]['url']);
+check('config keeps CMS path as fallback_url', isset($hubCfg['servers'][0]['fallback_url']) && $hubCfg['servers'][0]['fallback_url'] === 'https://site.test/');
 check('config enables direct routing list', isset($hubCfg['routing']['direct_iran']) && $hubCfg['routing']['direct_iran'] === true);
 check('config defaults relay port 41927', $hubCfg['relay_port'] === 41927);
+check('config carries split timeouts', $hubCfg['connect_timeout'] === 15 && $hubCfg['stream_read_timeout'] === 30 && $hubCfg['write_timeout'] === 20);
 // JSON roundtrip compares loosely: PHP encodes integral floats (1.0) without
 // the zero-fraction, so decode() yields ints there — value equality is what
 // the Python core needs.
 $cfgDecoded = json_decode(GLPE_Hub::clientConfigJson(), true);
 check('config json serializes', is_array($cfgDecoded) && $cfgDecoded == $hubCfg && (float)$cfgDecoded['max_adaptive_delay'] === 1.0);
+
+// 17i-2. admin overrides merge into the generated config
+update_option('glpe_hub_cfg', [
+    'relay_port' => '50000',
+    'stream_read_timeout' => '45',
+    'prefer_fast_endpoint' => '0',
+    'routing' => ['direct_iran' => '0', 'geosite_main_category' => 'category-ir'],
+]);
+update_option('glpe_hub_nodes', [
+    ['url' => 'https://node2.example.com/', 'token' => 'tken_live_abcdefgh23456789'],
+    ['url' => 'not-a-url', 'token' => 'x'], // must be dropped
+]);
+$ovCfg = GLPE_Hub::clientConfigArray();
+check('override: relay port applies', $ovCfg['relay_port'] === 50000);
+check('override: stream read timeout applies', $ovCfg['stream_read_timeout'] === 45.0);
+check('override: CMS path becomes primary when preferred', $ovCfg['servers'][0]['url'] === 'https://site.test/');
+check('override: fast path stays as fallback', $ovCfg['servers'][0]['fallback_url'] === $expectedFast);
+check('override: routing flag flips to false', $ovCfg['routing']['direct_iran'] === false);
+check('override: extra valid node appended', count($ovCfg['servers']) === 2 && $ovCfg['servers'][1]['url'] === 'https://node2.example.com/' && $ovCfg['servers'][1]['token'] === 'tken_live_abcdefgh23456789');
+update_option('glpe_hub_cfg', []);
+update_option('glpe_hub_nodes', []);
+
+// 17i-3. node handoff store (fast endpoint credential file)
+$nodeFile = GLPE_Hub::dataDir() . '/' . GLPE_Hub::NODE_FILE;
+check('node store sync writes handoff file', GLPE_Hub::syncNodeStore() === true && file_exists($nodeFile));
+$nodeRaw = (string)file_get_contents($nodeFile);
+check('node store starts with self-exit guard', substr($nodeRaw, 0, GLPE_Hub::guardLen()) === GLPE_Hub::FILE_GUARD);
+$nodePayload = json_decode(substr($nodeRaw, GLPE_Hub::guardLen()), true);
+check('node store payload carries token + enabled flag', is_array($nodePayload) && ($nodePayload['token'] ?? '') === $hubToken && ($nodePayload['enabled'] ?? '') === '1');
+check('node store idempotent', GLPE_Hub::syncNodeStore() === true && filesize($nodeFile) === strlen($nodeRaw));
+// A stale handoff file (e.g. the node was disabled then the flag changed
+// again elsewhere) must be repaired by the cheap admin-hit sync.
+file_put_contents($nodeFile, GLPE_Hub::FILE_GUARD . json_encode(['token' => 'stale_token_value', 'enabled' => '0', 'dir' => '']));
+$repaired = GLPE_Hub::maybeSyncNodeStore() === true && strpos((string)file_get_contents($nodeFile), '"enabled":"1"') !== false && strpos((string)file_get_contents($nodeFile), $hubToken) !== false;
+check('node store repairs a stale handoff file', $repaired);
+update_option('glpe_hub_enabled', '0');
+check('node store flips enabled flag off', GLPE_Hub::syncNodeStore() === true && strpos((string)file_get_contents($nodeFile), '"enabled":"0"') !== false);
+update_option('glpe_hub_enabled', '1');
+GLPE_Hub::syncNodeStore();
+
+// 17i-4. fast endpoint file is standalone (no CMS boot) and shimmed correctly
+$endpointPath = $root . '/glpe-viewer/hub-endpoint.php';
+$endpointSrc = file_exists($endpointPath) ? (string)file_get_contents($endpointPath) : '';
+check('fast endpoint file ships with the plugin', $endpointSrc !== '');
+check('fast endpoint reads the guarded handoff file', strpos($endpointSrc, 'node_info.php') !== false && strpos($endpointSrc, "function_exists('get_option')") !== false);
+check('fast endpoint hands over to the shared engine', strpos($endpointSrc, 'GLPE_Hub::handleRequest') !== false && strpos($endpointSrc, 'includes/Hub.php') !== false);
+check('fast endpoint fails closed without store', strpos($endpointSrc, "http_response_code(404)") !== false);
+check('fast endpoint guard-clean', preg_match('/proxy|glype|phproxy|unblock|stealth|bypass|anonym|curl_multi|browse\.php|portal/i', $endpointSrc) === 0);
+$phpLintEndpoint = @shell_exec(PHP_BINARY . ' -l ' . escapeshellarg($endpointPath) . ' >/dev/null 2>&1; echo $?');
+check('fast endpoint lints', trim((string)$phpLintEndpoint) === '0', (string)$phpLintEndpoint);
+
+// 17i-5. tuning suggestions are pure and host-shape aware
+$sugSlow = GLPE_Hub_Tune::buildSuggestions(['memory_limit_bytes' => 64 * 1048576], null, 2600, true, true, 900);
+check('tuning: small memory shrinks pool', $sugSlow['max_pool_connections'] === 20);
+check('tuning: slow CMS node widens idle window', $sugSlow['idle_timeout'] === 25);
+check('tuning: without fast path stays on CMS', $sugSlow['prefer_fast_endpoint'] === '0');
+$sugFast = GLPE_Hub_Tune::buildSuggestions(['memory_limit_bytes' => 256 * 1048576], 120, 2600, true, true, 300);
+check('tuning: big memory grows pool', $sugFast['max_pool_connections'] === 50);
+check('tuning: fast healthy endpoint preferred', $sugFast['prefer_fast_endpoint'] === '1');
+check('tuning: snappy node relaxes adaptive delay', (float)$sugFast['max_adaptive_delay'] === 0.5);
+check('tuning: write timeout respects node latency', $sugFast['write_timeout'] >= 20);
+check('tuning: stream read floor stays generous', $sugFast['stream_read_timeout'] >= 30);
+$sugBlocked = GLPE_Hub_Tune::buildSuggestions(['memory_limit_bytes' => 256 * 1048576], null, null, false, false, null);
+check('tuning: degrades gracefully without probes', is_array($sugBlocked) && $sugBlocked['max_pool_connections'] === 50);
+
+// 17i-6. wipe helper removes runtime files including the handoff store
+check('wipe clears handoff store too', GLPE_Hub::wipeAllData() === null && !file_exists($nodeFile));
 
 // 17j. bundled client files are guard-clean and syntactically valid
 $hubScan = ['hub-client/client.py', 'hub-client/geoip_ir.txt', 'hub-client/geosite_ir.txt'];
@@ -611,6 +705,125 @@ GLPE_Hub::wipeAllData();
 $leftover = array_diff((array)@scandir(GLPE_Hub::$testDir), ['.', '..', 'runner.php', 'peer.php']);
 check('wipe clears stored files', count($leftover) === 0, implode(',', $leftover));
 @unlink($runnerFile); @unlink($peerFile ?? '');
+
+// == 18. DNS hardening for the GLPE viewer fetch path (v6.1.0) ==
+$dnsDir = sys_get_temp_dir() . '/glpe-dns-selftest-' . getmypid();
+GLPE_Dns::$testDir = $dnsDir;
+if (!is_dir($dnsDir)) { @mkdir($dnsDir, 0777, true); }
+
+check('doh: A records kept, CNAME/TXT dropped', GLPE_Dns::parseDohAnswer('{"Status":0,"Answer":[{"name":"a.test","type":5,"data":"cname.test."},{"name":"a.test","type":1,"TTL":300,"data":"1.2.3.4"},{"name":"a.test","type":1,"TTL":300,"data":"5.6.7.8"},{"name":"a.test","type":28,"data":"2606:2800:220:1:248:1893:25c8:1946"},{"name":"a.test","type":16,"data":"txt"}]}') === ['1.2.3.4', '5.6.7.8', '2606:2800:220:1:248:1893:25c8:1946']);
+check('doh: malformed json yields empty set', GLPE_Dns::parseDohAnswer('not-json') === []);
+check('doh: NXDOMAIN answer yields empty set', GLPE_Dns::parseDohAnswer('{"Status":3}') === []);
+
+check('dns err: classic error 28 matches', GLPE_Dns::isResolveError('cURL error 28: Resolving timed out after 10001 milliseconds'));
+check('dns err: error 6 matches', GLPE_Dns::isResolveError('cURL error 6: Could not resolve host: test.test'));
+check('dns err: resolver outage text matches', GLPE_Dns::isResolveError('Temporary failure in name resolution'));
+check('dns err: unrelated curl error skipped', !GLPE_Dns::isResolveError('cURL error 60: SSL certificate problem'));
+check('dns err: empty message skipped', !GLPE_Dns::isResolveError(''));
+
+update_option('glpe_dns_mode', 'auto');
+GLPE_Dns::$dohCalls = 0;
+check('auto mode: no speculative pin', GLPE_Dns::planHop('http://fresh-auto.test/page?a=1') === []);
+check('auto mode: does not call DoH ahead of failures', GLPE_Dns::$dohCalls === 0);
+
+GLPE_Dns::$dohHook = function ($idx, $host) {
+    if ($host === 'dead.host.test') { return ['ok' => false, 'ip' => '', 'ips' => [], 'ms' => 40]; }
+    return ['ok' => true, 'ip' => '93.184.216.34', 'ips' => ['93.184.216.34'], 'ms' => 120];
+};
+update_option('glpe_dns_mode', 'doh_first');
+GLPE_Dns::$dohCalls = 0;
+check('doh_first: pin staged as host:port:ip', GLPE_Dns::planHop('https://pinned.test:8443/path') === ['pinned.test:8443:93.184.216.34']);
+check('doh_first: DoH query performed', GLPE_Dns::$dohCalls === 1);
+GLPE_Dns::$dohCalls = 0;
+check('doh_first: repeat hop served from cache without DoH', GLPE_Dns::planHop('https://pinned.test:8443/path') === ['pinned.test:8443:93.184.216.34'] && GLPE_Dns::$dohCalls === 0);
+
+$dnsStoreFile = $dnsDir . '/dns_store.php';
+$dnsStoreRaw = (string)file_get_contents($dnsStoreFile);
+check('dns store starts with self-exit guard', substr($dnsStoreRaw, 0, strlen(GLPE_Dns::GUARD)) === GLPE_Dns::GUARD);
+check('dns store executes empty on direct hit', trim((string)@shell_exec(PHP_BINARY . ' ' . escapeshellarg($dnsStoreFile) . ' 2>/dev/null')) === '');
+
+check('force resolve re-stages the pin', GLPE_Dns::forceResolve('https://pinned.test:8443/path') === true && GLPE_Dns::planHop('https://pinned.test:8443/path') === ['pinned.test:8443:93.184.216.34']);
+check('force resolve fails for dead host', GLPE_Dns::forceResolve('https://dead.host.test/') === false);
+check('dead host stays unpinned', GLPE_Dns::planHop('https://dead.host.test/') === []);
+
+GLPE_Dns::$dohHook = function ($idx, $host) {
+    if ($host === 'dual.test') { return ['ok' => true, 'ip' => '2606:2800::1', 'ips' => ['2606:2800::1', '198.51.100.7'], 'ms' => 90]; }
+    return ['ok' => true, 'ip' => '93.184.216.34', 'ips' => ['93.184.216.34'], 'ms' => 90];
+};
+update_option('glpe_ipresolve_v4', '1');
+check('ipv4 preference filters AAAA pins', GLPE_Dns::forceResolve('https://dual.test/') === true && GLPE_Dns::planHop('https://dual.test/') === ['dual.test:443:198.51.100.7']);
+update_option('glpe_ipresolve_v4', '0');
+GLPE_Dns::$dohHook = null;
+
+update_option('glpe_dns_mode', 'nonsense');
+check('settings: broken mode falls back to auto', GLPE_Dns::settings()['mode'] === 'auto');
+update_option('glpe_dns_ttl', '');
+check('settings: empty numeric value uses the default', GLPE_Dns::settings()['ttl'] === 900);
+update_option('glpe_dns_mode', 'auto');
+
+// Engine-level repair: a resolving stall is retried once with a fresh pin.
+class GLPE_Test_WpError {
+    private $msg;
+    public function __construct($msg) { $this->msg = $msg; }
+    public function get_error_message() { return $this->msg; }
+}
+if (!function_exists('is_wp_error')) {
+    function is_wp_error($thing) { return $thing instanceof GLPE_Test_WpError; }
+}
+if (!function_exists('wp_remote_request')) {
+    function wp_remote_request($url, $args = []) {
+        $GLOBALS['glpe_dns_attempts']++;
+        $host = strtolower((string)parse_url((string)$url, PHP_URL_HOST));
+        if ($host === 'hard-error.test') {
+            return new GLPE_Test_WpError('cURL error 60: SSL certificate problem');
+        }
+        if ($host === 'resolve-stall.test' && $GLOBALS['glpe_dns_attempts'] === 1) {
+            return new GLPE_Test_WpError('cURL error 28: Resolving timed out after 10001 milliseconds');
+        }
+        return ['status' => 200, 'body' => 'ok-page'];
+    }
+    function wp_remote_retrieve_response_code($r) { return is_wp_error($r) ? 0 : (int)$r['status']; }
+    function wp_remote_retrieve_header($r, $name) { return ''; }
+    function wp_remote_retrieve_headers($r) { return []; }
+    function wp_remote_retrieve_body($r) { return is_wp_error($r) ? '' : (string)$r['body']; }
+}
+$dnsEngine = new GLPE_Engine('', false);
+GLPE_Dns::$dohHook = function ($idx, $host) { return ['ok' => true, 'ip' => '203.0.113.9', 'ips' => ['203.0.113.9'], 'ms' => 80]; };
+$GLOBALS['glpe_dns_attempts'] = 0;
+try {
+    $resPage = $dnsEngine->executeRequest('http://resolve-stall.test/page');
+    check('engine: resolving stall repaired on retry', isset($resPage['body']) && $resPage['body'] === 'ok-page');
+    check('engine: exactly two attempts were made', $GLOBALS['glpe_dns_attempts'] === 2);
+} catch (Exception $e) {
+    check('engine: resolving stall repaired on retry', false, $e->getMessage());
+    check('engine: exactly two attempts were made', false);
+}
+$GLOBALS['glpe_dns_attempts'] = 0;
+try {
+    $dnsEngine->executeRequest('http://hard-error.test/page');
+    check('engine: non-resolve error fails fast without retry', false);
+} catch (Exception $e) {
+    check('engine: non-resolve error fails fast without retry', $GLOBALS['glpe_dns_attempts'] === 1 && strpos($e->getMessage(), 'ارتباط با مقصد برقرار نشد') !== false, $e->getMessage());
+}
+
+// Fetch suggestions remain pure and cover all decision branches.
+$fsHealthy = GLPE_Hub_Tune::buildFetchSuggestions(true, 120, true, 90, true, 130);
+check('fetch suggest: healthy host stays auto', $fsHealthy['glpe_dns_mode'] === 'auto' && $fsHealthy['glpe_fetch_retries'] === 1);
+$fsDead = GLPE_Hub_Tune::buildFetchSuggestions(false, null, true, 150, false, null);
+check('fetch suggest: dead system DNS promotes DoH', $fsDead['glpe_dns_mode'] === 'doh_first' && $fsDead['glpe_dns_ttl'] === 1800 && $fsDead['glpe_fetch_connect_timeout'] >= 15);
+$fsSlowSys = GLPE_Hub_Tune::buildFetchSuggestions(true, 5000, true, 200, false, null);
+check('fetch suggest: slow system DNS promotes DoH', $fsSlowSys['glpe_dns_mode'] === 'doh_first');
+$fsNoDoh = GLPE_Hub_Tune::buildFetchSuggestions(true, 300, false, null, false, null);
+check('fetch suggest: blocked DoH keeps system mode', $fsNoDoh['glpe_dns_mode'] === 'system' && $fsNoDoh['glpe_fetch_retries'] === 2);
+$fsAllDead = GLPE_Hub_Tune::buildFetchSuggestions(false, null, false, null, false, null);
+check('fetch suggest: total outage degrades to system mode', $fsAllDead['glpe_dns_mode'] === 'system');
+
+// store cleanup
+foreach ((array)@scandir($dnsDir) as $dnsFile) {
+    if ($dnsFile !== '.' && $dnsFile !== '..') { @unlink($dnsDir . '/' . $dnsFile); }
+}
+@rmdir($dnsDir);
+GLPE_Dns::$testDir = null;
 
 echo "\n== RESULT: $pass passed, $fail failed ==\n";
 exit($fail > 0 ? 1 : 0);

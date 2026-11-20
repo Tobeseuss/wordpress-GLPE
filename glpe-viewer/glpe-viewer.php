@@ -3,7 +3,7 @@
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
  * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با کدگذاری کامل تبادلات، بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 6.0.0
+ * Version: 6.1.0
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '6.0.0');
+define('GLPE_VERSION', '6.1.0');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -33,6 +33,7 @@ require_once GLPE_DIR . 'includes/Codec.php';
 require_once GLPE_DIR . 'includes/Engine.php';
 require_once GLPE_DIR . 'includes/Access.php';
 require_once GLPE_DIR . 'includes/Hub.php';
+require_once GLPE_DIR . 'includes/HubTune.php';
 
 class GLPE_Plugin {
     private static $instance = null;
@@ -73,13 +74,26 @@ class GLPE_Plugin {
         add_action('admin_post_glpe_toggle_user', [$this, 'handleToggleUser']);
         add_action('admin_post_glpe_save_jar', [$this, 'handleSaveJar']);
 
-        // Relay core management (v6.0.0)
+        // Relay core management (v6.0.0) + host tuning + config editor (v6.1.0)
         add_action('admin_post_glpe_hub_regen', ['GLPE_Hub_Admin', 'handleRegen']);
         add_action('admin_post_glpe_hub_clear', ['GLPE_Hub_Admin', 'handleClearLog']);
         add_action('admin_post_glpe_hub_file', ['GLPE_Hub_Admin', 'handleServeFile']);
         add_action('admin_post_glpe_hub_config', ['GLPE_Hub_Admin', 'handleServeConfig']);
         add_action('admin_post_glpe_hub_zip', ['GLPE_Hub_Admin', 'handleServeZip']);
+        add_action('admin_post_glpe_hub_savecfg', ['GLPE_Hub_Admin', 'handleSaveCfg']);
+        add_action('admin_post_glpe_hub_fetch_apply', ['GLPE_Hub_Admin', 'handleFetchApply']);
         add_action('wp_ajax_glpe_hub_vitals', ['GLPE_Hub_Admin', 'ajaxVitals']);
+        add_action('wp_ajax_glpe_hub_tune', ['GLPE_Hub_Admin', 'ajaxTune']);
+
+        // DNS hardening: every WP-HTTP request through the cURL transport gets
+        // resolve pins staged by GLPE_Dns::planHop plus tuned connect budgets.
+        add_filter('http_api_curl', ['GLPE_Dns', 'onHttpApiCurl'], 10, 3);
+
+        // Keep the fast-endpoint handoff file present (cheap stat on admin hit).
+        add_action('admin_init', ['GLPE_Hub', 'maybeSyncNodeStore']);
+        // Enable/disable must reach the fast endpoint instantly — the endpoint
+        // reads its enabled flag from the handoff file, not from the DB.
+        add_action('update_option_glpe_hub_enabled', ['GLPE_Hub', 'syncNodeStore'], 10, 0);
 
         // Per-account session isolation: a browser's jar belongs to exactly
         // one account — logging out drops it, logging in restores the
@@ -106,6 +120,9 @@ class GLPE_Plugin {
         // Administrators always keep the viewer permission; grant it up front.
         GLPE_Access::grantToAdministrator();
         update_option('glpe_db_version', GLPE_VERSION);
+
+        // Publish the fast-endpoint handoff file (token + uploads root).
+        GLPE_Hub::syncNodeStore();
 
         $pageSlug = trim((string)get_option('glpe_slug', 'view'), '/');
         if ($pageSlug === '') {
@@ -676,13 +693,42 @@ class GLPE_Plugin {
             'dashicons-welcome-view-site',
             85
         );
+        // Dedicated page for the Multi-Node Relay Core (v6.1.0 request).
+        add_submenu_page(
+            'glpe-viewer',
+            'هستهٔ ارتباطی چندگرهی',
+            'هستهٔ ارتباطی چندگرهی',
+            'manage_options',
+            'glpe-viewer-relay',
+            ['GLPE_Hub_Admin', 'renderRelayPage']
+        );
     }
 
     public function registerSettings() {
-        $flags = ['glpe_toolbar', 'glpe_blank_title', 'glpe_no_scripts', 'glpe_no_images', 'glpe_ssl_verify', 'glpe_hub_enabled'];
+        $flags = ['glpe_toolbar', 'glpe_blank_title', 'glpe_no_scripts', 'glpe_no_images', 'glpe_ssl_verify', 'glpe_hub_enabled', 'glpe_ipresolve_v4'];
         foreach ($flags as $flag) {
             register_setting('glpe_group', $flag, ['sanitize_callback' => [$this, 'sanitizeFlag']]);
         }
+        register_setting('glpe_group', 'glpe_dns_mode', ['sanitize_callback' => [$this, 'sanitizeDnsMode']]);
+        register_setting('glpe_group', 'glpe_dns_ttl', ['sanitize_callback' => [$this, 'sanitizePositiveInt']]);
+        register_setting('glpe_group', 'glpe_fetch_connect_timeout', ['sanitize_callback' => [$this, 'sanitizePositiveInt']]);
+        register_setting('glpe_group', 'glpe_fetch_timeout', ['sanitize_callback' => [$this, 'sanitizePositiveInt']]);
+        register_setting('glpe_group', 'glpe_fetch_retries', ['sanitize_callback' => [$this, 'sanitizeRetry']]);
+    }
+
+    public function sanitizeDnsMode($value) {
+        $value = (string)$value;
+        return in_array($value, ['auto', 'doh_first', 'system'], true) ? $value : 'auto';
+    }
+
+    public function sanitizePositiveInt($value) {
+        $v = (int)$value;
+        return $v > 0 ? (string)$v : '';
+    }
+
+    public function sanitizeRetry($value) {
+        $v = (int)$value;
+        return ($v >= 1 && $v <= 3) ? (string)$v : '';
     }
 
     /**
@@ -793,12 +839,56 @@ class GLPE_Plugin {
                         </td>
                     </tr>
                     <tr>
-                        <th scope="row">هستهٔ ارتباطی چندگرهی (Hub Core)</th>
+                        <th scope="row">هستهٔ ارتباطی چندگرهی (Relay Core)</th>
                         <td>
                             <label>
                                 <input type="hidden" name="glpe_hub_enabled" value="0">
                                 <input type="checkbox" name="glpe_hub_enabled" value="1" <?php checked(get_option('glpe_hub_enabled', '1'), '1'); ?> />
-                                فعال‌سازی هستهٔ رله چندگرهی روی این سایت (کلاینت Python از نشانی این سایت به‌عنوان یک گره استفاده می‌کند — مدیریت و دانلود کلاینت در کارت «هستهٔ ارتباطی چندگرهی» پایین صفحه)
+                                فعال‌سازی هستهٔ رله چندگرهی روی این سایت — مدیریت گره، ارزیابی عملی هاست، ویرایش مقادیر کانفیگ کلاینت و پایش زنده در <a href="<?php echo esc_url(add_query_arg(['page' => 'glpe-viewer-relay'], admin_url('admin.php'))); ?>">صفحهٔ اختصاصی هستهٔ ارتباطی</a>
+                            </label>
+                        </td>
+                    </tr>
+                </table>
+
+                <h3 style="margin-top: 10px;">⚡ سرعت اتصال و DNS مرورگر</h3>
+                <p style="font-size: 12.5px; color: #334155; line-height: 1.9; margin-top: 6px;">
+                    اگر باز کردن نشانی‌ها با خطای «cURL error 28: Resolving timed out» مواجه می‌شود، مشکل از سیستم DNS هاست است، نه از نشانی. افزونه برای مقابلهٔ ریشه‌ای یک کش نشانی با پایداری بالا و مسیر یدکی DoH (با پایانهٔ ثابت و بدون نیاز به DNS هاست) دارد. مقادیر زیر را می‌توانید به‌صورت دستی تنظیم کنید، یا از <a href="<?php echo esc_url(add_query_arg(['page' => 'glpe-viewer-relay'], admin_url('admin.php'))); ?>">ارزیابی عملی هاست</a> مقادیر پیشنهادی را با یک کلیک همین‌جا اعمال کنید. مقدار خالی یعنی «بهترین پیش‌فرض افزونه».
+                </p>
+                <table class="form-table" role="presentation">
+                    <tr>
+                        <th scope="row">حالت حل نام <code style="direction:ltr;">dns_mode</code></th>
+                        <td>
+                            <select name="glpe_dns_mode" style="direction:ltr;">
+                                <option value="auto" <?php selected(get_option('glpe_dns_mode', 'auto'), 'auto'); ?>>auto — ابتدا سیستم هاست، با خطا ترمیم خودکار با DoH (پیشنهادی)</option>
+                                <option value="doh_first" <?php selected(get_option('glpe_dns_mode', 'auto'), 'doh_first'); ?>>doh_first — همیشه DoH با نشانی ثابت (برای هاست‌هایی با DNS معیوب)</option>
+                                <option value="system" <?php selected(get_option('glpe_dns_mode', 'auto'), 'system'); ?>>system — فقط DNS هاست (وقتی DoH مسدود است)</option>
+                            </select>
+                            <p style="font-size: 12px; color: #64748b; margin: 4px 0 0;">نشانی‌های حل‌شده در حافظهٔ ماندگار با TTL نگه داشته می‌شوند تا درخواست‌های تکراری هرگز منتظر DNS نمانند.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">TTL کش نشانی‌ها <code style="direction:ltr;">dns_ttl</code></th>
+                        <td><input type="number" min="60" max="86400" name="glpe_dns_ttl" value="<?php echo esc_attr(get_option('glpe_dns_ttl', '')); ?>" style="direction:ltr; width: 110px;" /> ثانیه (پیش‌فرض ۹۰۰)</td>
+                    </tr>
+                    <tr>
+                        <th scope="row">سقف زمان اتصال <code style="direction:ltr;">fetch_connect_timeout</code></th>
+                        <td><input type="number" min="3" max="60" name="glpe_fetch_connect_timeout" value="<?php echo esc_attr(get_option('glpe_fetch_connect_timeout', '')); ?>" style="direction:ltr; width: 110px;" /> ثانیه (پیش‌فرض ۱۰)</td>
+                    </tr>
+                    <tr>
+                        <th scope="row">سقف کل هر درخواست <code style="direction:ltr;">fetch_timeout</code></th>
+                        <td><input type="number" min="8" max="120" name="glpe_fetch_timeout" value="<?php echo esc_attr(get_option('glpe_fetch_timeout', '')); ?>" style="direction:ltr; width: 110px;" /> ثانیه (پیش‌فرض ۱۵)</td>
+                    </tr>
+                    <tr>
+                        <th scope="row">دفعات ترمیم تایم‌اوت <code style="direction:ltr;">fetch_retries</code></th>
+                        <td><input type="number" min="1" max="3" name="glpe_fetch_retries" value="<?php echo esc_attr(get_option('glpe_fetch_retries', '')); ?>" style="direction:ltr; width: 110px;" /> بار (پیش‌فرض ۱) — هر بار تلاش مجدد با نشانی تازهٔ DoH انجام می‌شود</td>
+                    </tr>
+                    <tr>
+                        <th scope="row">فقط IPv4 <code style="direction:ltr;">ipresolve_v4</code></th>
+                        <td>
+                            <label>
+                                <input type="hidden" name="glpe_ipresolve_v4" value="0">
+                                <input type="checkbox" name="glpe_ipresolve_v4" value="1" <?php checked(get_option('glpe_ipresolve_v4', '0'), '1'); ?> />
+                                اگر هاست مسیر IPv6 معیوب دارد و نشانی‌ها گاهی قفل می‌شوند فعال کنید
                             </label>
                         </td>
                     </tr>
@@ -809,7 +899,7 @@ class GLPE_Plugin {
 
             <?php $this->renderAccessCard(); ?>
 
-            <?php GLPE_Hub_Admin::renderHubCard(); ?>
+            <?php GLPE_Hub_Admin::renderRelayPointer(); ?>
         </div>
         <?php
     }
