@@ -3,7 +3,7 @@
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
  * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با کدگذاری کامل تبادلات، بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 5.2.0
+ * Version: 6.0.0
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '5.2.0');
+define('GLPE_VERSION', '6.0.0');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -32,6 +32,7 @@ require_once GLPE_DIR . 'includes/Cookies.php';
 require_once GLPE_DIR . 'includes/Codec.php';
 require_once GLPE_DIR . 'includes/Engine.php';
 require_once GLPE_DIR . 'includes/Access.php';
+require_once GLPE_DIR . 'includes/Hub.php';
 
 class GLPE_Plugin {
     private static $instance = null;
@@ -50,6 +51,12 @@ class GLPE_Plugin {
         // PHP session is opened very early, before any output can begin.
         add_action('init', [$this, 'startSession'], 0);
 
+        // Multi-node relay core (v6.0.0): public endpoint driven by the
+        // bundled Python core — token lives inside the obfuscated envelope,
+        // so no WordPress session is required. Runs before the viewer
+        // dispatcher; both exit for their own requests only.
+        add_action('init', ['GLPE_Hub', 'maybeHandle'], 1);
+
         // Front-end request interception (priority 1 = before theme output).
         add_action('init', [$this, 'dispatchRequest'], 1);
 
@@ -65,6 +72,14 @@ class GLPE_Plugin {
         add_action('admin_post_glpe_save_roles', [$this, 'handleSaveRoles']);
         add_action('admin_post_glpe_toggle_user', [$this, 'handleToggleUser']);
         add_action('admin_post_glpe_save_jar', [$this, 'handleSaveJar']);
+
+        // Relay core management (v6.0.0)
+        add_action('admin_post_glpe_hub_regen', ['GLPE_Hub_Admin', 'handleRegen']);
+        add_action('admin_post_glpe_hub_clear', ['GLPE_Hub_Admin', 'handleClearLog']);
+        add_action('admin_post_glpe_hub_file', ['GLPE_Hub_Admin', 'handleServeFile']);
+        add_action('admin_post_glpe_hub_config', ['GLPE_Hub_Admin', 'handleServeConfig']);
+        add_action('admin_post_glpe_hub_zip', ['GLPE_Hub_Admin', 'handleServeZip']);
+        add_action('wp_ajax_glpe_hub_vitals', ['GLPE_Hub_Admin', 'ajaxVitals']);
 
         // Per-account session isolation: a browser's jar belongs to exactly
         // one account — logging out drops it, logging in restores the
@@ -664,7 +679,7 @@ class GLPE_Plugin {
     }
 
     public function registerSettings() {
-        $flags = ['glpe_toolbar', 'glpe_blank_title', 'glpe_no_scripts', 'glpe_no_images', 'glpe_ssl_verify'];
+        $flags = ['glpe_toolbar', 'glpe_blank_title', 'glpe_no_scripts', 'glpe_no_images', 'glpe_ssl_verify', 'glpe_hub_enabled'];
         foreach ($flags as $flag) {
             register_setting('glpe_group', $flag, ['sanitize_callback' => [$this, 'sanitizeFlag']]);
         }
@@ -690,10 +705,13 @@ class GLPE_Plugin {
             <?php
             $cpNotice = isset($_GET['cp_msg']) ? sanitize_key($_GET['cp_msg']) : '';
             $cpNotices = [
-                'roles-saved' => 'سطح دسترسی نقش‌ها ذخیره شد.',
-                'granted'     => 'مجوز «مرورگر GLPE» به کاربر اعطا شد.',
-                'revoked'     => 'مجوز «مرورگر GLPE» از کاربر لغو شد.',
-                'notfound'    => 'کاربر موردنظر یافت نشد.',
+                'roles-saved'    => 'سطح دسترسی نقش‌ها ذخیره شد.',
+                'granted'        => 'مجوز «مرورگر GLPE» به کاربر اعطا شد.',
+                'revoked'        => 'مجوز «مرورگر GLPE» از کاربر لغو شد.',
+                'notfound'       => 'کاربر موردنظر یافت نشد.',
+                'hub-token-regen' => 'کلید گرهٔ ارتباطی جدید ساخته شد — باید config.json کلاینت‌ها را به‌روزرسانی کنید.',
+                'hub-log-clear'  => 'گزارش پایش هستهٔ ارتباطی پاک شد.',
+                'hub-nozip'      => 'ساخت ZIP روی این هاست در دسترس نیست؛ فایل‌های کلاینت را جداگانه دانلود کنید.',
             ];
             if ($cpNotice !== '' && isset($cpNotices[$cpNotice])) {
                 echo '<div class="notice notice-success is-dismissible"><p>' . esc_html($cpNotices[$cpNotice]) . '</p></div>';
@@ -774,12 +792,24 @@ class GLPE_Plugin {
                             </label>
                         </td>
                     </tr>
+                    <tr>
+                        <th scope="row">هستهٔ ارتباطی چندگرهی (Hub Core)</th>
+                        <td>
+                            <label>
+                                <input type="hidden" name="glpe_hub_enabled" value="0">
+                                <input type="checkbox" name="glpe_hub_enabled" value="1" <?php checked(get_option('glpe_hub_enabled', '1'), '1'); ?> />
+                                فعال‌سازی هستهٔ رله چندگرهی روی این سایت (کلاینت Python از نشانی این سایت به‌عنوان یک گره استفاده می‌کند — مدیریت و دانلود کلاینت در کارت «هستهٔ ارتباطی چندگرهی» پایین صفحه)
+                            </label>
+                        </td>
+                    </tr>
                 </table>
 
                 <?php submit_button('ذخیره تغییرات'); ?>
             </form>
 
             <?php $this->renderAccessCard(); ?>
+
+            <?php GLPE_Hub_Admin::renderHubCard(); ?>
         </div>
         <?php
     }

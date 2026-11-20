@@ -5,7 +5,7 @@
 **نمایشگر صفحات وب برای وردپرس — مناسب هاست‌های رایگان و اشتراکی**
 WordPress remote page display plugin — built for free/shared hosting
 
-![Version](https://img.shields.io/badge/version-5.2.0-blue)
+![Version](https://img.shields.io/badge/version-6.0.0-blue)
 ![WordPress](https://img.shields.io/badge/WordPress-5.3%2B-21759B)
 ![PHP](https://img.shields.io/badge/PHP-7.2--8.3-8892BF)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -45,6 +45,7 @@ WordPress remote page display plugin — built for free/shared hosting
 - بازنویسی کامل HTML/CSS/JS (پیوندها، فرم‌ها، تصاویر، srcset، data-attributes، SVG، iframe)
 - هوک سمت کلاینت: `fetch`، `XHR`، `document.cookie`، `window.open`، `history.pushState` + MutationObserver برای محتوای داینامیک
 - نوار ناوبری شناور با گزینه‌های زنده و نمایش محلی نشانی صفحهٔ فعلی
+- 📡 **هسته ارتباطی چندگرهی (v6)** — سیستم ضدسانسور چندگرهی داخل افزونه (توضیح در ادامه)
 - محافظت آدرس‌های داخلی (دو لایه: کنترل داخلی + `reject_unsafe_urls` وردپرس)
 - سه لایه انتقال: WordPress HTTP API → cURL → Streams
 - گزینه‌های کم‌مصرف: بدون تصاویر / بدون اسکریپت برای کاهش پهنای باند
@@ -52,6 +53,17 @@ WordPress remote page display plugin — built for free/shared hosting
 - 🔐 سطح دسترسی «مرورگر GLPE» — فقط کاربران دارای مجوز یا مدیران می‌توانند از نمایشگر استفاده و وارد شوند؛ مدیریت مجوز نقش‌ها و کاربران از پیشخوان
 - 🍪 مدیریت نشست‌ها توسط کاربر — هر کاربر می‌تواند کوکی‌ها و نشست‌های ذخیره‌شده خودش را به‌تفکیک دامنه ببیند و پاک کند (`?_glpe=1&mode=sessions` + لینک از ویجت)
 - حذف کامل داده‌ها هنگام حذف افزونه (`uninstall.php`)
+
+### 📡 هسته ارتباطی چندگرهی (Multi-Node Relay Core — v6.0.0)
+از نسخه ۶.۰.۰ یک سیستم تونل‌زنی شبکه ضدسانسور به‌طور کامل داخل افزونه ادغام شده است:
+
+- **هر سایت وردپرسیِ نصب‌کننده یک گره (node) است** — موتور سمت سرور (`includes/Hub.php`) درخواست‌های کپسوله‌شده کلاینت را روی نقطه پایه سایت (home_url) پاسخ می‌دهد؛ هیچ فایل اضافی یا مسیر ویژه‌ای لازم نیست و فعال/غیرفعال کردن از یک کلید در پیشخوان انجام می‌شود
+- **کلاینت Python کنسولی همراه افزونه** (`hub-client/client.py` + دو فایل GeoSite/GeoIP): ترافیک TCP و UDP را در قالب درخواست‌های عادی GET/POST کپسوله می‌کند، پیش‌خوان محلی SOCKS5 + HTTP روی پورت ۴۱۹۲۷ ارائه می‌دهد و بین چند گره (هر سایت نصب‌کننده) به‌صورت چرخشی توزیع بار با failover خودکار انجام می‌دهد
+- **مبهم‌سازی سیمی**: تمام پاکت‌ها در پارامتر `_v` (JSON → Base64 → معکوس) سفر می‌کنند و بارهای دانلود/آپلود هم معکوس‌Base64 هستند — هیچ نشانی، کلید یا محتوایی به‌صورت خوانا روی خط دیده نمی‌شود
+- **ویژگی‌های عملیاتی**: پرکنندهٔ ۲۰۴۸ بایتی برای شکستن بافر CDN + `X-Accel-Buffering: no`، واچ‌داگ دوگانهٔ کلاینت با مصونیت VIP برای جریان‌های فعال (>۱۰KB/s)، تأخیر تطبیقی، مسیریابی مستقیم GeoSite/GeoIP برای شبکهٔ داخل ایران، پاکسازی دیسک با Lock-File، نگهدارنده متریک‌های محدود و پایش زنده در پیشخوان (آژاکس هر ۲ ثانیه)
+- **رفع ریشه‌ای نسبت به طراحی مستقل اولیه**: پاکت‌های دارای «+» دیگر خراب نمی‌شوند (بازگردانی بی‌اتلاف فاصله↔+ در موتور + URL-encode کامل در کلاینت)، دادهٔ اولیهٔ تونل (ClientHello) دیگر در شروع جریان پاک نمی‌شود، و تونل‌های بی‌صدا با keepalive هر ۲ ثانیه ورکرها را آزاد نگه می‌دارند (رفع مشکل زامبی/Deadlock سمت سرور)
+- **مدیریت**: کارت اختصاصی در صفحه تنظیمات افزونه — نشانی و کلید گره، ساخت کلید جدید، پایش زنده، دانلود config.json آماده و بستهٔ کلاینت (ZIP یا فایل به‌فایل برای هاست‌های بدون ZipArchive)
+- شروع سریع: دانلود بستهٔ کلاینت → `pip install requests` → `python client.py` → اتصال مرورگر/سیستم به `SOCKS5 127.0.0.1:41927` — برای افزودن گرهٔ دیگر، نشانی و کلید آن را از پنل همان سایت بردارید و به آرایهٔ `servers` در config.json اضافه کنید
 
 ### سازگاری سایت‌ها (تأییدشده با تست واقعی)
 | نوع سرویس | وضعیت | توضیح |
@@ -90,12 +102,17 @@ wordpress-GLPE/
 │   ├── glpe-viewer.php     # Main plugin file (dispatch, shortcode, admin)
 │   ├── uninstall.php       # Clean data removal
 │   ├── readme.txt          # WordPress.org style readme
-│   └── includes/
-│       ├── Engine.php      # WP HTTP transport + HTML/CSS/JS rewriter
-│       ├── Cookies.php     # RFC 6265 session store
-│       ├── Codec.php       # Per-site reversible link codec
-│       ├── Access.php      # "GLPE Viewer" permission (capability gate + admin helpers)
-│       └── client.js       # Injected client-side companion
+│   ├── includes/
+│   │   ├── Engine.php      # WP HTTP transport + HTML/CSS/JS rewriter
+│   │   ├── Cookies.php     # RFC 6265 session store
+│   │   ├── Codec.php       # Per-site reversible link codec
+│   │   ├── Access.php      # "GLPE Viewer" permission (capability gate + admin helpers)
+│   │   ├── Hub.php         # Multi-node relay core engine (v6) + admin card
+│   │   └── client.js       # Injected client-side companion
+│   └── hub-client/         # Bundled Python relay client (v6)
+│       ├── client.py       # SOCKS5/HTTP core with multi-node round-robin
+│       ├── geoip_ir.txt    # GeoIP routing data
+│       └── geosite_ir.txt  # GeoSite routing data
 ├── docs/
 │   ├── CODE_REVIEW.md      # Full review history of v3.3.3 → v4.0.0
 │   └── DEVELOPMENT.md      # Dev environment & release checklist

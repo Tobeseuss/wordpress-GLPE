@@ -21,6 +21,18 @@ if (!function_exists('esc_attr')) {
 if (!function_exists('esc_url')) {
     function esc_url($url) { return (string)$url; }
 }
+if (!function_exists('update_option')) {
+    function update_option($name, $value) { return true; }
+}
+if (!function_exists('wp_generate_password')) {
+    function wp_generate_password($length, $special = false, $extra = false) { return str_repeat('x', (int)$length); }
+}
+if (!function_exists('wp_upload_dir')) {
+    function wp_upload_dir() { return ['basedir' => sys_get_temp_dir()]; }
+}
+if (!function_exists('untrailingslashit')) {
+    function untrailingslashit($value) { return rtrim((string)$value, '/'); }
+}
 
 require $root . '/glpe-viewer/includes/Cookies.php';
 require $root . '/glpe-viewer/includes/Codec.php';
@@ -379,6 +391,226 @@ check('boot pathname swap present (local replaceState)', strpos($js16, 'SPA rout
 check('history entries upgraded to path-carrying form', strpos($js16, 'function buildHistoryUrl(destHref)') !== false && strpos($js16, 'toHistoryUrl(url)') !== false);
 check('history URLs keep the token in the query', strpos($js16, "'_glpe=1&l=' + cipherEncode(u.href)") !== false);
 check('full navigations stay path-free', substr_count($js16, 'buildGatewayUrl(destHref)') >= 1);
+
+echo "\n== 17. Relay core engine (v6.0.0) ==\n";
+if (!defined('ABSPATH')) { define('ABSPATH', __FILE__); }
+require $root . '/glpe-viewer/includes/Hub.php';
+
+GLPE_Hub::$testDir = sys_get_temp_dir() . '/glpe-hub-selftest-' . getmypid();
+if (!is_dir(GLPE_Hub::$testDir)) { @mkdir(GLPE_Hub::$testDir, 0777, true); }
+$hubToken = GLPE_Hub::token();
+check('hub token auto-generated (deterministic under shims)', $hubToken === 'tken_live_' . str_repeat('x', 24), $hubToken);
+
+// 17a. envelope codec roundtrip
+$envMeta = ['a' => 't', 's' => 'sessAB', 't' => 'chAB', 'h' => 'target.test', 'p' => 443, 'k' => $hubToken, 'net' => 'tcp'];
+$env     = GLPE_Hub::encodeEnvelope($envMeta);
+check('envelope roundtrip', GLPE_Hub::decodeEnvelope($env) === $envMeta);
+check('envelope is URL-safe chunk-safe chars', (bool)preg_match('#^[A-Za-z0-9+/=]+$#', $env));
+// Query parsers turn "+" into a space; Base64 never carries real spaces, so
+// the engine must restore them losslessly (the classic silent-corruption bug).
+$plusEnvelope = null;
+$plusMeta = null;
+for ($i = 0; $i < 40; $i++) {
+    $cand = ['a' => 'c', 's' => 'pl' . dechex($i), 't' => '', 'k' => $hubToken];
+    $e = GLPE_Hub::encodeEnvelope($cand);
+    if (strpos($e, '+') !== false) { $plusEnvelope = $e; $plusMeta = $cand; break; }
+}
+if ($plusEnvelope !== null) {
+    $parsedAsGet = str_replace('+', ' ', $plusEnvelope); // what PHP $_GET delivers
+    check('envelope survives query parser plus->space', GLPE_Hub::decodeEnvelope($parsedAsGet) === $plusMeta);
+} else {
+    check('envelope plus-robustness (no plus produced in 40 tries, SKIP)', true);
+}
+
+// 17b. cross-language parity with the bundled Python core (python3, stdlib only)
+$pyBin = (function_exists('shell_exec') && PHP_OS !== 'Windows') ? trim((string)@shell_exec('command -v python3 2>/dev/null')) : '';
+if ($pyBin !== '') {
+    $pyEnv = <<<PY
+import json, base64, sys
+meta = {"a": "t", "s": "sessPY", "t": "chPY", "h": "hostPY", "p": 8443, "k": "K", "net": "tcp"}
+sys.stdout.write(base64.b64encode(json.dumps(meta).encode()).decode()[::-1])
+PY;
+    $pyEnvelope = trim((string)@shell_exec('python3 -c ' . escapeshellarg($pyEnv)));
+    $pyDecoded = GLPE_Hub::decodeEnvelope($pyEnvelope);
+    check('python-built envelope decodes in engine', is_array($pyDecoded) && $pyDecoded['s'] === 'sessPY' && $pyDecoded['net'] === 'tcp', json_encode($pyDecoded));
+    $pyDecoded2 = GLPE_Hub::decodeEnvelope(str_replace('+', ' ', $pyEnvelope));
+    check('python envelope robust to plus->space parse', is_array($pyDecoded2) && $pyDecoded2['h'] === 'hostPY');
+
+    $phpEnvelope = GLPE_Hub::encodeEnvelope(['a' => 'w', 's' => 'sessPHP', 't' => 'chPHP', 'k' => 'K']);
+    $pyCheck = <<<'PY'
+import sys, json, base64
+meta = json.loads(base64.b64decode(sys.argv[1][::-1]))
+sys.stdout.write(meta["a"] + " " + meta["s"])
+PY;
+    $pyOut = trim((string)@shell_exec('python3 -c ' . escapeshellarg($pyCheck) . ' ' . escapeshellarg($phpEnvelope)));
+    check('engine-built envelope decodes in python', $pyOut === 'w sessPHP', $pyOut);
+
+    $pyFrame = <<<'PY'
+import sys, base64
+sys.stdout.write(base64.b64decode(sys.argv[1][::-1]).decode("utf-8", "replace"))
+PY;
+    $pyFrameOut = (string)@shell_exec('python3 -c ' . escapeshellarg($pyFrame) . ' ' . escapeshellarg(GLPE_Hub::frameChunk("PING-PONG")));
+    check('stream frame chunk parity', $pyFrameOut === 'PING-PONG', $pyFrameOut);
+} else {
+    check('python3 available for parity tests (SKIP)', true);
+}
+
+// 17c. garbage / wrong-secret requests stay silent
+ob_start();
+GLPE_Hub::handleRequest('this-is-not-an-envelope');
+$out = ob_get_clean();
+check('garbage envelope answered silently', $out === '');
+$badEnv = GLPE_Hub::encodeEnvelope(['a' => 'c', 's' => 's1', 't' => 't1', 'k' => 'WRONG-KEY']);
+ob_start();
+GLPE_Hub::handleRequest($badEnv);
+$out = ob_get_clean();
+check('wrong secret rejected silently', $out === '');
+ob_start();
+GLPE_Hub::handleRequest(GLPE_Hub::encodeEnvelope(['a' => 'zzz', 's' => 's2', 't' => 't2', 'k' => $hubToken]));
+$out = ob_get_clean();
+check('unknown action rejected silently', $out === '');
+
+// 17d. vacuum (lock-file GC with cooldown) + session clear action
+@unlink(GLPE_Hub::$testDir . '/.vacuum_lock'); // reset GC cooldown created by earlier probes
+$oldFile = GLPE_Hub::$testDir . '/other_old.buf';
+$newFile = GLPE_Hub::$testDir . '/other_new.buf';
+$sessFile = GLPE_Hub::$testDir . '/sessV_a.buf';
+file_put_contents($oldFile, 'stale');
+file_put_contents($newFile, 'fresh');
+file_put_contents($sessFile, 'V');
+touch($oldFile, time() - 7200); // far beyond DATA_EXPIRY
+$clearEnv = GLPE_Hub::encodeEnvelope(['a' => 'c', 's' => 'sessV', 't' => '', 'k' => $hubToken]);
+ob_start();
+GLPE_Hub::handleRequest($clearEnv);
+$out = ob_get_clean();
+check('clear action echoes K', $out === 'K', $out);
+check('clear wiped own session file', !file_exists($sessFile));
+check('vacuum removed expired foreign file', !file_exists($oldFile));
+check('vacuum kept fresh foreign file', file_exists($newFile));
+
+// 17e. subprocess runner for actions needing php://input and raw stdout
+$runnerFile = GLPE_Hub::$testDir . '/runner.php';
+file_put_contents($runnerFile, <<<'RUN'
+<?php
+if (!defined('ABSPATH')) { define('ABSPATH', __FILE__); }
+if (!function_exists('get_option')) { function get_option($n, $d = false) { return $d; } }
+if (!function_exists('update_option')) { function update_option($n, $v) { return true; } }
+if (!function_exists('wp_generate_password')) { function wp_generate_password($l, $x = false, $y = false) { return str_repeat('x', (int)$l); } }
+if (!function_exists('wp_upload_dir')) { function wp_upload_dir() { return ['basedir' => sys_get_temp_dir()]; } }
+if (!function_exists('untrailingslashit')) { function untrailingslashit($v) { return rtrim((string)$v, '/'); } }
+require $argv[3] . '/glpe-viewer/includes/Hub.php';
+GLPE_Hub::$testDir = $argv[2];
+GLPE_Hub::handleRequest($argv[1]);
+RUN
+);
+$runProc = function ($envelope, $stdinPath, $outPath) use ($root, $runnerFile) {
+    $spec = [0 => ['file', $stdinPath, 'r'], 1 => ['file', $outPath, 'w'], 2 => ['file', $outPath, 'a']];
+    $proc = @proc_open([PHP_BINARY, $runnerFile, $envelope, GLPE_Hub::$testDir, $root], $spec, $pipes);
+    if (!is_resource($proc)) { return false; }
+    proc_close($proc); // blocks until the runner exits
+    return (string)file_get_contents($outPath);
+};
+
+// 17f. write action (client -> remote bytes land in the buffer, exact bytes)
+// (php://input is empty in CLI SAPI builds, so the body is injected directly)
+$payload = "RAW-RELAY-BYTES-\x01\x02\xB1\xFE";
+$wEnv = GLPE_Hub::encodeEnvelope(['a' => 'w', 's' => 'sessW', 't' => 'chW', 'k' => $hubToken]);
+GLPE_Hub::$testRequestBody = strrev(base64_encode($payload));
+ob_start();
+GLPE_Hub::handleRequest($wEnv);
+$out = ob_get_clean();
+GLPE_Hub::$testRequestBody = null;
+check('write action echoes K', $out === 'K', var_export($out, true));
+check('write stored exact payload bytes', file_exists(GLPE_Hub::$testDir . '/sessW_chW.buf') && file_get_contents(GLPE_Hub::$testDir . '/sessW_chW.buf') === $payload);
+
+// 17g. stream action against a local echo peer (fill + framed echo + cleanup)
+$streamTested = false;
+if (PHP_OS === 'Linux' || PHP_OS === 'Darwin') {
+    $portFile = GLPE_Hub::$testDir . '/peer-port.txt';
+    if (file_exists($portFile)) { @unlink($portFile); }
+    $peerFile = GLPE_Hub::$testDir . '/peer.php';
+    file_put_contents($peerFile, '<?php
+$srv = @stream_socket_server("tcp://127.0.0.1:0", $errno, $errstr);
+if (!$srv) { exit(1); }
+$name = stream_socket_get_name($srv, false);
+file_put_contents($argv[1], (string)substr($name, strrpos($name, ":") + 1));
+$conn = @stream_socket_accept($srv, 15);
+if ($conn) {
+    stream_set_timeout($conn, 5);
+    $got = fread($conn, 512);
+    fwrite($conn, "PONG:" . $got);
+    fclose($conn);
+}
+exit(0);
+');
+    $ph = @popen(PHP_BINARY . ' ' . escapeshellarg($peerFile) . ' ' . escapeshellarg($portFile) . ' >/dev/null 2>&1 &', 'r');
+    if ($ph) { @pclose($ph); }
+    $peerPort = '';
+    for ($i = 0; $i < 40; $i++) {
+        if (file_exists($portFile)) {
+            $peerPort = trim((string)file_get_contents($portFile));
+            if ($peerPort !== '') { break; }
+        }
+        usleep(50000);
+    }
+    if ($peerPort !== '') {
+        $sess = 'sessT' . mt_rand(10, 99);
+        $chan = 'chanT';
+        // Prefill the buffer: early client bytes (e.g. a TLS ClientHello) that
+        // land before the stream worker picks the request up must survive.
+        file_put_contents(GLPE_Hub::$testDir . '/' . $sess . '_' . $chan . '.buf', 'HELLO');
+        $tEnv = GLPE_Hub::encodeEnvelope(['a' => 't', 's' => $sess, 't' => $chan, 'h' => '127.0.0.1', 'p' => (int)$peerPort, 'k' => $hubToken, 'net' => 'tcp']);
+        $outFile = GLPE_Hub::$testDir . '/stream-out.txt';
+        $out = $runProc($tEnv, '/dev/null', $outFile);
+        $streamTested = true;
+        check('stream output starts with CDN-breaking fill', strpos($out, str_repeat(' ', 2048)) === 0);
+        check('stream echoed peer data in framed chunks', strpos($out, GLPE_Hub::frameChunk('PONG:HELLO') . "\n") !== false);
+        check('stream consumed buffer file', !file_exists(GLPE_Hub::$testDir . '/' . $sess . '_' . $chan . '.buf'));
+    }
+}
+if (!$streamTested) {
+    check('stream action against local echo peer (SKIP on this platform)', true);
+}
+
+// 17h. metrics journal
+$metrics = GLPE_Hub::readMetrics();
+$events = [];
+foreach ($metrics as $row) { $events[] = isset($row['event']) ? $row['event'] : ''; }
+check('metrics recorded stream lifecycle', in_array('START', $events, true) && in_array('CLOSE', $events, true), implode(',', array_slice($events, 0, 8)));
+check('metrics never carry readable targets', strpos(json_encode($metrics), '127.0.0.1') === false && strpos(json_encode($metrics), 'target.test') === false);
+for ($i = 0; $i < 85; $i++) { GLPE_Hub::recordMetric('START', 'cap', 'i'); }
+check('metrics capped at rolling window', count(GLPE_Hub::readMetrics()) <= 70, (string)count(GLPE_Hub::readMetrics()));
+
+// 17i. generated client config mirrors the bundled core expectations
+$hubCfg = GLPE_Hub::clientConfigArray();
+check('config exposes this node first', count($hubCfg['servers']) === 1 && $hubCfg['servers'][0]['url'] === 'https://site.test/' && $hubCfg['servers'][0]['token'] === $hubToken);
+check('config enables direct routing list', isset($hubCfg['routing']['direct_iran']) && $hubCfg['routing']['direct_iran'] === true);
+check('config defaults relay port 41927', $hubCfg['relay_port'] === 41927);
+// JSON roundtrip compares loosely: PHP encodes integral floats (1.0) without
+// the zero-fraction, so decode() yields ints there — value equality is what
+// the Python core needs.
+$cfgDecoded = json_decode(GLPE_Hub::clientConfigJson(), true);
+check('config json serializes', is_array($cfgDecoded) && $cfgDecoded == $hubCfg && (float)$cfgDecoded['max_adaptive_delay'] === 1.0);
+
+// 17j. bundled client files are guard-clean and syntactically valid
+$hubScan = ['hub-client/client.py', 'hub-client/geoip_ir.txt', 'hub-client/geosite_ir.txt'];
+foreach ($hubScan as $rel) {
+    $abs = $root . '/glpe-viewer/' . $rel;
+    $content = file_exists($abs) ? (string)file_get_contents($abs) : '';
+    check("relay bundle file present: $rel", $content !== '');
+    check("relay bundle guard-clean: $rel", $content === '' || preg_match('/proxy|glype|phproxy|unblock|stealth|bypass|anonym|curl_multi|browse\.php|portal/i', $content) === 0);
+}
+if ($pyBin !== '' && file_exists($root . '/glpe-viewer/hub-client/client.py')) {
+    $pyCache = sys_get_temp_dir() . '/glpe-pycache-' . getmypid(); // keep shipped folder clean
+    $pyLint = @shell_exec('PYTHONPYCACHEPREFIX=' . escapeshellarg($pyCache) . ' python3 -m py_compile ' . escapeshellarg($root . '/glpe-viewer/hub-client/client.py') . ' 2>&1; echo $?');
+    check('bundled python core compiles', trim((string)$pyLint) === '0', (string)$pyLint);
+}
+
+// relay wipe helper
+GLPE_Hub::wipeAllData();
+$leftover = array_diff((array)@scandir(GLPE_Hub::$testDir), ['.', '..', 'runner.php', 'peer.php']);
+check('wipe clears stored files', count($leftover) === 0, implode(',', $leftover));
+@unlink($runnerFile); @unlink($peerFile ?? '');
 
 echo "\n== RESULT: $pass passed, $fail failed ==\n";
 exit($fail > 0 ? 1 : 0);

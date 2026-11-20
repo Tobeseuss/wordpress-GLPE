@@ -20,6 +20,8 @@ $glpe_options = [
     'glpe_no_scripts',
     'glpe_no_images',
     'glpe_ssl_verify',
+    'glpe_hub_enabled',
+    'glpe_hub_token',
     'glpe_db_version',
 ];
 
@@ -49,4 +51,20 @@ foreach (get_users(['fields' => ['ID']]) as $glpe_user_ref) {
 
 if ($glpe_page_id) {
     wp_delete_post((int)$glpe_page_id, true);
+}
+
+// Relay core: wipe the stored-chunk directory (chunk files, metrics,
+// vacuum lock) — never leave tunnel traffic on the disk.
+$glpe_hub_dir = wp_normalize_path(trailingslashit((string)wp_upload_dir()['basedir']) . 'glpe-relay-tmp');
+if (is_dir($glpe_hub_dir)) {
+    foreach ((array)scandir($glpe_hub_dir) as $glpe_hub_node) {
+        if ($glpe_hub_node === '.' || $glpe_hub_node === '..') {
+            continue;
+        }
+        $glpe_hub_path = $glpe_hub_dir . '/' . $glpe_hub_node;
+        if (is_file($glpe_hub_path)) {
+            @unlink($glpe_hub_path);
+        }
+    }
+    @rmdir($glpe_hub_dir);
 }
