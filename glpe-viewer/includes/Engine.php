@@ -8,7 +8,28 @@
 
 require_once __DIR__ . '/Cookies.php';
 require_once __DIR__ . '/Codec.php';
-require_once __DIR__ . '/Dns.php';
+
+// The DNS hardening layer is REQUIRED when present; a partially extracted
+// update (free host, overloaded unzip) may ship this file without it. The
+// engine then degrades to plain fetching instead of fataling every page —
+// the integrity notice tells the admin to reinstall.
+if (!class_exists('GLPE_Dns')) {
+    if (file_exists(__DIR__ . '/Dns.php')) {
+        require_once __DIR__ . '/Dns.php';
+    }
+}
+if (!class_exists('GLPE_Dns')) {
+    class GLPE_Dns {
+        public static function settings() {
+            return ['mode' => 'system', 'ttl' => 900, 'connect' => 10, 'timeout' => 15, 'retries' => 1, 'ipv4' => false];
+        }
+        public static function planHop($url, $force = false) { return []; }
+        public static function applyCurl($ch, $url, $force = false) { return $ch; }
+        public static function forceResolve($url) { return false; }
+        public static function isResolveError($message) { return false; }
+        public static function onHttpApiCurl($ch, $parsedArgs = null, $url = null) { return $ch; }
+    }
+}
 
 class GLPE_Engine {
     private $cookies;
@@ -727,6 +748,37 @@ class GLPE_Engine {
     }
 
     /**
+     * Heavy destination pages (news homepages easily ship 500KB+ of HTML and
+     * the DOM rewrite multiplies that) exhaust the small memory_limit free
+     * hosts ship (32-64M) — the classic "critical error" report. Most
+     * shared hosts ALLOW raising it per-request; attempts are harmless when
+     * locked.
+     */
+    public static function raiseMemoryBudget() {
+        $cur = (string)@ini_get('memory_limit');
+        if ($cur === '' || $cur === '-1') {
+            return;
+        }
+        if (self::phpSizeToBytes($cur) >= 268435456) {
+            return;
+        }
+        @ini_set('memory_limit', '256M');
+    }
+
+    private static function phpSizeToBytes($raw) {
+        $raw = trim((string)$raw);
+        if ($raw === '' || $raw === '-1') {
+            return 0;
+        }
+        $unit = strtoupper(substr($raw, -1));
+        $num = (float)$raw;
+        if ($unit === 'G') { return (int)($num * 1073741824); }
+        if ($unit === 'M') { return (int)($num * 1048576); }
+        if ($unit === 'K') { return (int)($num * 1024); }
+        return (int)$num;
+    }
+
+    /**
      * Per-hop request headers: identity references always describe the
      * destination host (never this site — remote endpoints reject mismatched
      * cross-origin submissions), and the matching session records are
@@ -763,6 +815,7 @@ class GLPE_Engine {
      * reported back for correct link rewriting.
      */
     public function executeRequest($targetUrl, $method = 'GET', $postData = null, $customHeaders = []) {
+        self::raiseMemoryBudget();
         $parsed = parse_url($targetUrl);
         if (!isset($parsed['host'])) {
             throw new Exception("آدرس وارد شده نامعتبر است.");
@@ -1066,6 +1119,7 @@ class GLPE_Engine {
      * Returns true once the bytes have been flushed; the caller must exit.
      */
     public function streamMediaRequest($targetUrl, $customHeaders = []) {
+        self::raiseMemoryBudget();
         $parsed = parse_url($targetUrl);
         if (!isset($parsed['host'])) {
             throw new Exception("آدرس وارد شده نامعتبر است.");

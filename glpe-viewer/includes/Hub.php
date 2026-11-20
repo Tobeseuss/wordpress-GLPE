@@ -45,6 +45,16 @@ class GLPE_Hub {
      * servers that ignore deny-all .htaccess, like some nginx builds) executes
      * an empty script instead of leaking the file contents. */
     const FILE_GUARD       = "<?php exit; ?>\n";
+    const STREAM_MARK      = 'strm_'; // live-channel marker prefix (flock-held)
+    const STREAM_CAP_MIN   = 2;
+    const STREAM_CAP_MAX   = 32;
+    const STREAM_CAP_DEF   = 6;  // free hosts have very few PHP workers — each
+                                 // live channel pins one for its whole lifetime
+    const CALIB_MARK       = 'calib_'; // calibration-hold marker prefix
+    const CALIB_ABS_MAX    = 12; // absolute admission ceiling for concurrent
+                                 // holds (streams + calibration together)
+    const CALIB_HOLD_MIN   = 100;  // ms — one-way clamp bounds for a hold
+    const CALIB_HOLD_MAX   = 3000;
 
     /** @var string|null test override for the data directory (selftest only) */
     public static $testDir = null;
@@ -112,6 +122,10 @@ class GLPE_Hub {
         }
         if ($action === 't') {
             self::actStream($meta, $sessId, $blockId);
+            return;
+        }
+        if ($action === 'z') {
+            self::actCalibrationHold($meta, $sessId, $blockId);
             return;
         }
 
@@ -244,6 +258,10 @@ class GLPE_Hub {
             'token'   => self::token(),
             'enabled' => self::isEnabled() ? '1' : '0',
             'dir'     => $basedir,
+            // The channel cap must travel with the handoff: the standalone
+            // fast endpoint has no CMS option store, so without this entry it
+            // would fall back to the default cap and admit over-cap channels.
+            'max_streams' => self::streamCap(),
         ]);
         $existing = @file_get_contents($file);
         if ($existing !== false && substr((string)$existing, self::guardLen()) === $payload) {
@@ -271,22 +289,24 @@ class GLPE_Hub {
         return home_url('/');
     }
 
-    /** Best-practice baseline for the bundled Python core (v6.1 tuning):
+    /** Best-practice baseline for the bundled Python core (v6.2 tuning):
      * generous split timeouts so slow hosts still complete TLS handshakes,
-     * identity transport (no compression buffering), wide pool. */
+     * identity transport (no compression buffering) — but a SMALL pool:
+     * every live channel pins a PHP worker on the node, and free hosts have
+     * very few. The node's own channel cap clamps this value at generation. */
     public static function defaultClientConfig() {
         return [
-            'max_pool_connections'           => 50,
+            'max_pool_connections'           => 10,
             'connect_timeout'                => 15,
             'stream_read_timeout'            => 30,
             'write_timeout'                  => 20,
             'max_retries'                    => 2,
             'relay_port'                     => 41927,
             'max_adaptive_delay'             => 1.0,
-            'idle_timeout'                   => 15.0,
+            'idle_timeout'                   => 12.0,
             'max_tunnel_uptime'              => 3600.0,
-            'low_traffic_timeout'            => 45.0,
-            'low_traffic_threshold_mb'       => 0.25,
+            'low_traffic_timeout'            => 35.0,
+            'low_traffic_threshold_mb'       => 0.15,
             'active_transfer_threshold_kbps' => 10.0,
             'routing' => [
                 'direct_iran'           => true,
@@ -329,6 +349,10 @@ class GLPE_Hub {
             }
             $preferFast = !isset($ov['prefer_fast_endpoint']) || $ov['prefer_fast_endpoint'] === '1';
         }
+
+        // The node's hard channel cap wins over any client preference — a
+        // pool larger than the cap just produces guaranteed 503s.
+        $cfg['max_pool_connections'] = min((int)$cfg['max_pool_connections'], self::streamCap());
 
         $primary  = $preferFast ? self::fastNodeUrl() : self::wpNodeUrl();
         $fallback = $preferFast ? self::wpNodeUrl() : self::fastNodeUrl();
@@ -449,6 +473,26 @@ class GLPE_Hub {
         }
 
         $dir       = self::dataDir();
+
+        // Host guard: every live channel pins a PHP worker for its whole
+        // lifetime. Without a hard server-side cap one busy client exhausts
+        // every worker on a small shared host and the whole site (including
+        // the admin) starts answering 503. Over-cap requests are rejected
+        // cheaply — before any egress — with 503 + Retry-After, which the
+        // Python core treats as "node busy, back off", never as a node fault.
+        $marker  = $dir . '/' . self::STREAM_MARK . $sessId . '_' . $blockId . '.php';
+        $slotFp  = self::acquireStreamSlot($marker);
+        if ($slotFp === null) {
+            self::recordMetric('CAP', $sessId, 'Channel cap reached (' . self::streamCap() . ')');
+            while (ob_get_level() > 0) { @ob_end_clean(); }
+            http_response_code(503);
+            header('Retry-After: 3');
+            header('Content-Type: text/plain; charset=utf-8');
+            header('Connection: close');
+            echo 'F';
+            return;
+        }
+
         $bufTarget = $dir . '/' . $sessId . '_' . $blockId . '.php';
         // NOTE: deliberately NOT deleted/truncated here. Channel ids are fresh
         // per connection (client-side UUID) and the client wipes its session on
@@ -462,6 +506,7 @@ class GLPE_Hub {
 
         $remote = @stream_socket_client($target, $errno, $errstr, 10, STREAM_CLIENT_CONNECT);
         if (!$remote) {
+            self::releaseStreamSlot($slotFp, $marker);
             $ipv6Warn = ($isIpv6 && strpos((string)$errstr, 'unreachable') !== false)
                 ? ' (Host Server Lacks IPv6 Routing)' : '';
             self::recordMetric('ERROR', $sessId, 'Connection Fault: ' . $errstr . $ipv6Warn);
@@ -563,7 +608,147 @@ class GLPE_Hub {
 
         @fclose($remote);
         @unlink($bufTarget);
+        self::releaseStreamSlot($slotFp, $marker);
         self::recordMetric('CLOSE', $sessId, 'Closed (CH: ' . substr($blockId, 0, 6) . ')');
+    }
+
+    /* ------------------------------------------------------------------
+     * Calibration hold ('z') — the tuner's load probe
+     * ---------------------------------------------------------------- */
+
+    /** One-way clamp for the requested hold duration (ms). */
+    public static function calibHoldClamp($ms) {
+        $ms = (int)$ms;
+        if ($ms < self::CALIB_HOLD_MIN) { return self::CALIB_HOLD_MIN; }
+        if ($ms > self::CALIB_HOLD_MAX) { return self::CALIB_HOLD_MAX; }
+        return $ms;
+    }
+
+    /**
+     * Holds exactly one PHP worker for a bounded, token-authenticated
+     * duration and then answers "K" — the tuner opens these in batches to
+     * measure how many concurrent requests the host truly serves before it
+     * starts answering 503. Admission uses the SAME marker mechanism as live
+     * channels but with the fixed discovery ceiling (CALIB_ABS_MAX) instead
+     * of the configured cap, so a calibration can discover safe values both
+     * below and above whatever cap is currently set; the combined count
+     * (streams + holds) never exceeds that absolute ceiling. Each hold is
+     * short by design (<= CALIB_HOLD_MAX), so this is strictly gentler on
+     * the host than one ordinary live channel, which pins its worker for the
+     * whole connection lifetime.
+     */
+    public static function actCalibrationHold($meta, $sessId, $blockId) {
+        if ($blockId === '') {
+            self::sendStatus(404);
+            return;
+        }
+        $holdMs = self::calibHoldClamp(isset($meta['d']) ? $meta['d'] : 0);
+
+        $marker = self::dataDir() . '/' . self::CALIB_MARK . $sessId . '_' . $blockId . '.php';
+        $slot   = self::acquireStreamSlot($marker, self::CALIB_ABS_MAX);
+        if ($slot === null) {
+            self::recordMetric('CALIB', $sessId, 'Hold rejected — ceiling reached');
+            while (ob_get_level() > 0) { @ob_end_clean(); }
+            http_response_code(503);
+            header('Retry-After: 2');
+            header('Content-Type: text/plain; charset=utf-8');
+            header('Connection: close');
+            echo 'F';
+            return;
+        }
+
+        self::recordMetric('CALIB', $sessId, 'Hold ' . $holdMs . 'ms (CH: ' . substr($blockId, 0, 6) . ')');
+        usleep($holdMs * 1000);
+
+        // No buffer clearing here: the answer rides whatever output buffer
+        // the runtime has open (it flushes normally at script end), so the
+        // caller — including the shared-engine selftest — sees the K body.
+        self::sendNoStore();
+        echo 'K';
+        self::releaseStreamSlot($slot, $marker);
+    }
+
+    /* ------------------------------------------------------------------
+     * Live-channel cap (host overload guard)
+     * ---------------------------------------------------------------- */
+
+    /** Configured maximum of simultaneously live channels on this node. */
+    public static function streamCap() {
+        $cap = (int)get_option('glpe_hub_max_streams', self::STREAM_CAP_DEF);
+        if ($cap < self::STREAM_CAP_MIN) { $cap = self::STREAM_CAP_MIN; }
+        if ($cap > self::STREAM_CAP_MAX) { $cap = self::STREAM_CAP_MAX; }
+        return $cap;
+    }
+
+    /**
+     * Counts worker-pinning requests by probing the flock markers (live
+     * channels AND calibration holds — both pin one PHP worker each): a
+     * marker whose lock can be taken shared is NOT held by a running
+     * request — stale, cleaned. Returns the live count and opportunistically
+     * unlinks stale markers.
+     */
+    public static function countLiveStreams() {
+        $dir = self::dataDir();
+        $nodes = @scandir($dir);
+        if (!is_array($nodes)) {
+            return 0;
+        }
+        $live = 0;
+        foreach ($nodes as $node) {
+            if (substr($node, -4) !== '.php'
+                || (strpos($node, self::STREAM_MARK) !== 0 && strpos($node, self::CALIB_MARK) !== 0)) {
+                continue;
+            }
+            $path = $dir . '/' . $node;
+            $fp = @fopen($path, 'r');
+            if (!$fp) {
+                continue;
+            }
+            if (@flock($fp, LOCK_SH | LOCK_NB)) {
+                // No exclusive holder → the stream is gone; remove the husk.
+                @flock($fp, LOCK_UN);
+                @fclose($fp);
+                @unlink($path);
+                continue;
+            }
+            @fclose($fp);
+            $live++;
+        }
+        return $live;
+    }
+
+    /**
+     * Registers a worker-pinning slot. Returns the locked marker handle
+     * (resource) on success, true when the filesystem refuses markers
+     * (soft-fail: the request runs uncounted rather than blocked), or null
+     * when the node is already at the given ceiling (default: the configured
+     * channel cap; calibration passes its own higher discovery ceiling).
+     */
+    public static function acquireStreamSlot($marker, $ceiling = null) {
+        $cap = ($ceiling !== null) ? (int)$ceiling : self::streamCap();
+        if (self::countLiveStreams() >= $cap) {
+            return null;
+        }
+        $fp = @fopen($marker, 'c');
+        if (!$fp) {
+            return true; // cannot count → cannot cap → do not punish the user
+        }
+        if (!@flock($fp, LOCK_EX | LOCK_NB)) {
+            @fclose($fp);
+            return true; // same marker already held — treat as counted elsewhere
+        }
+        return $fp;
+    }
+
+    /** Frees a channel slot acquired by acquireStreamSlot(). */
+    public static function releaseStreamSlot($slot, $marker) {
+        if (is_resource($slot)) {
+            @flock($slot, LOCK_UN);
+            @fclose($slot);
+        }
+        if (is_string($marker)) {
+            @unlink($marker);
+        }
     }
 
     /* ------------------------------------------------------------------
@@ -589,6 +774,21 @@ class GLPE_Hub {
                 continue;
             }
             $path = $dir . '/' . $node;
+            // Worker-pinning markers (live channels + calibration holds): held
+            // ones are active (never delete); unlocked ones are stale husks.
+            if (strpos($node, self::STREAM_MARK) === 0 || strpos($node, self::CALIB_MARK) === 0) {
+                $fp = @fopen($path, 'r');
+                if ($fp) {
+                    $held = !@flock($fp, LOCK_SH | LOCK_NB);
+                    @flock($fp, LOCK_UN);
+                    @fclose($fp);
+                    if ($held) {
+                        continue;
+                    }
+                    @unlink($path);
+                    continue;
+                }
+            }
             if (is_file($path) && strpos($node, $currentSess) === false && ($now - filemtime($path)) > self::DATA_EXPIRY) {
                 @unlink($path);
             }
@@ -763,8 +963,25 @@ class GLPE_Hub_Admin {
 
         update_option('glpe_hub_cfg', $out);
         update_option('glpe_hub_nodes', $extras);
+
+        // Node channel cap (host guard) travels with the same form.
+        $cap = isset($_POST['hub_max_streams']) ? (int)$_POST['hub_max_streams'] : 0;
+        if ($cap >= GLPE_Hub::STREAM_CAP_MIN && $cap <= GLPE_Hub::STREAM_CAP_MAX) {
+            update_option('glpe_hub_max_streams', (string)$cap);
+        }
+
         GLPE_Hub::syncNodeStore();
         wp_safe_redirect(self::backUrl('hub-cfg-saved'));
+        exit;
+    }
+
+    /** Clears the recorded fatal-error journal (diagnostics panel). */
+    public static function handleClearFatal() {
+        self::guard();
+        if (class_exists('GLPE_Diag')) {
+            GLPE_Diag::clearFatals();
+        }
+        wp_safe_redirect(self::backUrl('hub-fatals-cleared'));
         exit;
     }
 
@@ -798,13 +1015,29 @@ class GLPE_Hub_Admin {
         exit;
     }
 
-    /** Host evaluation + suggested values (admin-ajax). */
+    /** Host evaluation + suggested values (admin-ajax). The evaluation now
+     * includes the concurrency calibration and AUTO-APPLIES everything it
+     * finds (viewer fetch/DNS options, node channel cap, client config
+     * values) — the admin never has to click a save button for the tuned
+     * values to take effect. */
     public static function ajaxTune() {
         if (!current_user_can('manage_options')) {
             wp_send_json(['error' => 'forbidden'], 403);
         }
         check_ajax_referer('glpe_hub_tune');
+        // The calibration can run for tens of seconds: release the admin's
+        // PHP session lock immediately so other same-session requests (live
+        // vitals, editor autosave, another admin tab) never queue up behind
+        // this one, and stretch the execution budget where the host allows.
+        if (function_exists('session_write_close')) {
+            @session_write_close();
+        }
+        @set_time_limit(300);
         $result = GLPE_Hub_Tune::run();
+        $applied = GLPE_Hub_Tune::autoApply($result);
+        if (!empty($applied)) {
+            $result['applied'] = $applied;
+        }
         update_option('glpe_hub_tuning', $result);
         wp_send_json($result);
     }
@@ -937,6 +1170,10 @@ class GLPE_Hub_Admin {
         $zipUrl    = $zipOk ? $postLink('glpe_hub_zip') : '';
         $configJson = GLPE_Hub::clientConfigJson();
 
+        $cap = GLPE_Hub::streamCap();
+        $savedCap = (int)get_option('glpe_hub_max_streams', GLPE_Hub::STREAM_CAP_DEF);
+        $fatals = class_exists('GLPE_Diag') ? GLPE_Diag::lastFatals() : [];
+        $optionalMissing = class_exists('GLPE_Diag') ? GLPE_Diag::missingOptional() : [];
         $cfg    = GLPE_Hub::defaultClientConfig();
         $ov     = get_option('glpe_hub_cfg', []);
         if (is_array($ov)) {
@@ -983,6 +1220,7 @@ class GLPE_Hub_Admin {
                 'hub-log-clear'   => 'گزارش پایش هستهٔ ارتباطی پاک شد.',
                 'hub-nozip'       => 'ساخت ZIP روی این هاست در دسترس نیست؛ فایل‌های کلاینت را جداگانه دانلود کنید.',
                 'hub-cfg-saved'   => 'مقادیر کانفیگ و گره‌های اضافی ذخیره شد — config.json تولیدشده از این پس از مقادیر جدید استفاده می‌کند.',
+                'hub-fatals-cleared' => 'تاریخچهٔ خطاهای ثبت‌شده پاک شد.',
                 'fetch-applied'   => 'مقادیر پیشنهادی DNS/اتصال در تنظیمات افزونه ذخیره شد — همین حالا روی همهٔ بارگذاری‌های مرورگر اثر می‌گذارد.',
             ];
             if ($cpNotice !== '' && isset($cpNotices[$cpNotice])) {
@@ -1031,6 +1269,10 @@ class GLPE_Hub_Admin {
                             <td>کلید «هستهٔ ارتباطی چندگرهی» در بخش تنظیمات پیش‌فرض (منوی اصلی افزونه) روشن/خاموش می‌شود.
                             <?php if (!$enabled): ?><span style="color:#b45309; font-weight:bold;"> — موتور در حال حاضر غیرفعال است و به هیچ درخواستی پاسخ نمی‌دهد.</span><?php endif; ?></td>
                         </tr>
+                        <tr>
+                            <td><strong>سقف کانال‌های همزمان</strong></td>
+                            <td><span style="direction:ltr; display:inline-block;"><?php echo (int)$cap; ?></span> کانال (محافظ هاست — هر کانال زنده یک کارگر PHP را اشغال می‌کند؛ در فرم ویرایش کانفیگ زیر قابل تغییر است)</td>
+                        </tr>
                     </tbody>
                 </table>
 
@@ -1056,16 +1298,23 @@ class GLPE_Hub_Admin {
                     <li>اجرای هسته: <code>python client.py</code> — داشبورد زنده روی کنسول بالا می‌آید.</li>
                     <li>مرورگر یا سیستم را به پیش‌خوان محلی وصل کنید: <code>SOCKS5 127.0.0.1:41927</code></li>
                 </ol>
+                <div style="margin-top: 12px; background: #fffbeb; border: 1px solid #fcd34d; border-radius: 10px; padding: 12px 16px; font-size: 12.5px; color: #78350f; line-height: 2;">
+                    <strong>نکتهٔ مهم برای سایت‌های فیلترشده (مثل BBC فارسی و ایران‌اینترنشنال):</strong>
+                    مرورگر را با <strong>نوع اتصال HTTP</strong> (به‌جای SOCKS5) به <code style="direction:ltr;">127.0.0.1:41927</code> وصل کنید — در این حالت نام دامنه‌ها مستقیم و بدون تغییر به گره می‌رسد و حل نشانی سمت هاست انجام می‌شود.
+                    اگر SOCKS5 لازم دارید، در فایرفاکس گزینهٔ فرستادن درخواست‌های نام دامنه از طریق خود SOCKS v5 را حتماً فعال کنید.
+                    دلیل: در حالت پیش‌فرض برخی مرورگرها DNS را روی سیستم خودتان حل می‌کنند و برای دامنه‌های مسدودشده نشانی جعلی ISP را می‌گیرند — تونل هم به همان نشانی جعلی وصل می‌شود و صفحه باز نمی‌شود.
+                </div>
             </div>
 
             <!-- ارزیابی هاست -->
             <div style="background: #fff; border: 1px solid #ccd0d4; border-radius: 12px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);" id="glpe-tune-card">
-                <h3 style="margin: 0 0 8px;">🧪 ارزیابی عملی هاست و پیشنهاد مقادیر</h3>
+                <h3 style="margin: 0 0 8px;">🧪 ارزیابی عملی هاست، کالیبراسیون همزمانی و ذخیرهٔ خودکار</h3>
                 <p style="font-size: 13px; color: #334155; line-height: 1.9;">
-                    این سیستم مشخصات PHP هاست را می‌خواند و سپس چند آزمایش واقعی روی خود هاست اجرا می‌کند: زمان پاسخ مسیر سریع و مسیر وردپرسی، سلامت اتصال خروجی، سرعت شروع استریم، و فشرده‌سازی خروجی. در پایان مقادیر مناسب (پورت، تایم‌اوت‌ها، اندازهٔ استخر و ...) پیشنهاد می‌شود و می‌توانید با یک کلیک آن‌ها را در فرم پایین اعمال کنید.
+                    این سیستم مشخصات PHP هاست را می‌خواند، چند آزمایش واقعی روی خود هاست اجرا می‌کند (زمان پاسخ مسیر سریع و وردپرسی، سلامت اتصال خروجی، استریم، DNS و DoH، خروجی پورت 443 و دسترسی به دو سایت نمونه) و در پایان <strong>کالیبراسیون همزمانی</strong> را اجرا می‌کند: چندین اتصال به‌صورت دسته‌ای و هم‌زمان با هاست برقرار می‌شود و به‌محض دیدن خطای 503 اندازهٔ دسته‌ها خودکار کم می‌شود تا بزرگ‌ترین دستهٔ بدون خطا پیدا شود (زمان پاسخ‌دهی هر دسته هم تعداد کارگر مؤثر هاست را لو می‌دهد).
+                    همهٔ مقادیر پیدا‌شده — تنظیمات DNS و اتصال مرورگر GLPE، سقف کانال‌های گره و کانفیگ کلاینت — <strong>بلافاصله و بدون نیاز به هیچ دکمهٔ ذخیره‌ای، خودکار ثبت می‌شوند</strong>. در چند ثانیهٔ کالیبراسیون سایت ممکن است لحظه‌ای کند شود؛ طبیعی است.
                 </p>
                 <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px;">
-                    <button type="button" class="button button-primary" id="glpe-tune-run">▶ اجرای ارزیابی روی هاست</button>
+                    <button type="button" class="button button-primary" id="glpe-tune-run">▶ اجرای ارزیابی و کالیبراسیون خودکار روی هاست</button>
                     <button type="button" class="button" id="glpe-tune-apply" style="display:none;">✅ اعمال پیشنهادها در فرم کانفیگ</button>
                     <span id="glpe-tune-status" style="font-size: 13px; color: #64748b;"></span>
                 </div>
@@ -1115,6 +1364,7 @@ class GLPE_Hub_Admin {
                             </td>
                         </tr>
                     </table>
+                    <p style="font-size:12px; color:#64748b; margin-top:6px;">این مقادیر پس از هر «ارزیابی و کالیبراسیون» خودکار ذخیره می‌شوند؛ فرم بالا فقط برای اعمال یا ویرایش دستی مقادیر است.</p>
                     <?php submit_button('💾 ذخیرهٔ این مقادیر در تنظیمات افزونه', 'primary', 'glpe-fetch-submit'); ?>
                 </form>
 
@@ -1132,6 +1382,21 @@ class GLPE_Hub_Admin {
                         var box = document.getElementById('glpe-tune-result');
                         if (!res || !res.php) { box.innerHTML = ''; return; }
                         var html = '';
+                        if (res.applied) {
+                            html += '<div style="background:#f0fdf4; border:1px solid #86efac; border-radius:10px; padding:12px 16px; margin:10px 0; font-size:13px; color:#166534; line-height:2;">'
+                                + '<strong>✔ مقادیر پیدا‌شده خودکار ذخیره شدند — بدون نیاز به ذخیرهٔ دستی:</strong>'
+                                + '<ul style="margin:6px 0 0 18px; padding:0;">';
+                            if (res.applied.max_streams) {
+                                html += '<li>سقف کانال‌های همزمان گره: <strong style="direction:ltr; display:inline-block;">' + esc(res.applied.max_streams) + '</strong></li>';
+                            }
+                            if (res.applied.client_cfg) {
+                                html += '<li>اندازهٔ استخر کلاینت در config.json: <strong style="direction:ltr; display:inline-block;">' + esc(res.applied.client_cfg.max_pool_connections) + '</strong> + تایم‌اوت‌های پیشنهادی</li>';
+                            }
+                            if (res.applied.fetch) {
+                                html += '<li>تنظیمات DNS و اتصال مرورگر GLPE: حالت <code style="direction:ltr; display:inline-block;">' + esc(res.applied.fetch.glpe_dns_mode) + '</code>، تایم‌اوت‌ها و دفعات ترمیم</li>';
+                            }
+                            html += '</ul>پیش‌نمایش config.json و فیلدهای فرم‌ها بعد از نوسازی صفحه، مقادیر جدید را نشان می‌دهند.</div>';
+                        }
                         html += '<h4 style="margin: 14px 0 6px;">مشخصات PHP هاست</h4>';
                         html += '<table class="widefat striped"><tbody>';
                         var rows = [
@@ -1161,7 +1426,11 @@ class GLPE_Hub_Admin {
                                 ['شروع استریم (پرکنندهٔ ضدبافر CDN)', res.probes.stream_fill],
                                 ['DNS سیستم هاست', res.probes.dns_system],
                                 ['DoH — Cloudflare (1.1.1.1)', res.probes.doh_cloudflare],
-                                ['DoH — Google (8.8.4.4)', res.probes.doh_google]
+                                ['DoH — Google (8.8.4.4)', res.probes.doh_google],
+                                ['خروجی پورت 443 (مسیر HTTPS)', res.probes.egress_443],
+                                ['دست‌دادن TLS از هاست', res.probes.tls_handshake],
+                                ['نمونه: www.bbc.com:443', res.probes.sample_bbc],
+                                ['نمونه: www.iranintl.com:443', res.probes.sample_intl]
                             ];
                             for (var j = 0; j < probes.length; j++) {
                                 var p = probes[j][1];
@@ -1170,6 +1439,37 @@ class GLPE_Hub_Admin {
                                 html += '<tr><td style="width:40%;">' + esc(probes[j][0]) + '</td><td>' + mark + '</td><td style="direction:ltr; text-align:left;">' + (p && p.ok ? fmtMs(p.ms) : '') + '</td><td>' + detail + '</td></tr>';
                             }
                             html += '</tbody></table>';
+                        }
+
+                        if (res.calibration) {
+                            var c = res.calibration;
+                            html += '<h4 style="margin: 14px 0 6px;">کالیبراسیون همزمانی — دسته‌های اتصال هم‌زمان</h4>';
+                            if (c.batches && c.batches.length) {
+                                html += '<table class="widefat striped"><thead><tr>'
+                                    + '<th>دسته</th><th>اتصال هم‌زمان</th><th>پاسخ موفق</th><th>خطای اشغال (5xx)</th><th>ناموفق</th><th>زمان کل</th>'
+                                    + '</tr></thead><tbody>';
+                                for (var ci = 0; ci < c.batches.length; ci++) {
+                                    var b = c.batches[ci];
+                                    html += '<tr>'
+                                        + '<td>' + (ci + 1) + '</td>'
+                                        + '<td style="direction:ltr; text-align:center; font-weight:bold;">' + esc(b.n) + '</td>'
+                                        + '<td style="direction:ltr; text-align:center; color:#16a34a; font-weight:bold;">' + esc(b.ok) + '</td>'
+                                        + '<td style="direction:ltr; text-align:center; color:' + (b.busy > 0 ? '#dc2626' : '#9ca3af') + '; font-weight:' + (b.busy > 0 ? 'bold' : 'normal') + ';">' + esc(b.busy) + '</td>'
+                                        + '<td style="direction:ltr; text-align:center; color:' + (b.other > 0 ? '#dc2626' : '#9ca3af') + ';">' + esc(b.other) + '</td>'
+                                        + '<td style="direction:ltr; text-align:left;">' + fmtMs(b.wall_ms) + '</td>'
+                                        + '</tr>';
+                                }
+                                html += '</tbody></table>';
+                            }
+                            if (c.ok && c.safe_cap) {
+                                html += '<p style="font-size:13px; margin:8px 0 0;">✔ سقف امن همزمانی روی این هاست: <strong style="direction:ltr; display:inline-block;">' + esc(c.safe_cap) + '</strong> کانال';
+                                if (c.effective !== null && c.effective !== undefined) {
+                                    html += ' <span style="color:#64748b;">(کارگر مؤثر مشاهده‌شده: ~' + esc(c.effective) + ')</span>';
+                                }
+                                html += ' — این مقدار خودکار در سقف گره و کانفیگ کلاینت ثبت شد.</p>';
+                            } else if (c.note) {
+                                html += '<p style="font-size:12.5px; color:#b45309; margin:8px 0 0;">⚠ ' + esc(c.note) + '</p>';
+                            }
                         }
 
                         if (res.suggestions) {
@@ -1248,26 +1548,36 @@ class GLPE_Hub_Admin {
                         }
                         var fast = document.querySelector('input[name="cfg[prefer_fast_endpoint]"]');
                         if (fast) { fast.checked = String(s.prefer_fast_endpoint) === '1'; }
-                        document.getElementById('glpe-tune-status').textContent = 'پیشنهادها در فرم اعمال شد — برای ثبت، «ذخیرهٔ مقادیر کانفیگ» را بزنید.';
+                        document.getElementById('glpe-tune-status').textContent = 'پیشنهادها در فرم اعمال شد — این مقادیر پس از هر ارزیابی خودکار هم ذخیره می‌شوند؛ دکمه‌های ذخیره فقط برای ویرایش دستی مجدد لازم‌اند.';
                     }
                     var btn = document.getElementById('glpe-tune-run');
                     if (btn) {
                         btn.addEventListener('click', function () {
                             var st = document.getElementById('glpe-tune-status');
-                            st.textContent = 'در حال اجرای آزمایش‌ها... (تا چند ثانیه طول می‌کشد)';
+                            window.glpeTuneRunning = true;
+                            btn.disabled = true;
+                            st.textContent = 'در حال اجرای آزمایش‌ها و کالیبراسیون دسته‌ای... (چند تا چند‌ده ثانیه طول می‌کشد — صفحه را نبندید؛ لحظه‌ای کندی سایت طبیعی است)';
                             fetch(url, { cache: 'no-store' })
                                 .then(function (r) { return r.json(); })
                                 .then(function (res) {
                                     if (res.error) { st.textContent = 'خطا: ' + res.error; return; }
-                                    st.textContent = 'ارزیابی انجام شد.';
+                                    st.textContent = 'ارزیابی و کالیبراسیون انجام شد.';
                                     window.glpeTuning = res;
                                     render(res);
+                                    if (res.applied && res.applied.max_streams) {
+                                        var capInput = document.querySelector('input[name="hub_max_streams"]');
+                                        if (capInput) { capInput.value = String(res.applied.max_streams); }
+                                    }
                                     if (res.at) {
                                         var d = new Date(res.at * 1000);
-                                        st.textContent = 'ارزیابی انجام شد (' + d.toLocaleString('fa-IR') + ').';
+                                        st.textContent = 'ارزیابی و کالیبراسیون انجام شد (' + d.toLocaleString('fa-IR') + ') — مقادیر خودکار ذخیره شدند.';
                                     }
                                 })
-                                .catch(function () { st.textContent = 'ارزیابی ناموفق بود — دوباره تلاش کنید.'; });
+                                .catch(function () { st.textContent = 'ارزیابی ناموفق بود — دوباره تلاش کنید.'; })
+                                .finally(function () {
+                                    window.glpeTuneRunning = false;
+                                    btn.disabled = false;
+                                });
                         });
                     }
                     var apply = document.getElementById('glpe-tune-apply');
@@ -1301,7 +1611,6 @@ class GLPE_Hub_Admin {
                         </tr>
                         <?php
                         $field('relay_port', '', '');
-                        $field('max_pool_connections', '', '');
                         $field('max_retries', '', '');
                         $field('connect_timeout', '', 'ثانیه');
                         $field('stream_read_timeout', '', 'ثانیه');
@@ -1313,6 +1622,13 @@ class GLPE_Hub_Admin {
                         $field('low_traffic_threshold_mb', '', 'مگابایت');
                         $field('active_transfer_threshold_kbps', '', 'کیلوبایت بر ثانیه');
                         ?>
+                        <tr>
+                            <th scope="row">سقف کانال‌های همزمان گره <code style="direction:ltr;">hub_max_streams</code></th>
+                            <td>
+                                <input type="number" min="<?php echo (int)GLPE_Hub::STREAM_CAP_MIN; ?>" max="<?php echo (int)GLPE_Hub::STREAM_CAP_MAX; ?>" name="hub_max_streams" value="<?php echo esc_attr((string)$savedCap); ?>" style="direction:ltr; width:90px;" class="glpe-cfg-field" data-key="max_pool_connections" /> کانال
+                                <p style="font-size:12px; color:#64748b; margin-top:4px;">محافظ هاست: هر کانال زنده یک کارگر PHP را تا پایان اتصال نگه می‌دارد؛ روی هاست‌های رایگان این مقدار را کم نگه دارید (پیش‌فرض ۶). درخواست‌های بیش از سقف با کد 503 و تلاش مجدد خودکار کلاینت پاسخ داده می‌شوند. مقدار <code>max_pool_connections</code> تولیدشده در کانفیگ هرگز از این سقف بیشتر نمی‌شود.</p>
+                            </td>
+                        </tr>
                         <tr>
                             <th scope="row">مسیریابی مستقیم GeoSite/GeoIP <code style="direction:ltr;">routing.direct_iran</code></th>
                             <td>
@@ -1372,16 +1688,48 @@ class GLPE_Hub_Admin {
                 </table>
             </div>
 
+            <!-- تشخیص خطا -->
+            <div style="background: #fff; border: 1px solid #ccd0d4; border-radius: 12px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+                <h3 style="margin: 0 0 8px;">🩺 آخرین خطاهای ثبت‌شدهٔ افزونه</h3>
+                <p style="font-size: 12.5px; color: #64748b; line-height: 1.9;">اگر نمایشگر یا گره با خطای داخلی متوقف شود، متن کامل خطا این‌جا ذخیره می‌شود تا بررسی و ارسال آن آسان باشد — به‌جای پیام ترسناک «خطای مهم در این وب سایت».</p>
+                <?php if (!empty($optionalMissing)): ?>
+                    <div style="background:#fffbeb; border:1px solid #fcd34d; border-radius:8px; padding:10px 14px; font-size:12.5px; color:#78350f; margin-bottom:10px;">
+                        فایل‌های اختیاری غایب: <code style="direction:ltr;"><?php echo esc_html(implode(', ', $optionalMissing)); ?></code> — دانلود بستهٔ کلاینت کامل نخواهد بود؛ برای رفع، افزونه را دوباره نصب کنید.
+                    </div>
+                <?php endif; ?>
+                <?php if (empty($fatals)): ?>
+                    <p style="font-size:13px; color:#166534;">✔ هیچ خطایی ثبت نشده است.</p>
+                <?php else: ?>
+                    <table class="widefat striped"><tbody>
+                    <?php foreach (array_slice(array_reverse($fatals), 0, 5) as $f): ?>
+                        <tr>
+                            <td style="width:150px; white-space:nowrap;"><?php echo esc_html(date('Y-m-d H:i:s', (int)$f['at'])); ?></td>
+                            <td style="direction:ltr; text-align:left; font-size:11.5px; word-break:break-all;"><?php echo esc_html(GLPE_Diag::fatalTypeName($f['type']) . ': ' . $f['message'] . ' — ' . basename((string)$f['file']) . ':' . (int)$f['line']); ?></td>
+                        </tr>
+                    <?php endforeach; ?>
+                    </tbody></table>
+                    <form method="post" action="<?php echo esc_url($postLink('glpe_hub_clearfatal')); ?>" style="margin-top:10px;">
+                        <input type="hidden" name="action" value="glpe_hub_clearfatal" />
+                        <input type="hidden" name="_wpnonce" value="<?php echo esc_attr(wp_create_nonce('glpe_hub_admin')); ?>" />
+                        <?php submit_button('پاک‌سازی تاریخچهٔ خطاها', 'secondary small', 'glpe-clearfatals-submit', false); ?>
+                    </form>
+                <?php endif; ?>
+            </div>
+
             <script>
             (function () {
                 var url = <?php echo wp_json_encode($vitalsUrl); ?>;
-                var badgeClass = { START: 'tag-start', CLEAR: 'tag-clear', CLOSE: 'tag-close', ERROR: 'tag-err' };
+                var badgeClass = { START: 'tag-start', CLEAR: 'tag-clear', CLOSE: 'tag-close', ERROR: 'tag-err', CAP: 'tag-calib', CALIB: 'tag-calib' };
                 function esc(s) {
                     var d = document.createElement('div');
                     d.textContent = s == null ? '' : String(s);
                     return d.innerHTML;
                 }
                 function loadVitals() {
+                    // During the batch calibration every worker is busy by
+                    // design — polling would queue up on the same host (and
+                    // poison the measurement), so the poller yields.
+                    if (window.glpeTuneRunning) { return; }
                     fetch(url, { cache: 'no-store' })
                         .then(function (r) { return r.json(); })
                         .then(function (rows) {
@@ -1412,7 +1760,8 @@ class GLPE_Hub_Admin {
                     + '.tag-start{background:rgba(16,185,129,.15);color:#10b981;}'
                     + '.tag-close{background:rgba(107,114,128,.2);color:#9ca3af;}'
                     + '.tag-clear{background:rgba(245,158,11,.15);color:#f59e0b;}'
-                    + '.tag-err{background:rgba(239,68,68,.15);color:#ef4444;}';
+                    + '.tag-err{background:rgba(239,68,68,.15);color:#ef4444;}'
+                    + '.tag-calib{background:rgba(13,148,136,.15);color:#0d9488;}';
                 document.head.appendChild(css);
                 loadVitals();
                 setInterval(loadVitals, 2000);

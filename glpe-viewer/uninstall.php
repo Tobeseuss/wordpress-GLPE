@@ -25,6 +25,7 @@ $glpe_options = [
     'glpe_hub_cfg',
     'glpe_hub_nodes',
     'glpe_hub_tuning',
+    'glpe_hub_max_streams',
     'glpe_dns_mode',
     'glpe_dns_ttl',
     'glpe_doh_endpoint',
@@ -77,4 +78,19 @@ if (is_dir($glpe_hub_dir)) {
         }
     }
     @rmdir($glpe_hub_dir);
+}
+
+// Diagnostics + DNS store directory (guarded journals and resolve cache).
+$glpe_diag_dir = wp_normalize_path(trailingslashit((string)wp_upload_dir()['basedir']) . 'glpe-viewer-tmp');
+if (is_dir($glpe_diag_dir)) {
+    foreach ((array)scandir($glpe_diag_dir) as $glpe_diag_node) {
+        if ($glpe_diag_node === '.' || $glpe_diag_node === '..') {
+            continue;
+        }
+        $glpe_diag_path = $glpe_diag_dir . '/' . $glpe_diag_node;
+        if (is_file($glpe_diag_path)) {
+            @unlink($glpe_diag_path);
+        }
+    }
+    @rmdir($glpe_diag_dir);
 }

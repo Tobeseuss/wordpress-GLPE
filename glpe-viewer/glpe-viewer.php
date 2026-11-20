@@ -3,7 +3,7 @@
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
  * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با کدگذاری کامل تبادلات، بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 6.1.0
+ * Version: 6.2.0
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '6.1.0');
+define('GLPE_VERSION', '6.2.0');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -28,12 +28,62 @@ if (!is_string($glpe_secret) || strlen($glpe_secret) < 16) {
 }
 define('GLPE_SECRET', $glpe_secret);
 
+require_once GLPE_DIR . 'includes/Diag.php';
+
+// Armed BEFORE the engine includes: a truncated include from a broken update
+// (free host, overloaded extraction) fatals during the require lines below —
+// this catcher must already be armed to journal it and answer with the
+// readable page instead of the CMS white screen. A plain function, not a
+// class method, so it resolves even when the class below never loads.
+if (!function_exists('glpe_catch_fatal')) {
+    function glpe_catch_fatal() {
+        $err = error_get_last();
+        if (!is_array($err) || !isset($err['type'], $err['message'], $err['file'])) {
+            return;
+        }
+        if (!GLPE_Diag::isFatalType($err['type'])) {
+            return; // warnings/notices: not ours to handle
+        }
+        // Only fatals that happened inside this plugin's own files.
+        if (strpos((string)$err['file'], (string)GLPE_DIR) === false) {
+            return;
+        }
+        GLPE_Diag::appendFatal($err['type'], $err['message'], $err['file'], isset($err['line']) ? (int)$err['line'] : 0);
+
+        $summary = GLPE_Diag::fatalTypeName($err['type']) . ': ' . (string)$err['message']
+            . ' — ' . basename((string)$err['file']) . ':' . (isset($err['line']) ? (int)$err['line'] : 0);
+        if (!headers_sent()) {
+            while (ob_get_level() > 0) { @ob_end_clean(); }
+            http_response_code(500);
+            header('Content-Type: text/html; charset=utf-8');
+            header('Cache-Control: no-store, max-age=0');
+        }
+        echo '<!doctype html><html lang="fa"><head><meta charset="utf-8">'
+            . '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            . '<title>خطای داخلی نمایشگر</title></head>'
+            . '<body style="font-family:Tahoma,Vazir,sans-serif;direction:rtl;text-align:right;background:#f8fafc;margin:0;padding:40px 16px;">'
+            . '<div style="max-width:560px;margin:0 auto;background:#fff;border:1px solid #fecaca;border-radius:12px;padding:24px;">'
+            . '<h1 style="font-size:17px;color:#991b1b;margin:0 0 10px;">⚠ نمایشگر صفحات وب دچار خطای داخلی شد</h1>'
+            . '<p style="font-size:13.5px;line-height:2;color:#334155;margin:0 0 8px;">سایت شما سالم است؛ فقط این نمایشگر متوقف شد. جزئیات خطا در پیشخوان (صفحهٔ «هستهٔ ارتباطی چندگرهی» ← پنل «آخرین خطاهای ثبت‌شده») ذخیره شده تا بررسی و ارسال آن آسان باشد.</p>'
+            . '<p style="font-size:12.5px;line-height:1.9;color:#64748b;margin:0 0 12px;">اگر همین خطا تکرار می‌شود، افزونه را با فایل ZIP نسخهٔ جدید دوباره نصب کنید (به‌روزرسانی ناقص روی هاست شلوغ رایج است).</p>'
+            . '<p style="font-size:11.5px;direction:ltr;text-align:left;background:#fef2f2;border:1px dashed #fca5a5;border-radius:8px;padding:8px 10px;color:#7f1d1d;margin:0;word-break:break-all;">'
+            . htmlspecialchars($summary, ENT_QUOTES, 'UTF-8') . '</p>'
+            . '</div></body></html>';
+        exit;
+    }
+}
+register_shutdown_function('glpe_catch_fatal');
+
 require_once GLPE_DIR . 'includes/Cookies.php';
 require_once GLPE_DIR . 'includes/Codec.php';
 require_once GLPE_DIR . 'includes/Engine.php';
 require_once GLPE_DIR . 'includes/Access.php';
 require_once GLPE_DIR . 'includes/Hub.php';
-require_once GLPE_DIR . 'includes/HubTune.php';
+// Host evaluation is an admin-only surface — never loaded on front-end
+// requests (one less file that can break the visitor path).
+if (is_admin()) {
+    require_once GLPE_DIR . 'includes/HubTune.php';
+}
 
 class GLPE_Plugin {
     private static $instance = null;
@@ -48,6 +98,22 @@ class GLPE_Plugin {
     private function __construct() {
         register_activation_hook(__FILE__, [$this, 'activate']);
         register_deactivation_hook(__FILE__, [$this, 'deactivate']);
+
+        // Install-integrity gate: an update extracted partially on an
+        // overloaded free host must degrade to a notice — never to a fatal.
+        // With required files missing the plugin registers NOTHING else and
+        // the site keeps running normally.
+        $missing = GLPE_Diag::missingRequired();
+        if (!empty($missing)) {
+            add_action('admin_notices', function () use ($missing) {
+                echo '<div class="notice notice-error"><p style="direction:rtl;text-align:right;">'
+                    . '<strong>نصب افزونهٔ نمایشگر صفحات وب ناقص است.</strong> فایل‌های زیر یافت نشد: '
+                    . '<code style="direction:ltr;">' . esc_html(implode(', ', $missing)) . '</code>. '
+                    . 'احتمالاً به‌روزرسانی قبلی روی هاست شلوغ ناقص مانده است — پوشهٔ افزونه را از مدیریت فایل هاست حذف و فایل ZIP نسخهٔ جدید را از «افزونه‌ها ← بارگذاری» دوباره نصب کنید. تا آن زمان افزونه غیرفعال است تا سایت شما سالم بماند.'
+                    . '</p></div>';
+            });
+            return;
+        }
 
         // PHP session is opened very early, before any output can begin.
         add_action('init', [$this, 'startSession'], 0);
@@ -81,6 +147,7 @@ class GLPE_Plugin {
         add_action('admin_post_glpe_hub_config', ['GLPE_Hub_Admin', 'handleServeConfig']);
         add_action('admin_post_glpe_hub_zip', ['GLPE_Hub_Admin', 'handleServeZip']);
         add_action('admin_post_glpe_hub_savecfg', ['GLPE_Hub_Admin', 'handleSaveCfg']);
+        add_action('admin_post_glpe_hub_clearfatal', ['GLPE_Hub_Admin', 'handleClearFatal']);
         add_action('admin_post_glpe_hub_fetch_apply', ['GLPE_Hub_Admin', 'handleFetchApply']);
         add_action('wp_ajax_glpe_hub_vitals', ['GLPE_Hub_Admin', 'ajaxVitals']);
         add_action('wp_ajax_glpe_hub_tune', ['GLPE_Hub_Admin', 'ajaxTune']);

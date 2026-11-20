@@ -3,10 +3,11 @@
  * GLPE Relay Core — standalone fast node endpoint.
  *
  * This file is the express entry of the relay node: it answers the same
- * obfuscated `_v` wire protocol (actions "c", "w", "t") WITHOUT booting the
- * CMS. On a typical host the whole exchange completes in tens of
- * milliseconds instead of the 1-7 seconds a full CMS request costs — the
- * difference that makes interactive TLS tunneling possible on slow hosts.
+ * obfuscated `_v` wire protocol (actions "c", "w", "t" and the tuner's
+ * calibration hold "z") WITHOUT booting the CMS. On a typical host the whole
+ * exchange completes in tens of milliseconds instead of the 1-7 seconds a
+ * full CMS request costs — the difference that makes interactive TLS
+ * tunneling possible on slow hosts.
  *
  * Request flow:
  *   1. Locate the node handoff file (uploads/glpe-relay-tmp/node_info.php)
@@ -59,6 +60,14 @@ if (!function_exists('get_option')) {
         if ($name === 'glpe_hub_enabled') {
             return !empty($glpeNodeStore['enabled']) ? '1' : '0';
         }
+        if ($name === 'glpe_hub_max_streams') {
+            // Channel cap (host guard) — carried by the handoff so the
+            // standalone endpoint enforces exactly what the admin set.
+            $cap = isset($glpeNodeStore['max_streams']) ? (int)$glpeNodeStore['max_streams'] : 0;
+            if ($cap < GLPE_Hub::STREAM_CAP_MIN) { $cap = GLPE_Hub::STREAM_CAP_MIN; }
+            if ($cap > GLPE_Hub::STREAM_CAP_MAX) { $cap = GLPE_Hub::STREAM_CAP_MAX; }
+            return (string)$cap;
+        }
         return $default;
     }
 }
@@ -104,6 +113,12 @@ if (!defined('ABSPATH')) {
     define('ABSPATH', __DIR__ . '/');
 }
 
+// A partially extracted update must never fatal here — fail closed instead.
+if (!file_exists(__DIR__ . '/includes/Hub.php')) {
+    http_response_code(404);
+    header('Cache-Control: no-store, max-age=0');
+    exit;
+}
 require __DIR__ . '/includes/Hub.php';
 
 if (!isset($_GET['_v']) || (string)$_GET['_v'] === '') {

@@ -613,6 +613,7 @@ check('config keeps CMS path as fallback_url', isset($hubCfg['servers'][0]['fall
 check('config enables direct routing list', isset($hubCfg['routing']['direct_iran']) && $hubCfg['routing']['direct_iran'] === true);
 check('config defaults relay port 41927', $hubCfg['relay_port'] === 41927);
 check('config carries split timeouts', $hubCfg['connect_timeout'] === 15 && $hubCfg['stream_read_timeout'] === 30 && $hubCfg['write_timeout'] === 20);
+check('config pool never exceeds the node channel cap', (int)$hubCfg['max_pool_connections'] === min(10, GLPE_Hub::streamCap()) && $hubCfg['max_pool_connections'] <= 32);
 // JSON roundtrip compares loosely: PHP encodes integral floats (1.0) without
 // the zero-fraction, so decode() yields ints there — value equality is what
 // the Python core needs.
@@ -647,6 +648,7 @@ $nodeRaw = (string)file_get_contents($nodeFile);
 check('node store starts with self-exit guard', substr($nodeRaw, 0, GLPE_Hub::guardLen()) === GLPE_Hub::FILE_GUARD);
 $nodePayload = json_decode(substr($nodeRaw, GLPE_Hub::guardLen()), true);
 check('node store payload carries token + enabled flag', is_array($nodePayload) && ($nodePayload['token'] ?? '') === $hubToken && ($nodePayload['enabled'] ?? '') === '1');
+check('node store payload carries the channel cap', isset($nodePayload['max_streams']) && (int)$nodePayload['max_streams'] === GLPE_Hub::streamCap());
 check('node store idempotent', GLPE_Hub::syncNodeStore() === true && filesize($nodeFile) === strlen($nodeRaw));
 // A stale handoff file (e.g. the node was disabled then the flag changed
 // again elsewhere) must be repaired by the cheap admin-hit sync.
@@ -671,17 +673,18 @@ check('fast endpoint lints', trim((string)$phpLintEndpoint) === '0', (string)$ph
 
 // 17i-5. tuning suggestions are pure and host-shape aware
 $sugSlow = GLPE_Hub_Tune::buildSuggestions(['memory_limit_bytes' => 64 * 1048576], null, 2600, true, true, 900);
-check('tuning: small memory shrinks pool', $sugSlow['max_pool_connections'] === 20);
-check('tuning: slow CMS node widens idle window', $sugSlow['idle_timeout'] === 25);
+check('tuning: small memory shrinks pool', $sugSlow['max_pool_connections'] === 6);
+check('tuning: slow CMS node widens idle window', $sugSlow['idle_timeout'] === 20);
 check('tuning: without fast path stays on CMS', $sugSlow['prefer_fast_endpoint'] === '0');
 $sugFast = GLPE_Hub_Tune::buildSuggestions(['memory_limit_bytes' => 256 * 1048576], 120, 2600, true, true, 300);
-check('tuning: big memory grows pool', $sugFast['max_pool_connections'] === 50);
+check('tuning: healthy node earns a small pool bump', $sugFast['max_pool_connections'] === 10);
 check('tuning: fast healthy endpoint preferred', $sugFast['prefer_fast_endpoint'] === '1');
 check('tuning: snappy node relaxes adaptive delay', (float)$sugFast['max_adaptive_delay'] === 0.5);
 check('tuning: write timeout respects node latency', $sugFast['write_timeout'] >= 20);
 check('tuning: stream read floor stays generous', $sugFast['stream_read_timeout'] >= 30);
+check('tuning: pools never balloon beyond worker-safe sizes', $sugFast['max_pool_connections'] <= 12 && $sugSlow['max_pool_connections'] <= 8);
 $sugBlocked = GLPE_Hub_Tune::buildSuggestions(['memory_limit_bytes' => 256 * 1048576], null, null, false, false, null);
-check('tuning: degrades gracefully without probes', is_array($sugBlocked) && $sugBlocked['max_pool_connections'] === 50);
+check('tuning: degrades gracefully without probes', is_array($sugBlocked) && $sugBlocked['max_pool_connections'] === 6);
 
 // 17i-6. wipe helper removes runtime files including the handoff store
 check('wipe clears handoff store too', GLPE_Hub::wipeAllData() === null && !file_exists($nodeFile));
@@ -824,6 +827,370 @@ foreach ((array)@scandir($dnsDir) as $dnsFile) {
 }
 @rmdir($dnsDir);
 GLPE_Dns::$testDir = null;
+
+// == 19. v6.2.0: host-overload guard, install integrity, fatal journal ==
+echo "\n";
+require $root . '/glpe-viewer/includes/Diag.php';
+
+// 19a. channel cap semantics
+update_option('glpe_hub_max_streams', '6');
+check('cap: default option clamps into range', GLPE_Hub::streamCap() === 6);
+update_option('glpe_hub_max_streams', '99');
+check('cap: oversized values clamp to max', GLPE_Hub::streamCap() === GLPE_Hub::STREAM_CAP_MAX);
+update_option('glpe_hub_max_streams', '1');
+check('cap: undersized values clamp to min', GLPE_Hub::streamCap() === GLPE_Hub::STREAM_CAP_MIN);
+update_option('glpe_hub_max_streams', '3');
+$capDir = sys_get_temp_dir() . '/glpe-cap-selftest-' . getmypid();
+GLPE_Hub::$testDir = $capDir;
+if (!is_dir($capDir)) { @mkdir($capDir, 0777, true); }
+
+// Three HELD markers (exclusive flock in this process, separate handles —
+// flock semantics are per open-file-description, so this mirrors live streams).
+$heldFps = [];
+for ($i = 0; $i < 3; $i++) {
+    $m = $capDir . '/' . GLPE_Hub::STREAM_MARK . 'sessCap_ch' . $i . '.php';
+    $fp = fopen($m, 'c');
+    flock($fp, LOCK_EX);
+    $heldFps[] = $fp;
+}
+check('cap: held markers count as live streams', GLPE_Hub::countLiveStreams() === 3);
+check('cap: acquire blocked at cap', GLPE_Hub::acquireStreamSlot($capDir . '/' . GLPE_Hub::STREAM_MARK . 'sessCap_over.php') === null);
+
+// Release one → a slot frees.
+flock($heldFps[2], LOCK_UN);
+fclose($heldFps[2]);
+@unlink($capDir . '/' . GLPE_Hub::STREAM_MARK . 'sessCap_ch2.php');
+unset($heldFps[2]);
+check('cap: released slot lowers live count', GLPE_Hub::countLiveStreams() === 2);
+$slot = GLPE_Hub::acquireStreamSlot($capDir . '/' . GLPE_Hub::STREAM_MARK . 'sessCap_new.php');
+check('cap: acquire succeeds under cap', is_resource($slot));
+check('cap: newly acquired marker is live', GLPE_Hub::countLiveStreams() === 3);
+GLPE_Hub::releaseStreamSlot($slot, $capDir . '/' . GLPE_Hub::STREAM_MARK . 'sessCap_new.php');
+check('cap: release unlinks the marker', !file_exists($capDir . '/' . GLPE_Hub::STREAM_MARK . 'sessCap_new.php'));
+
+// Stale husk (no holder) is cleaned by the counting pass.
+file_put_contents($capDir . '/' . GLPE_Hub::STREAM_MARK . 'sessCap_husk.php', '');
+check('cap: stale husk cleaned by counting pass', GLPE_Hub::countLiveStreams() === 2 && !file_exists($capDir . '/' . GLPE_Hub::STREAM_MARK . 'sessCap_husk.php'));
+foreach ($heldFps as $i => $fp) {
+    if (is_resource($fp)) {
+        @flock($fp, LOCK_UN);
+        @fclose($fp);
+        @unlink($capDir . '/' . GLPE_Hub::STREAM_MARK . 'sessCap_ch' . $i . '.php');
+    }
+}
+check('cap: fully released node accepts streams again', GLPE_Hub::countLiveStreams() === 0);
+update_option('glpe_hub_max_streams', '6');
+check('cap: generated config follows the cap', (int)GLPE_Hub::clientConfigArray()['max_pool_connections'] === 6);
+
+// 19b. install-integrity manifests (temp base dir, no real files touched)
+$intDir = sys_get_temp_dir() . '/glpe-integrity-' . getmypid();
+if (!is_dir($intDir)) { @mkdir($intDir, 0777, true); }
+foreach (['includes', 'hub-client'] as $sub) { @mkdir($intDir . '/' . $sub, 0777, true); }
+check('integrity: everything missing in an empty dir', count(GLPE_Diag::missingRequired($intDir)) === count(GLPE_Diag::requiredManifest()));
+foreach (GLPE_Diag::requiredManifest() as $rel) {
+    @file_put_contents($intDir . '/' . $rel, "<?php // stub\n");
+}
+check('integrity: complete tree reports nothing missing', GLPE_Diag::missingRequired($intDir) === []);
+check('integrity: optional payload reported separately', count(GLPE_Diag::missingOptional($intDir)) === count(GLPE_Diag::optionalManifest()));
+@unlink($intDir . '/includes/Dns.php');
+$intMissing = GLPE_Diag::missingRequired($intDir);
+check('integrity: single missing file detected precisely', count($intMissing) === 1 && $intMissing[0] === 'includes/Dns.php');
+foreach ((array)@scandir($intDir) as $intNode) {
+    if ($intNode !== '.' && $intNode !== '..') {
+        $intPath = $intDir . '/' . $intNode;
+        if (is_file($intPath)) { @unlink($intPath); }
+        else { foreach ((array)@scandir($intPath) as $s) { if ($s !== '.' && $s !== '..') { @unlink($intPath . '/' . $s); } } @rmdir($intPath); }
+    }
+}
+@rmdir($intDir);
+check('integrity: source tree itself is complete', GLPE_Diag::missingRequired($root . '/glpe-viewer') === []);
+
+// 19c. fatal journal roundtrip + guard
+$diagDir = sys_get_temp_dir() . '/glpe-diag-selftest-' . getmypid();
+GLPE_Diag::$testDir = $diagDir;
+if (!is_dir($diagDir)) { @mkdir($diagDir, 0777, true); }
+check('fatal: journal empty on start', GLPE_Diag::lastFatals() === []);
+GLPE_Diag::appendFatal(E_ERROR, 'Allowed memory size of 33554432 bytes exhausted', '/var/www/wp-content/plugins/glpe-viewer/includes/Engine.php', 4242);
+GLPE_Diag::appendFatal(E_PARSE, 'syntax error, unexpected end of file', '/var/www/wp-content/plugins/glpe-viewer/includes/Dns.php', 99);
+$fatals = GLPE_Diag::lastFatals();
+check('fatal: entries recorded in order', count($fatals) === 2 && strpos($fatals[0]['message'], 'memory size') !== false && strpos($fatals[1]['message'], 'syntax error') !== false);
+check('fatal: location recorded', $fatals[1]['file'] === '/var/www/wp-content/plugins/glpe-viewer/includes/Dns.php' && $fatals[1]['line'] === 99);
+check('fatal: fatal-type filter', GLPE_Diag::isFatalType(E_ERROR) && GLPE_Diag::isFatalType(E_PARSE) && !GLPE_Diag::isFatalType(E_WARNING) && !GLPE_Diag::isFatalType(E_NOTICE));
+check('fatal: type labels', GLPE_Diag::fatalTypeName(E_ERROR) === 'E_ERROR' && GLPE_Diag::fatalTypeName(E_PARSE) === 'E_PARSE');
+$fatalFile = $diagDir . '/' . GLPE_Diag::LOG_FILE;
+check('fatal: journal guarded with self-exit prefix', substr((string)file_get_contents($fatalFile), 0, strlen(GLPE_Diag::GUARD)) === GLPE_Diag::GUARD);
+check('fatal: journal executes empty on direct hit', trim((string)@shell_exec(PHP_BINARY . ' ' . escapeshellarg($fatalFile) . ' 2>/dev/null')) === '');
+for ($i = 0; $i < 20; $i++) { GLPE_Diag::appendFatal(E_ERROR, 'filler ' . $i, '/x/glpe-viewer/f.php', $i); }
+check('fatal: rolling window capped', count(GLPE_Diag::lastFatals()) === GLPE_Diag::LOG_LIMIT);
+GLPE_Diag::clearFatals();
+check('fatal: clear empties the journal', GLPE_Diag::lastFatals() === [] && !file_exists($fatalFile));
+
+// 19d. shutdown catcher is armed at file scope, before the engine includes
+$mainSrc = (string)file_get_contents($root . '/glpe-viewer/glpe-viewer.php');
+$regPos = strpos($mainSrc, "register_shutdown_function('glpe_catch_fatal')");
+$engineReqPos = strpos($mainSrc, "require_once GLPE_DIR . 'includes/Engine.php'");
+check('catcher: registered before engine require', $regPos !== false && $engineReqPos !== false && $regPos < $engineReqPos);
+check('catcher: plain function defined (class-independent)', strpos($mainSrc, 'function glpe_catch_fatal()') !== false);
+check('catcher: journals through GLPE_Diag', strpos($mainSrc, 'GLPE_Diag::appendFatal') !== false);
+check('catcher: scoped to plugin files only', strpos($mainSrc, 'strpos((string)$err[\'file\'], (string)GLPE_DIR)') !== false);
+$integrityPos = strpos($mainSrc, 'GLPE_Diag::missingRequired()');
+$hooksPos = strpos($mainSrc, "add_action('init', ['GLPE_Hub', 'maybeHandle'], 1)");
+check('gate: integrity check precedes hook registration', $integrityPos !== false && $hooksPos !== false && $integrityPos < $hooksPos);
+
+// 19e. memory budget raise (heavy-page fatals on small hosts)
+$memBefore = (string)@ini_get('memory_limit');
+GLPE_Engine::raiseMemoryBudget();
+$memAfter = (string)@ini_get('memory_limit');
+$memRaised = GLPE_Engine::raiseMemoryBudget(); // idempotent second call must not fail
+check('memory: budget raised or already generous', ($memAfter === '-1' || $memAfter === '' || ((float)$memAfter >= 256.0 || strpos($memAfter, 'G') !== false)) || $memAfter !== $memBefore, $memBefore . ' -> ' . $memAfter);
+@ini_set('memory_limit', $memBefore === '' ? '128M' : $memBefore);
+
+// 19f. Dns-absence shim in the engine (corrupted-update tolerance)
+$engineSrc = (string)file_get_contents($root . '/glpe-viewer/includes/Engine.php');
+check('shim: engine tolerates a missing Dns.php', strpos($engineSrc, "if (file_exists(__DIR__ . '/Dns.php'))") !== false && strpos($engineSrc, 'class GLPE_Dns') !== false);
+check('shim: fallback settings are sane', strpos($engineSrc, "'mode' => 'system'") !== false);
+$hubEpSrc = (string)file_get_contents($root . '/glpe-viewer/hub-endpoint.php');
+check('shim: fast endpoint fails closed on missing engine', strpos($hubEpSrc, "file_exists(__DIR__ . '/includes/Hub.php')") !== false);
+
+// 19g. egress-warning decision matrix (pure)
+$egBlock = GLPE_Hub_Tune::buildEgressWarnings(['ok' => false], ['ok' => false, 'note' => ''], ['ok' => true], ['ok' => true]);
+check('egress: blocked 443 warns about HTTPS tunnels', count($egBlock) === 1 && strpos($egBlock[0], '443') !== false);
+$egTls = GLPE_Hub_Tune::buildEgressWarnings(['ok' => true, 'ms' => 40], ['ok' => false, 'note' => 'handshake fail'], ['ok' => true], ['ok' => true]);
+check('egress: TLS failure surfaces the handshake note', count($egTls) === 1 && strpos($egTls[0], 'TLS') !== false);
+$egNewsDown = GLPE_Hub_Tune::buildEgressWarnings(['ok' => true, 'ms' => 30], ['ok' => true, 'ms' => 90], ['ok' => false], ['ok' => true]);
+check('egress: unreachable sample site named', count($egNewsDown) === 1 && strpos($egNewsDown[0], 'bbc.com') !== false);
+$egAllOk = GLPE_Hub_Tune::buildEgressWarnings(['ok' => true, 'ms' => 30], ['ok' => true, 'ms' => 90], ['ok' => true, 'ms' => 120], ['ok' => true, 'ms' => 110]);
+check('egress: healthy egress points to the DNS-leap note', count($egAllOk) === 1 && strpos($egAllOk[0], 'نوع اتصال HTTP') !== false);
+
+// 19h. Python core: overload behavior + DNS-leak warning (source-level)
+$pySrc = (string)file_get_contents($root . '/glpe-viewer/hub-client/client.py');
+check('py: 503 triggers a polite retry', strpos($pySrc, 'status_code == 503') !== false && strpos($pySrc, 'Retry-After') !== false);
+check('py: 503 never strikes the node', strpos($pySrc, 'Node Busy') !== false);
+check('py: DNS-leak warning on raw-IP SOCKS5', strpos($pySrc, 'DNS leak') !== false && strpos($pySrc, 'routes DNS through SOCKS v5') !== false);
+check('py: pool default lowered to 10', strpos($pySrc, "max_pool_connections', 10)") !== false);
+check('py: idle default lowered to 12', strpos($pySrc, 'idle_timeout", 12.0') !== false);
+
+// 19i. packaging: the shipped ZIP is complete and free of build junk
+$pkgOut = (string)@shell_exec('cd ' . escapeshellarg($root) . ' && bash tools/package.sh 2>&1');
+preg_match("/define\('GLPE_VERSION',\s*'([^']+)'/", (string)file_get_contents($root . '/glpe-viewer/glpe-viewer.php'), $mVer);
+$zipPath = $root . '/dist/glpe-viewer-' . (isset($mVer[1]) ? $mVer[1] : 'dev') . '.zip';
+check('package: zip built', strpos($pkgOut, 'OK:') !== false && file_exists($zipPath), $zipPath);
+$zipListing = (string)@shell_exec('unzip -l ' . escapeshellarg($zipPath) . ' 2>/dev/null');
+check('package: no pycache or pyc inside', strpos($zipListing, '__pycache__') === false && strpos($zipListing, '.pyc') === false);
+$pkgComplete = true;
+foreach (array_merge(GLPE_Diag::requiredManifest(), GLPE_Diag::optionalManifest()) as $rel) {
+    if (strpos($zipListing, 'glpe-viewer/' . $rel) === false) { $pkgComplete = false; }
+}
+check('package: every required and optional file ships', $pkgComplete);
+
+// == 20. v6.2.0: adaptive concurrency calibration + auto-apply ==
+echo "\n";
+
+// 20a. batch interpreter (pure decision matrix)
+$ib1 = GLPE_Hub_Tune::interpretBatch(10, 10, 0, 0, 1300, 1200);
+check('calib: clean fast batch kept up', $ib1['verdict'] === 'clean_kept_up' && $ib1['eff'] === 10);
+$ib2 = GLPE_Hub_Tune::interpretBatch(10, 10, 0, 0, 6000, 1200);
+check('calib: wave-queued batch reveals effective workers', $ib2['verdict'] === 'clean_saturated' && $ib2['eff'] === 2);
+$ib3 = GLPE_Hub_Tune::interpretBatch(10, 7, 3, 0, 4000, 1200);
+check('calib: 5xx answers mean busy reject', $ib3['verdict'] === 'busy_reject' && $ib3['eff'] === null);
+$ib4 = GLPE_Hub_Tune::interpretBatch(10, 8, 0, 2, 9000, 1200);
+check('calib: missing holds mean slow fail', $ib4['verdict'] === 'slow_fail');
+$ib5 = GLPE_Hub_Tune::interpretBatch(10, 10, 0, 0, 1680, 1200);
+check('calib: 1.4x hold boundary still counts as kept up', $ib5['verdict'] === 'clean_kept_up');
+$ib6 = GLPE_Hub_Tune::interpretBatch(7, 7, 0, 0, 4200, 1200);
+check('calib: fractional effective workers round sanely', $ib6['verdict'] === 'clean_saturated' && $ib6['eff'] === 2);
+
+// 20b. ladder shape
+$ladder = GLPE_Hub_Tune::calibLadder();
+check('calib: ladder starts at the recommended max and ends at floor', $ladder[0] === 10 && end($ladder) === 2);
+check('calib: ladder strictly descending', $ladder === [10, 7, 5, 4, 3, 2]);
+check('calib: next below 10 is 7', GLPE_Hub_Tune::calibNextBelow(10) === 7);
+check('calib: next below 3 is floor 2', GLPE_Hub_Tune::calibNextBelow(3) === 2);
+check('calib: nothing below the floor', GLPE_Hub_Tune::calibNextBelow(2) === null);
+
+// 20c. calibration driver with an injected batch runner (ladder scenarios)
+$mkRunner = function ($map) {
+    return function ($url, $n, $holdMs, $deadlineMs) use ($map) {
+        return isset($map[$n]) ? $map[$n] : ['ok' => 0, 'busy' => 0, 'other' => $n, 'wall_ms' => $deadlineMs];
+    };
+};
+$calStrong = GLPE_Hub_Tune::runCalibration('https://site.test/node', null, $mkRunner([
+    2  => ['ok' => 2, 'busy' => 0, 'other' => 0, 'wall_ms' => 1300],
+    10 => ['ok' => 10, 'busy' => 0, 'other' => 0, 'wall_ms' => 1400],
+]));
+check('calib: strong host earns the full batch', $calStrong['ok'] === true && $calStrong['safe_cap'] === 10 && count($calStrong['batches']) === 2);
+check('calib: strong host verdict kept_up', $calStrong['verdict'] === 'kept_up');
+
+$calSat = GLPE_Hub_Tune::runCalibration('https://site.test/node', null, $mkRunner([
+    2  => ['ok' => 2, 'busy' => 0, 'other' => 0, 'wall_ms' => 1300],
+    10 => ['ok' => 10, 'busy' => 0, 'other' => 0, 'wall_ms' => 6000],
+]));
+check('calib: two-worker queuing host is measured down to 2', $calSat['ok'] === true && $calSat['safe_cap'] === 2 && $calSat['effective'] === 2);
+check('calib: queuing host runs smoke + probe + confirm batches', count($calSat['batches']) === 3);
+
+$calRefine = GLPE_Hub_Tune::runCalibration('https://site.test/node', null, $mkRunner([
+    2  => ['ok' => 2, 'busy' => 0, 'other' => 0, 'wall_ms' => 1300],
+    10 => ['ok' => 10, 'busy' => 0, 'other' => 0, 'wall_ms' => 2400],
+    5  => ['ok' => 5, 'busy' => 0, 'other' => 0, 'wall_ms' => 1400],
+]));
+check('calib: wave estimate 5 confirmed by refinement batch', $calRefine['safe_cap'] === 5 && count($calRefine['batches']) === 3);
+
+$calBusy = GLPE_Hub_Tune::runCalibration('https://site.test/node', null, $mkRunner([
+    2  => ['ok' => 2, 'busy' => 0, 'other' => 0, 'wall_ms' => 1300],
+    10 => ['ok' => 7, 'busy' => 3, 'other' => 0, 'wall_ms' => 5000],
+    7  => ['ok' => 5, 'busy' => 2, 'other' => 0, 'wall_ms' => 4800],
+    5  => ['ok' => 5, 'busy' => 0, 'other' => 0, 'wall_ms' => 1500],
+]));
+check('calib: 503s shrink the batch until clean', $calBusy['safe_cap'] === 5 && count($calBusy['batches']) === 4);
+
+$calTimeout = GLPE_Hub_Tune::runCalibration('https://site.test/node', null, $mkRunner([
+    2  => ['ok' => 2, 'busy' => 0, 'other' => 0, 'wall_ms' => 1300],
+    10 => ['ok' => 6, 'busy' => 0, 'other' => 4, 'wall_ms' => 7600],
+    7  => ['ok' => 4, 'busy' => 0, 'other' => 3, 'wall_ms' => 7600],
+]));
+check('calib: two timing-out batches stop the ladder at the floor', $calTimeout['safe_cap'] === 2 && $calTimeout['verdict'] === 'timeout_floor' && count($calTimeout['batches']) === 3);
+
+$calFloor = GLPE_Hub_Tune::runCalibration('https://site.test/node', null, $mkRunner([
+    2 => ['ok' => 1, 'busy' => 1, 'other' => 0, 'wall_ms' => 3000],
+]));
+check('calib: failing smoke batch pins the floor immediately', $calFloor['safe_cap'] === 2 && $calFloor['verdict'] === 'floor' && count($calFloor['batches']) === 1);
+
+$calSkipped = GLPE_Hub_Tune::runCalibration('', null);
+check('calib: no endpoint means skipped, nothing forced', $calSkipped['ok'] === false && $calSkipped['safe_cap'] === null);
+
+// 20d. hold clamps + live 'z' dispatch through the shared engine
+check('calib: hold clamp floor', GLPE_Hub::calibHoldClamp(0) === GLPE_Hub::CALIB_HOLD_MIN && GLPE_Hub::calibHoldClamp(50) === 100);
+check('calib: hold clamp ceiling', GLPE_Hub::calibHoldClamp(999999) === GLPE_Hub::CALIB_HOLD_MAX);
+check('calib: legal hold untouched', GLPE_Hub::calibHoldClamp(800) === 800);
+
+$tHold = microtime(true);
+ob_start();
+GLPE_Hub::handleRequest(GLPE_Hub::encodeEnvelope(['a' => 'z', 's' => 'calHold1', 't' => 'ch1', 'd' => 150, 'k' => $hubToken]));
+$outHold = ob_get_clean();
+$holdElapsed = microtime(true) - $tHold;
+check('calib: z action answers K after the hold', $outHold === 'K', $outHold);
+check('calib: hold really pinned the worker', $holdElapsed >= 0.13, round($holdElapsed * 1000) . 'ms');
+check('calib: marker released after the hold', !file_exists(GLPE_Hub::$testDir . '/' . GLPE_Hub::CALIB_MARK . 'calHold1_ch1.php'));
+
+ob_start();
+GLPE_Hub::handleRequest(GLPE_Hub::encodeEnvelope(['a' => 'z', 's' => 'calHold2', 't' => 'ch2', 'd' => 150, 'k' => 'WRONG-KEY']));
+$outBadZ = ob_get_clean();
+check('calib: z rejects a wrong secret silently', $outBadZ === '');
+
+// Admission: fill the ceiling with held markers (mixed stream + calib).
+$admitFps = [];
+$admitDir = GLPE_Hub::$testDir;
+for ($i = 0; $i < GLPE_Hub::CALIB_ABS_MAX; $i++) {
+    $prefix = ($i % 2 === 0) ? GLPE_Hub::STREAM_MARK : GLPE_Hub::CALIB_MARK;
+    $m = $admitDir . '/' . $prefix . 'admSess_ch' . $i . '.php';
+    $fp = fopen($m, 'c');
+    flock($fp, LOCK_EX);
+    $admitFps[] = $fp;
+}
+check('calib: calib markers count as worker-pinning load', GLPE_Hub::countLiveStreams() === GLPE_Hub::CALIB_ABS_MAX);
+// The blocked branch clears buffers for a clean 503 — capture it through
+// a fresh subprocess runner (real stdout, no in-process buffers to pop).
+$zRunnerFile = GLPE_Hub::$testDir . '/zrunner.php';
+file_put_contents($zRunnerFile, <<<'RUN'
+<?php
+if (!defined('ABSPATH')) { define('ABSPATH', __FILE__); }
+if (!function_exists('get_option')) { function get_option($n, $d = false) { return $d; } }
+if (!function_exists('update_option')) { function update_option($n, $v) { return true; } }
+if (!function_exists('wp_generate_password')) { function wp_generate_password($l, $x = false, $y = false) { return str_repeat('x', (int)$l); } }
+if (!function_exists('wp_upload_dir')) { function wp_upload_dir() { return ['basedir' => sys_get_temp_dir()]; } }
+if (!function_exists('untrailingslashit')) { function untrailingslashit($v) { return rtrim((string)$v, '/\\'); } }
+require $argv[3] . '/glpe-viewer/includes/Hub.php';
+GLPE_Hub::$testDir = $argv[2];
+GLPE_Hub::handleRequest($argv[1]);
+RUN
+);
+$runZ = function ($envelope, $outFile) use ($root, $zRunnerFile) {
+    $spec = [0 => ['file', '/dev/null', 'r'], 1 => ['file', $outFile, 'w'], 2 => ['file', $outFile, 'a']];
+    $proc = @proc_open([PHP_BINARY, $zRunnerFile, $envelope, GLPE_Hub::$testDir, $root], $spec, $pipes);
+    if (!is_resource($proc)) { return false; }
+    proc_close($proc);
+    return (string)file_get_contents($outFile);
+};
+$zCappedEnv = GLPE_Hub::encodeEnvelope(['a' => 'z', 's' => 'calHold3', 't' => 'ch3', 'd' => 150, 'k' => $hubToken]);
+$outCapped = $runZ($zCappedEnv, GLPE_Hub::$testDir . '/zcap.out');
+check('calib: ceiling reached answers F (busy)', trim((string)$outCapped) === 'F', var_export($outCapped, true));
+flock($admitFps[0], LOCK_UN);
+fclose($admitFps[0]);
+@unlink($admitDir . '/' . GLPE_Hub::STREAM_MARK . 'admSess_ch0.php');
+unset($admitFps[0]);
+$zFreedEnv = GLPE_Hub::encodeEnvelope(['a' => 'z', 's' => 'calHold4', 't' => 'ch4', 'd' => 120, 'k' => $hubToken]);
+$outFreed = $runZ($zFreedEnv, GLPE_Hub::$testDir . '/zfree.out');
+check('calib: freed slot admits the hold again', trim((string)$outFreed) === 'K', var_export($outFreed, true));
+foreach ($admitFps as $ai => $fp) {
+    if (is_resource($fp)) {
+        @flock($fp, LOCK_UN);
+        @fclose($fp);
+        $prefix = ($ai % 2 === 0) ? GLPE_Hub::STREAM_MARK : GLPE_Hub::CALIB_MARK;
+        @unlink($admitDir . '/' . $prefix . 'admSess_ch' . $ai . '.php');
+    }
+}
+check('calib: admission markers cleaned', GLPE_Hub::countLiveStreams() === 0);
+
+// 20e. pool clamp by calibration (pure)
+$clampSug = GLPE_Hub_Tune::clampPoolByCalibration(['max_pool_connections' => 10, 'connect_timeout' => 15], ['ok' => true, 'safe_cap' => 4]);
+check('calib: pool clamped to discovered cap', $clampSug['max_pool_connections'] === 4 && $clampSug['connect_timeout'] === 15);
+$clampNone = GLPE_Hub_Tune::clampPoolByCalibration(['max_pool_connections' => 10], ['ok' => false, 'safe_cap' => null]);
+check('calib: skipped calibration leaves suggestions intact', $clampNone['max_pool_connections'] === 10);
+
+// 20f. AUTO-APPLY — everything found is persisted, nothing else touched
+update_option('glpe_dns_mode', 'system');
+update_option('glpe_dns_ttl', '300');
+update_option('glpe_hub_max_streams', '6');
+update_option('glpe_hub_cfg', ['relay_port' => 41927, 'routing' => ['direct_iran' => '1']]);
+$applyResult = [
+    'fetch_suggestions' => [
+        'glpe_dns_mode' => 'doh_first', 'glpe_dns_ttl' => 1800,
+        'glpe_fetch_connect_timeout' => 15, 'glpe_fetch_timeout' => 20,
+        'glpe_fetch_retries' => 2, 'glpe_ipresolve_v4' => '1',
+    ],
+    'calibration' => ['ok' => true, 'safe_cap' => 5],
+    'suggestions' => [
+        'max_pool_connections' => 8, 'connect_timeout' => 15, 'stream_read_timeout' => 30,
+        'write_timeout' => 22, 'max_retries' => 2, 'max_adaptive_delay' => 0.5,
+        'idle_timeout' => 12, 'low_traffic_timeout' => 35, 'low_traffic_threshold_mb' => 0.15,
+        'active_transfer_threshold_kbps' => 10, 'prefer_fast_endpoint' => '1',
+    ],
+];
+$appliedSummary = GLPE_Hub_Tune::autoApply($applyResult);
+check('apply: summary lists cap and pool', isset($appliedSummary['max_streams'], $appliedSummary['client_cfg'], $appliedSummary['fetch']));
+check('apply: viewer DNS options written', get_option('glpe_dns_mode') === 'doh_first' && get_option('glpe_dns_ttl') === '1800');
+check('apply: viewer timeout options written', get_option('glpe_fetch_connect_timeout') === '15' && get_option('glpe_fetch_timeout') === '20' && get_option('glpe_fetch_retries') === '2');
+check('apply: ipv4 preference written', get_option('glpe_ipresolve_v4') === '1');
+check('apply: channel cap written', GLPE_Hub::streamCap() === 5);
+$cfgAfterApply = get_option('glpe_hub_cfg', []);
+check('apply: pool never exceeds the discovered cap', $cfgAfterApply['max_pool_connections'] === 5);
+check('apply: tuned timeouts carried into the client config', $cfgAfterApply['write_timeout'] === 22.0 && $cfgAfterApply['idle_timeout'] === 12.0 && $cfgAfterApply['prefer_fast_endpoint'] === '1');
+check('apply: admin-only values preserved', $cfgAfterApply['relay_port'] === 41927 && $cfgAfterApply['routing']['direct_iran'] === '1');
+check('apply: generated config.json follows the applied values', (int)GLPE_Hub::clientConfigArray()['max_pool_connections'] === 5);
+$applyNone = GLPE_Hub_Tune::autoApply(['suggestions' => []]);
+check('apply: empty result applies nothing', $applyNone === []);
+update_option('glpe_hub_cfg', []);
+update_option('glpe_hub_max_streams', '6');
+
+// 20g. wiring: the ajax handler auto-applies and yields the session lock
+$hubSrc20 = (string)file_get_contents($root . '/glpe-viewer/includes/Hub.php');
+check('wiring: ajax tune calls auto-apply', strpos($hubSrc20, 'GLPE_Hub_Tune::autoApply($result)') !== false);
+check('wiring: ajax tune releases the session lock first', strpos($hubSrc20, '@session_write_close();') !== false);
+check('wiring: run() feeds the calibration into suggestions', strpos((string)file_get_contents($root . '/glpe-viewer/includes/HubTune.php'), 'clampPoolByCalibration($suggestions, $calibration)') !== false);
+check('wiring: vitals polling yields during calibration', strpos($hubSrc20, 'glpeTuneRunning') !== false);
+
+// cap cleanup
+foreach ((array)@scandir($capDir) as $capNode) {
+    if ($capNode !== '.' && $capNode !== '..') { @unlink($capDir . '/' . $capNode); }
+}
+@rmdir($capDir);
+GLPE_Hub::$testDir = null;
+foreach ((array)@scandir($diagDir) as $diagNode) {
+    if ($diagNode !== '.' && $diagNode !== '..') { @unlink($diagDir . '/' . $diagNode); }
+}
+@rmdir($diagDir);
+GLPE_Diag::$testDir = null;
+update_option('glpe_hub_max_streams', '6');
 
 echo "\n== RESULT: $pass passed, $fail failed ==\n";
 exit($fail > 0 ? 1 : 0);

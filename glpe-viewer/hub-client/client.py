@@ -46,10 +46,10 @@ except FileNotFoundError:
     exit(1)
 
 MAX_DELAY = CFG.get("max_adaptive_delay", 1.0)
-IDLE_TIMEOUT = CFG.get("idle_timeout", 15.0)
+IDLE_TIMEOUT = CFG.get("idle_timeout", 12.0)
 MAX_UPTIME = CFG.get("max_tunnel_uptime", 3600.0)
-LOW_TRAFFIC_TIMEOUT = CFG.get("low_traffic_timeout", 45.0)
-LOW_TRAFFIC_THRESHOLD_BYTES = CFG.get("low_traffic_threshold_mb", 0.25) * 1024 * 1024
+LOW_TRAFFIC_TIMEOUT = CFG.get("low_traffic_timeout", 35.0)
+LOW_TRAFFIC_THRESHOLD_BYTES = CFG.get("low_traffic_threshold_mb", 0.15) * 1024 * 1024
 ACTIVE_TRANSFER_THRESHOLD = CFG.get("active_transfer_threshold_kbps", 10.0) * 1024
 
 # Split timeouts: on slow shared hosts a full node exchange may take seconds
@@ -238,8 +238,8 @@ class ServerManager:
         })
         retry_strategy = Retry(total=CFG.get('max_retries', 2), backoff_factor=0.3,
                                status_forcelist=[429, 500, 502, 503, 504])
-        adapter = HTTPAdapter(pool_connections=min(10, CFG.get('max_pool_connections', 50)),
-                              pool_maxsize=CFG.get('max_pool_connections', 50),
+        adapter = HTTPAdapter(pool_connections=min(10, CFG.get('max_pool_connections', 10)),
+                              pool_maxsize=CFG.get('max_pool_connections', 10),
                               max_retries=retry_strategy)
         session.mount('https://', adapter)
         session.mount('http://', adapter)
@@ -492,7 +492,7 @@ class CoreTelemetry:
                         print(f"   -> {domain}: {count} active channels")
                     print("-" * 75)
 
-                print(f"[OK] Active channels ({active_count} / {CFG.get('max_pool_connections', 50)}):")
+                print(f"[OK] Active channels ({active_count} / {CFG.get('max_pool_connections', 10)}):")
                 if active_count == 0:
                     print("   [System is idle]")
                 else:
@@ -520,8 +520,9 @@ class StatefulRelayCore:
         self.router = RoutingEngine(CFG)
         self.server_manager = ServerManager(CFG)
         self.stats = CoreTelemetry(self.server_manager)
-        self.pool_size = CFG.get('max_pool_connections', 50)
+        self.pool_size = CFG.get('max_pool_connections', 10)
         self.connection_semaphore = threading.Semaphore(self.pool_size)
+        self._last_dnsleak_warn = 0.0
         threading.Thread(target=self.stats.print_dashboard, daemon=True).start()
 
     def _encode_meta(self, action, tunnel_id, token, host="", port=80, protocol="tcp"):
@@ -592,10 +593,24 @@ class StatefulRelayCore:
     def php_reader_loop(self, session, srv_url, srv_token, tunnel_id, host, port, client_socket, protocol="tcp"):
         try:
             obfuscated_param = self._encode_meta("t", tunnel_id, srv_token, host, port, protocol)
-            response = session.get(
-                f"{srv_url}?_v={urllib.parse.quote(obfuscated_param, safe='')}",
-                stream=True,
-                timeout=(CONNECT_TIMEOUT, STREAM_READ_TIMEOUT), verify=False)
+            stream_url = f"{srv_url}?_v={urllib.parse.quote(obfuscated_param, safe='')}"
+
+            # 503 = the node's channel cap (host guard): the node is BUSY, not
+            # broken. One polite retry after the advertised cool-down, and
+            # never a strike that would swap the node to its fallback (that
+            # would just double the load on the same host).
+            response = session.get(stream_url, stream=True,
+                                   timeout=(CONNECT_TIMEOUT, STREAM_READ_TIMEOUT), verify=False)
+            if response.status_code == 503:
+                self.stats.increase_delay(1.0)
+                retry_after = 3.0
+                try:
+                    retry_after = min(10.0, float(response.headers.get("Retry-After", 3)))
+                except (TypeError, ValueError):
+                    pass
+                time.sleep(retry_after)
+                response = session.get(stream_url, stream=True,
+                                       timeout=(CONNECT_TIMEOUT, STREAM_READ_TIMEOUT), verify=False)
 
             if response.status_code == 200:
                 self.server_manager.report_success(srv_url)
@@ -619,6 +634,10 @@ class StatefulRelayCore:
                 self.server_manager.report_failure(srv_url)
                 self.stats.mark_failed_queue()
                 self.stats.add_error(f"[Node Reject] 404 on {srv_url} (wrong token or endpoint unreachable)")
+            elif response.status_code == 503:
+                # Still busy after the retry — back off without punishing the node.
+                self.stats.mark_failed_queue()
+                self.stats.add_error(f"[Node Busy] 503 channel cap on {srv_url} — node is at its concurrent-channel limit")
             else:
                 self.server_manager.report_failure(srv_url)
                 self.stats.mark_failed_queue()
@@ -716,6 +735,16 @@ class StatefulRelayCore:
         if atyp == 1:
             host = socket.inet_ntoa(request[offset:offset + 4])
             offset += 4
+            # DNS leak: the browser resolved the name LOCALLY and sent a raw
+            # IP. For filtered domains the local ISP resolver answers with a
+            # poisoned address, and the tunnel then faithfully connects to
+            # that dead IP — the classic "BBC opens in the viewer but not
+            # through the core" report. Recommend the hostname-preserving
+            # modes (throttled to once a minute).
+            now = time.time()
+            if now - self._last_dnsleak_warn > 60:
+                self._last_dnsleak_warn = now
+                print("[!] DNS leak: browser sent a raw IP (local resolution) — for filtered sites connect the browser in HTTP mode (not SOCKS5) to 127.0.0.1:%d so domain names reach the node directly, or enable the Firefox option that routes DNS through SOCKS v5." % RELAY_PORT)
         elif atyp == 3:
             domain_len = request[offset]
             offset += 1

@@ -16,16 +16,17 @@ mkdir -p "$DIST_DIR"
 ZIP_PATH="$DIST_DIR/glpe-viewer-$VERSION.zip"
 
 if command -v zip >/dev/null 2>&1; then
-    (cd "$ROOT" && zip -rq "$ZIP_PATH" glpe-viewer -x '*.DS_Store' -x '*__MACOSX*')
+    (cd "$ROOT" && zip -rq "$ZIP_PATH" glpe-viewer -x '*.DS_Store' -x '*__MACOSX*' -x '*__pycache__*' -x '*.pyc')
 else
     python3 - "$ZIP_PATH" <<'PY'
 import os, sys, zipfile
 zip_path = sys.argv[1]
 root = os.path.abspath(os.path.join(os.path.dirname(zip_path), ".."))
 with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-    for base, _dirs, files in os.walk(os.path.join(root, "glpe-viewer")):
+    for base, dirs, files in os.walk(os.path.join(root, "glpe-viewer")):
+        dirs[:] = [d for d in dirs if d not in ("__pycache__", "__MACOSX")]
         for f in files:
-            if f == ".DS_Store":
+            if f == ".DS_Store" or f.endswith(".pyc"):
                 continue
             full = os.path.join(base, f)
             z.write(full, os.path.relpath(full, root))
