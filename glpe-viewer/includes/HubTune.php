@@ -25,6 +25,28 @@ if (!defined('ABSPATH')) {
 
 class GLPE_Hub_Tune {
 
+    /** One canonical browser identity for every request the node makes to
+     * itself (and hands to the bundled core). Live-caught on shared free
+     * hosting: the openresty front answers a hard 403 for the CMS's default
+     * request identity BEFORE any application code runs, which silently
+     * killed both node probes and every calibration batch. */
+    const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
+    /** wp_remote_* argument set for the self-node requests. Kept as one
+     * pure method so the exact wire identity is unit-testable. */
+    public static function nodeProbeArgs() {
+        return [
+            'timeout' => 20,
+            'sslverify' => false,
+            'redirection' => 0,
+            'user-agent' => self::BROWSER_UA,
+            'headers' => [
+                'Accept' => 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language' => 'en-US,en;q=0.9',
+            ],
+        ];
+    }
+
     /** Full evaluation. Never throws; failures become probe results. */
     public static function run() {
         $php = self::readPhpProfile();
@@ -198,7 +220,7 @@ class GLPE_Hub_Tune {
         $env = GLPE_Hub::encodeEnvelope(['a' => 'c', 's' => $sess, 't' => '', 'k' => GLPE_Hub::token()]);
         $url = add_query_arg(['_v' => $env], $baseUrl);
         $t0 = microtime(true);
-        $res = wp_remote_get($url, ['timeout' => 20, 'sslverify' => false, 'redirection' => 0]);
+        $res = wp_remote_get($url, self::nodeProbeArgs());
         $ms = (int)round((microtime(true) - $t0) * 1000);
         if (is_wp_error($res)) {
             $result['note'] = $res->get_error_message();
@@ -209,6 +231,11 @@ class GLPE_Hub_Tune {
         if ($code === 200 && trim($body) === 'K') {
             $result['ok'] = true;
             $result['ms'] = $ms;
+        } elseif ($code === 200 && strpos($body, 'aes.js') !== false && strpos($body, '__test') !== false) {
+            // Some free-hosting edges gate requests behind a JavaScript
+            // cookie challenge. The bundled core solves it automatically;
+            // the probe itself cannot, so the note says exactly that.
+            $result['note'] = 'لبهٔ هاست پاسخ را پشت چالش کوکی جاوااسکریپت گذاشته — هستهٔ کلاینت جدید آن را خودکار حل می‌کند.';
         } else {
             $result['note'] = 'پاسخ ' . $code . ' (بدنه ' . strlen($body) . ' بایت)';
         }
@@ -295,7 +322,11 @@ class GLPE_Hub_Tune {
     /** Measures the time until the anti-buffering padding starts flowing. */
     public static function probeStreamFill($timeoutSec = 8) {
         $result = ['ok' => false, 'ms' => null, 'note' => ''];
-        $parts = parse_url(home_url('/'));
+        // Target the CMS-path node address (live scheme), NOT the stored
+        // home_url: installs whose TLS is terminated at an edge layer often
+        // record an http:// site address while the edge only serves https —
+        // probing port 80 then dies in a redirect and the stream never starts.
+        $parts = parse_url(GLPE_Hub::wpNodeUrl());
         if (!$parts || empty($parts['host'])) {
             $result['note'] = 'نشانی سایت قابل تجزیه نیست.';
             return $result;
@@ -318,7 +349,7 @@ class GLPE_Hub_Tune {
         $path = isset($parts['path']) ? rtrim((string)$parts['path'], '/') : '';
         $req = "GET {$path}/?_v=" . rawurlencode($env) . " HTTP/1.1\r\n"
              . "Host: {$host}\r\n"
-             . "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n"
+             . "User-Agent: " . self::BROWSER_UA . "\r\n"
              . "Accept: */*\r\n"
              . "Accept-Encoding: identity\r\n"
              . "Connection: close\r\n\r\n";
@@ -566,7 +597,7 @@ class GLPE_Hub_Tune {
         $target = $path . '?_v=' . rawurlencode($env);
         $req = "GET {$target} HTTP/1.1\r\n"
              . "Host: {$host}\r\n"
-             . "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n"
+             . "User-Agent: " . self::BROWSER_UA . "\r\n"
              . "Accept: */*\r\n"
              . "Accept-Encoding: identity\r\n"
              . "Connection: close\r\n\r\n";

@@ -21,6 +21,7 @@ Wire protocol (must stay byte-compatible with includes/Hub.php):
 
 import base64
 import os
+import re
 import socket
 import struct
 import threading
@@ -60,6 +61,202 @@ WRITE_TIMEOUT = CFG.get("write_timeout", 20.0)
 
 RELAY_PORT = CFG.get("relay_port", 41927)
 SESSION_ID = uuid.uuid4().hex[:12]
+
+# ======================================================================
+# 1b. Edge challenge solver (free-hosting JS cookie challenge)
+# ======================================================================
+# Some shared/free hosting fronts gate every request that arrives from an
+# external address behind a JavaScript cookie challenge: the response is a
+# small HTML page that computes a cookie with slowAES and reloads. A browser
+# passes transparently; a headless client used to be locked out COMPLETELY
+# (every wire request answered with challenge HTML). The challenge is pure
+# AES-128-CBC — three hex numbers in the page — so it is solved here without
+# a browser and without any external dependency.
+
+def _aes_xt(a):
+    """Multiply by 2 in GF(2^8) modulo the AES polynomial."""
+    a <<= 1
+    if a & 0x100:
+        a ^= 0x11B
+    return a & 0xFF
+
+
+def _aes_build_sbox():
+    exp = [0] * 256
+    log = [0] * 256
+    x = 1
+    for i in range(255):
+        exp[i] = x
+        log[x] = i
+        x ^= _aes_xt(x)  # multiply by the generator 0x03
+    inv = [0] * 256
+    for v in range(1, 256):
+        inv[v] = exp[(255 - log[v]) % 255]
+    sbox = [0] * 256
+    for v in range(256):
+        b = inv[v]
+        r = b
+        s = b
+        for _ in range(4):
+            s = ((s << 1) | (s >> 7)) & 0xFF
+            r ^= s
+        sbox[v] = r ^ 0x63
+    return sbox
+
+
+_AES_SBOX = _aes_build_sbox()
+_AES_INV_SBOX = [0] * 256
+for _i, _v in enumerate(_AES_SBOX):
+    _AES_INV_SBOX[_v] = _i
+
+
+def _aes_gmul(a, b):
+    p = 0
+    for _ in range(8):
+        if b & 1:
+            p ^= a
+        a = _aes_xt(a)
+        b >>= 1
+    return p
+
+
+def _aes_expand_key(key):
+    rcon = 1
+    w = list(struct.unpack('>4I', key))
+    for i in range(4, 44):
+        t = w[i - 1]
+        if i % 4 == 0:
+            t = ((t << 8) & 0xFFFFFFFF) | (t >> 24)  # RotWord
+            t = ((_AES_SBOX[(t >> 24) & 0xFF] << 24) | (_AES_SBOX[(t >> 16) & 0xFF] << 16)
+                 | (_AES_SBOX[(t >> 8) & 0xFF] << 8) | _AES_SBOX[t & 0xFF])  # SubWord
+            t ^= (rcon << 24)
+            rcon = _aes_xt(rcon)
+        w.append(w[i - 4] ^ t)
+    return w
+
+
+def _aes_decrypt_block(block, w):
+    state = list(block)
+    for c in range(4):
+        word = w[4 * 10 + c]
+        for r in range(4):
+            state[r + 4 * c] ^= (word >> (8 * (3 - r))) & 0xFF
+    for rd in range(9, 0, -1):
+        out = [0] * 16
+        for r in range(4):
+            for c in range(4):
+                out[r + 4 * c] = state[r + 4 * ((c - r) % 4)]  # InvShiftRows
+        state[:] = out
+        for i in range(16):
+            state[i] = _AES_INV_SBOX[state[i]]  # InvSubBytes
+        for c in range(4):
+            word = w[4 * rd + c]
+            for r in range(4):
+                state[r + 4 * c] ^= (word >> (8 * (3 - r))) & 0xFF
+        for c in range(4):  # InvMixColumns
+            a0, a1, a2, a3 = state[4 * c:4 * c + 4]
+            state[4 * c + 0] = _aes_gmul(a0, 14) ^ _aes_gmul(a1, 11) ^ _aes_gmul(a2, 13) ^ _aes_gmul(a3, 9)
+            state[4 * c + 1] = _aes_gmul(a0, 9) ^ _aes_gmul(a1, 14) ^ _aes_gmul(a2, 11) ^ _aes_gmul(a3, 13)
+            state[4 * c + 2] = _aes_gmul(a0, 13) ^ _aes_gmul(a1, 9) ^ _aes_gmul(a2, 14) ^ _aes_gmul(a3, 11)
+            state[4 * c + 3] = _aes_gmul(a0, 11) ^ _aes_gmul(a1, 13) ^ _aes_gmul(a2, 9) ^ _aes_gmul(a3, 14)
+    out = [0] * 16
+    for r in range(4):
+        for c in range(4):
+            out[r + 4 * c] = state[r + 4 * ((c - r) % 4)]
+    state[:] = out
+    for i in range(16):
+        state[i] = _AES_INV_SBOX[state[i]]
+    for c in range(4):
+        word = w[c]
+        for r in range(4):
+            state[r + 4 * c] ^= (word >> (8 * (3 - r))) & 0xFF
+    return bytes(state)
+
+
+def aes128_cbc_decrypt(ct, key, iv):
+    """AES-128-CBC decrypt WITHOUT padding removal — the challenge page's
+    browser-side toHex() serializes every decrypted byte, padding included,
+    so the cookie value must keep it byte-for-byte."""
+    if len(key) != 16 or len(iv) != 16 or len(ct) == 0 or len(ct) % 16 != 0:
+        return None
+    w = _aes_expand_key(key)
+    out = b''
+    prev = iv
+    for i in range(0, len(ct), 16):
+        blk = ct[i:i + 16]
+        dec = _aes_decrypt_block(blk, w)
+        out += bytes(a ^ b for a, b in zip(dec, prev))
+        prev = blk
+    return out
+
+
+class EdgeGuard:
+    """Detects and solves the hosting edge's JS cookie challenge."""
+
+    COOKIE = "__test"
+    BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+    @staticmethod
+    def looks_like(body):
+        if not body:
+            return False
+        return b"__test" in body and (b"aes.js" in body or b"slowAES" in body)
+
+    @staticmethod
+    def solve(body):
+        """Extracts the (key, iv, ciphertext) triple and returns the cookie
+        value (hex string), or None when the page does not parse."""
+        vals = re.findall(rb'toNumbers\("([0-9a-fA-F]{32})"\)', body)
+        if len(vals) < 3:
+            return None
+        try:
+            key = bytes.fromhex(vals[0].decode('ascii'))
+            iv = bytes.fromhex(vals[1].decode('ascii'))
+            ct = bytes.fromhex(vals[2].decode('ascii'))
+        except (ValueError, UnicodeDecodeError):
+            return None
+        plain = aes128_cbc_decrypt(ct, key, iv)
+        return plain.hex() if plain else None
+
+    @staticmethod
+    def set_cookie(session, base_url, value):
+        host = urllib.parse.urlparse(base_url).hostname or ''
+        try:
+            session.cookies.set(EdgeGuard.COOKIE, value, domain=host)
+        except Exception:
+            pass
+
+    @staticmethod
+    def cookie_header(existing, value):
+        """Merges the solved cookie into an existing Cookie header value."""
+        parts = [p.strip() for p in (existing or '').split(';') if p.strip()]
+        parts = [p for p in parts if not p.startswith(EdgeGuard.COOKIE + '=')]
+        parts.append(EdgeGuard.COOKIE + '=' + value)
+        return '; '.join(parts)
+
+
+class EdgeGuardAdapter(HTTPAdapter):
+    """Mounts on every node session: when the edge answers a non-stream
+    request with its challenge page, the request is replayed once with the
+    freshly solved cookie. This is what protects the fire-and-forget writer
+    POSTs — a challenge page there would silently swallow tunnel bytes."""
+
+    def send(self, request, **kwargs):
+        response = super().send(request, **kwargs)
+        if kwargs.get('stream'):
+            return response  # a live stream must never be consumed here
+        try:
+            if response.status_code == 200 and EdgeGuard.looks_like(response.content):
+                value = EdgeGuard.solve(response.content)
+                if value:
+                    request.headers['Cookie'] = EdgeGuard.cookie_header(
+                        request.headers.get('Cookie'), value)
+                    response = super().send(request, **kwargs)
+        except Exception:
+            pass
+        return response
+
 
 # ======================================================================
 # 1. Smart routing engine (GeoSite & GeoIP direct route)
@@ -184,7 +381,7 @@ class RoutingEngine:
         return False
 
 # ======================================================================
-# 2. Node management (multi-node round-robin + failover)
+# 2. Node management (round-robin, fallback, edge-cookie priming)
 # ======================================================================
 class ServerManager:
     """Round-robin across nodes; every node keeps its address + optional
@@ -219,17 +416,27 @@ class ServerManager:
         self.sessions = {}
         self.lock = threading.Lock()
         for n in self.nodes:
-            self.sessions[n["active"]] = self._build_session(n["token"], cfg)
+            self.sessions[n["active"]] = self._build_session(n["token"], cfg, n["active"])
 
         self._cycle = itertools.cycle(range(len(self.nodes)))
 
-    def _build_session(self, token, cfg):
+        # Keep the edge cookies alive: the free-hosting challenges expire
+        # after ~6h. One cheap probe per node per hour re-solves them in the
+        # background so long-running cores never degrade to challenge HTML.
+        self._edge_refresh_stop = False
+        threading.Thread(target=self._edge_refresh_loop, daemon=True).start()
+
+    def _build_session(self, token, cfg, base_url=None):
         session = requests.Session()
         session.trust_env = False
         session.proxies = {"http": "", "https": ""}
         session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "*/*",
+            # Full browser identity: hosting edges have been observed to
+            # drop non-browser requests at the TLS layer outright, and to
+            # hard-403 the CMS's own request identity.
+            "User-Agent": EdgeGuard.BROWSER_UA,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
             # Identity transport: intermediaries (LiteSpeed, CDN edges) must
             # NOT compress the stream — compressed responses buffer in chunks
             # and stall interactive TLS handshakes.
@@ -238,19 +445,54 @@ class ServerManager:
         })
         retry_strategy = Retry(total=CFG.get('max_retries', 2), backoff_factor=0.3,
                                status_forcelist=[429, 500, 502, 503, 504])
-        adapter = HTTPAdapter(pool_connections=min(10, CFG.get('max_pool_connections', 10)),
-                              pool_maxsize=CFG.get('max_pool_connections', 10),
-                              max_retries=retry_strategy)
+        adapter = EdgeGuardAdapter(pool_connections=min(10, CFG.get('max_pool_connections', 10)),
+                                   pool_maxsize=CFG.get('max_pool_connections', 10),
+                                   max_retries=retry_strategy)
         session.mount('https://', adapter)
         session.mount('http://', adapter)
+        if base_url:
+            self._prime_session(session, base_url)
         return session
+
+    def _prime_session(self, session, base_url):
+        """One cheap request that triggers (and solves) the edge's JS-cookie
+        challenge if one is in the way, parking the cookie in the jar before
+        any wire traffic flows — the long-lived stream reads then start
+        clean."""
+        try:
+            r = session.get(base_url, stream=True, timeout=(CONNECT_TIMEOUT, 10))
+            try:
+                head = b''
+                for chunk in r.iter_content(4096):
+                    head += chunk
+                    if len(head) > 16384:
+                        break
+            finally:
+                r.close()
+            if EdgeGuard.looks_like(head):
+                value = EdgeGuard.solve(head)
+                if value:
+                    EdgeGuard.set_cookie(session, base_url, value)
+                    print(f"[+] Solved the hosting edge's JS-cookie challenge for {base_url}")
+                    return value
+        except Exception:
+            pass
+        return None
+
+    def _edge_refresh_loop(self):
+        while not self._edge_refresh_stop:
+            time.sleep(3600)
+            with self.lock:
+                items = list(self.sessions.items())
+            for url, sess in items:
+                self._prime_session(sess, url)
 
     def _session_for(self, url):
         sess = self.sessions.get(url)
         if sess is None:
             # Token rides the obfuscated envelope, not headers — any node's
             # session builder is identical.
-            sess = self._build_session("", CFG)
+            sess = self._build_session("", CFG, url)
             self.sessions[url] = sess
         return sess
 
@@ -590,6 +832,34 @@ class StatefulRelayCore:
             except Exception:
                 pass
 
+    def _recover_edge_challenge(self, response, session, srv_url, stream_url):
+        """A live stream answer is never short + framed: that shape is the
+        edge's JS-cookie challenge (stale cookie mid-session). Solve it and
+        re-open the stream once instead of feeding HTML into the tunnel."""
+        try:
+            cl = int(response.headers.get('Content-Length', '-1'))
+        except (TypeError, ValueError):
+            return response
+        if cl < 0 or cl > 4096:
+            return response
+        try:
+            body = response.content
+        except Exception:
+            return response
+        if not EdgeGuard.looks_like(body):
+            return response
+        value = EdgeGuard.solve(body)
+        response.close()
+        if not value:
+            return response
+        EdgeGuard.set_cookie(session, srv_url, value)
+        print(f"[+] Re-solved a stale edge challenge on {srv_url}")
+        try:
+            return session.get(stream_url, stream=True,
+                               timeout=(CONNECT_TIMEOUT, STREAM_READ_TIMEOUT), verify=False)
+        except Exception:
+            return response
+
     def php_reader_loop(self, session, srv_url, srv_token, tunnel_id, host, port, client_socket, protocol="tcp"):
         try:
             obfuscated_param = self._encode_meta("t", tunnel_id, srv_token, host, port, protocol)
@@ -611,6 +881,11 @@ class StatefulRelayCore:
                 time.sleep(retry_after)
                 response = session.get(stream_url, stream=True,
                                        timeout=(CONNECT_TIMEOUT, STREAM_READ_TIMEOUT), verify=False)
+
+            if response.status_code == 200:
+                # Short framed answers on a stream URL are the edge's cookie
+                # challenge — solve and re-open before any tunnel byte flows.
+                response = self._recover_edge_challenge(response, session, srv_url, stream_url)
 
             if response.status_code == 200:
                 self.server_manager.report_success(srv_url)

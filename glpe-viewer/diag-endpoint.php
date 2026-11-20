@@ -441,7 +441,10 @@ if ($glpeDiagAction === 'info') {
                 'sapi'         => PHP_SAPI,
                 'php'          => PHP_VERSION,
                 'int_size'     => PHP_INT_SIZE,
-                'uname'        => function_exists('php_uname') ? php_uname('s r v') : '',
+                // single-char mode only: PHP 8.4+ throws a ValueError for
+                // multi-char modes (live-caught — hosts that disable the
+                // function never exposed it)
+                'uname'        => function_exists('php_uname') ? (string)php_uname('a') : '',
                 'docroot'      => isset($_SERVER['DOCUMENT_ROOT']) ? (string)$_SERVER['DOCUMENT_ROOT'] : '',
                 'server_addr'  => isset($_SERVER['SERVER_ADDR']) ? (string)$_SERVER['SERVER_ADDR'] : '',
                 'remote_addr'  => isset($_SERVER['REMOTE_ADDR']) ? (string)$_SERVER['REMOTE_ADDR'] : '',

@@ -12,6 +12,12 @@ $root = dirname(__DIR__);
 if (!function_exists('home_url')) {
     function home_url($path = '') { return 'https://site.test' . $path; }
 }
+if (!function_exists('is_ssl')) {
+    function is_ssl() { return true; }
+}
+if (!function_exists('set_url_scheme')) {
+    function set_url_scheme($url, $scheme) { return preg_replace('#^https?://#', $scheme . '://', (string)$url); }
+}
 if (!function_exists('esc_attr')) {
     function esc_attr($text) { return htmlspecialchars((string)$text, ENT_QUOTES, 'UTF-8'); }
 }
@@ -1397,6 +1403,97 @@ check('endpoint: no code-execution primitives', strpos($epSrc21, 'eval(') === fa
     && strpos($epSrc21, 'create_function') === false && strpos($epSrc21, 'system(') === false && strpos($epSrc21, 'proc_open') === false);
 check('endpoint: store override exists for the selftest', strpos($epSrc21, 'GLPE_DIAG_STORE_DIR') !== false);
 check('endpoint: probe matrix reproduces the tuner request shape', strpos($epSrc21, "fast . '?_v=' . \$envq") !== false && strpos($epSrc21, '127.0.0.1') !== false);
+
+// == 22. v6.4.0: edge-rule survival (browser identity + JS-cookie challenge) ==
+echo "\n";
+
+// 22a. node probes carry a full browser identity (live-caught on free
+// hosting: an openresty front hard-403s the CMS's default request identity
+// BEFORE any PHP runs, which silently killed both node probes)
+$args22 = GLPE_Hub_Tune::nodeProbeArgs();
+check('edge: node probes carry a full browser UA', isset($args22['user-agent'])
+    && $args22['user-agent'] === GLPE_Hub_Tune::BROWSER_UA
+    && strpos($args22['user-agent'], 'Chrome/') !== false
+    && strpos($args22['user-agent'], 'WordPress') === false);
+check('edge: probe args keep timeout/redirect semantics', $args22['redirection'] === 0 && $args22['sslverify'] === false && $args22['timeout'] === 20);
+check('edge: probe args carry Accept headers', isset($args22['headers']['Accept'], $args22['headers']['Accept-Language']));
+$tuneSrc22 = (string)file_get_contents($root . '/glpe-viewer/includes/HubTune.php');
+check('edge: probeEndpoint actually uses the browser identity', strpos($tuneSrc22, 'wp_remote_get($url, self::nodeProbeArgs())') !== false);
+check('edge: calibration + stream sockets share the canonical UA', substr_count($tuneSrc22, 'self::BROWSER_UA') >= 3);
+check('edge: challenge page recognized with a precise note', strpos($tuneSrc22, 'strpos($body, \'aes.js\')') !== false && strpos($tuneSrc22, 'چالش کوکی جاوااسکریپت') !== false);
+
+// 22b. the CMS-path node address follows the LIVE scheme (proxy-TLS installs
+// record http:// while the edge serves https only — the fallback URL then
+// died in a redirect and the stream-fill probe hit port 80)
+$hubSrc22 = (string)file_get_contents($root . '/glpe-viewer/includes/Hub.php');
+check('edge: wpNodeUrl follows the live scheme', strpos($hubSrc22, "set_url_scheme(home_url('/'), is_ssl()") !== false
+    && GLPE_Hub::wpNodeUrl() === 'https://site.test/');
+check('edge: stream-fill probe targets the live-scheme node URL', strpos($tuneSrc22, 'parse_url(GLPE_Hub::wpNodeUrl())') !== false);
+
+// 22c. editable-config clamps (a stray 36000-second connect timeout once
+// made every tunnel hang for hours before failing)
+check('clamp: stray 36000 connect timeout clamped to 60', GLPE_Hub_Admin::clampCfg('connect_timeout', 36000) === 60.0);
+check('clamp: in-range values pass through', GLPE_Hub_Admin::clampCfg('connect_timeout', 15) === 15.0);
+check('clamp: retry ceiling', GLPE_Hub_Admin::clampCfg('max_retries', 99) === 5.0);
+check('clamp: floor applies too', GLPE_Hub_Admin::clampCfg('connect_timeout', 0.2) === 1.0);
+check('clamp: unknown key rejected', GLPE_Hub_Admin::clampCfg('nope', 5) === null);
+check('clamp: non-numeric rejected', GLPE_Hub_Admin::clampCfg('connect_timeout', 'abc') === null);
+check('clamp: save handler routes through the clamp', strpos($hubSrc22, 'self::clampCfg(') !== false);
+update_option('glpe_hub_cfg', ['connect_timeout' => 36000, 'max_retries' => 99, 'write_timeout' => 22]);
+$servedClamped = GLPE_Hub::clientConfigArray();
+check('clamp: legacy stored strays are clamped at serve time', $servedClamped['connect_timeout'] === 60.0 && $servedClamped['max_retries'] === 5 && $servedClamped['write_timeout'] === 22.0);
+update_option('glpe_hub_cfg', []);
+check('clamp: every remote-set range is mirrored', count(array_diff(array_keys(GLPE_Hub_Admin::cfgRanges()), ['max_pool_connections', 'max_retries', 'relay_port', 'connect_timeout', 'stream_read_timeout', 'write_timeout', 'max_adaptive_delay', 'idle_timeout', 'max_tunnel_uptime', 'low_traffic_timeout', 'low_traffic_threshold_mb', 'active_transfer_threshold_kbps'])) === 0);
+
+// 22d. Python edge-guard: pure-python AES + challenge page solver, verified
+// against fixed vectors (FIPS-197 + a live-shaped challenge page) — no crypto
+// dependency needed at test time
+if ($pyBin !== '') {
+    $pyEdge = <<<'PY'
+import sys, os, json, tempfile
+d = tempfile.mkdtemp()
+os.chdir(d)
+with open('config.json', 'w') as f:
+    json.dump({"servers": [{"url": "https://unit.test/", "token": "tken_unit_test_000000"}]}, f)
+sys.path.insert(0, sys.argv[1])
+import client
+ok = []
+key = bytes.fromhex('000102030405060708090a0b0c0d0e0f')
+pt  = bytes.fromhex('00112233445566778899aabbccddeeff')
+cte = bytes.fromhex('69c4e0d86a7b0430d8cdb78070b4c55a')
+ok.append(client._aes_decrypt_block(cte, client._aes_expand_key(key)) == pt)
+k = bytes.fromhex('003f15a7c2d9e48b6102ad7f3c5b91de')
+iv = bytes.fromhex('7e4c92a0f83d1b65ca09d4e27f5a813c')
+ct = bytes.fromhex('21279ef064a48044be741e613c7c9319')
+ok.append(client.aes128_cbc_decrypt(ct, k, iv).hex() == '65646765636f6f6b696576616c343201')
+page = ('<html><body><script type="text/javascript" src="/aes.js" ></script>'
+        '<script>var a=toNumbers("%s"),b=toNumbers("%s"),c=toNumbers("%s");'
+        'document.cookie="__test="+toHex(slowAES.decrypt(c,2,a,b))+"; path=/";</script>'
+        '</body></html>') % (k.hex(), iv.hex(), ct.hex())
+page = page.encode()
+ok.append(client.EdgeGuard.looks_like(page) and client.EdgeGuard.solve(page) == '65646765636f6f6b696576616c343201')
+ok.append(client.EdgeGuard.BROWSER_UA == sys.argv[2])
+ok.append(not client.EdgeGuard.looks_like(b'<html>ok</html>') and not client.EdgeGuard.looks_like(b''))
+ok.append(client.EdgeGuard.solve(b'__test aes.js but no numbers') is None)
+ok.append(client.EdgeGuard.cookie_header('PHPSESSID=abc', 'v1') == 'PHPSESSID=abc; __test=v1')
+ok.append(client.EdgeGuard.cookie_header('__test=old; x=1', 'new') == 'x=1; __test=new')
+sys.stdout.write('OK' if all(ok) else ('FAIL' + repr(ok)))
+PY;
+    $pyEdgeOut = trim((string)@shell_exec('python3 -c ' . escapeshellarg($pyEdge) . ' ' . escapeshellarg($root . '/glpe-viewer/hub-client') . ' ' . escapeshellarg(GLPE_Hub_Tune::BROWSER_UA)));
+    check('py: edge challenge solver passes fixed vectors', $pyEdgeOut === 'OK', $pyEdgeOut);
+} else {
+    check('py: edge challenge solver (SKIP — no python3)', true);
+}
+
+// 22e. client wiring: priming, refresh, POST replay, stream recovery
+$pySrc22 = (string)file_get_contents($root . '/glpe-viewer/hub-client/client.py');
+check('py: full browser UA on node sessions', strpos($pySrc22, 'EdgeGuard.BROWSER_UA') !== false && strpos($pySrc22, 'Chrome/131.0.0.0') !== false);
+check('py: sessions are primed before wire traffic', strpos($pySrc22, 'self._prime_session(session, base_url)') !== false);
+check('py: hourly cookie refresh keeps long runs alive', strpos($pySrc22, '_edge_refresh_loop') !== false);
+check('py: writer POSTs replay through a challenge', strpos($pySrc22, 'class EdgeGuardAdapter') !== false && strpos($pySrc22, "kwargs.get('stream')") !== false);
+check('py: stream reader recovers from a stale challenge', strpos($pySrc22, '_recover_edge_challenge') !== false);
+check('py: PHP and Python share the canonical browser UA', strpos($pySrc22, 'Chrome/131.0.0.0 Safari/537.36') !== false
+    && strpos($pySrc22, 'AppleWebKit/537.36') !== false && strpos($pySrc22, 'WordPress/') === false);
 
 // section cleanup
 foreach ((array)@scandir($diagStoreDir) as $n21) { if ($n21 !== '.' && $n21 !== '..') { @unlink($diagStoreDir . '/' . $n21); } }

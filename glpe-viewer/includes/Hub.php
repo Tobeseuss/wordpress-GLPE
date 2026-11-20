@@ -286,7 +286,12 @@ class GLPE_Hub {
     }
 
     public static function wpNodeUrl() {
-        return home_url('/');
+        // Installs whose TLS is terminated at an edge layer often record an
+        // http:// site address while the edge serves https only: a fallback
+        // URL on the stored scheme dies in a redirect (POST bodies do not
+        // survive a 301). Always hand out the scheme that actually served
+        // the current admin request.
+        return set_url_scheme(home_url('/'), is_ssl() ? 'https' : 'http');
     }
 
     /** Best-practice baseline for the bundled Python core (v6.2 tuning):
@@ -328,13 +333,20 @@ class GLPE_Hub {
             $numKeys  = ['connect_timeout', 'stream_read_timeout', 'write_timeout', 'max_adaptive_delay',
                          'idle_timeout', 'max_tunnel_uptime', 'low_traffic_timeout',
                          'low_traffic_threshold_mb', 'active_transfer_threshold_kbps'];
+            // Stored overrides pass the same clamps the editor enforces —
+            // a legacy stray value can not leak into the served config.
             foreach ($intKeys as $k) {
                 $v = isset($ov[$k]) && is_numeric($ov[$k]) ? (int)$ov[$k] : 0;
-                if ($v > 0) { $cfg[$k] = $v; }
+                if ($v > 0) {
+                    $c = GLPE_Hub_Admin::clampCfg($k, $v);
+                    $cfg[$k] = ($c === null) ? $v : (int)$c;
+                }
             }
             foreach ($numKeys as $k) {
-                $v = isset($ov[$k]) && is_numeric($ov[$k]) ? (float)$ov[$k] : 0;
-                if ($v > 0) { $cfg[$k] = $v; }
+                $c = isset($ov[$k]) ? GLPE_Hub_Admin::clampCfg($k, $ov[$k]) : null;
+                if ($c !== null && $c > 0) {
+                    $cfg[$k] = $c;
+                }
             }
             if (isset($ov['routing']) && is_array($ov['routing'])) {
                 foreach (['geoip_url', 'geosite_base_url'] as $k) {
@@ -907,6 +919,36 @@ class GLPE_Hub_Admin {
         exit;
     }
 
+    /** Numeric bounds for the editable client config — the same envelope
+     * the remote set action enforces. One stray "36000" in a timeout field
+     * once made every tunnel hang for hours before failing. */
+    public static function cfgRanges() {
+        return [
+            'max_pool_connections'           => [1, 64],
+            'max_retries'                    => [1, 5],
+            'relay_port'                     => [1024, 65535],
+            'connect_timeout'                => [1, 60],
+            'stream_read_timeout'            => [1, 120],
+            'write_timeout'                  => [1, 90],
+            'max_adaptive_delay'             => [0.05, 5],
+            'idle_timeout'                   => [3, 120],
+            'max_tunnel_uptime'              => [30, 86400],
+            'low_traffic_timeout'            => [5, 300],
+            'low_traffic_threshold_mb'       => [0.01, 100],
+            'active_transfer_threshold_kbps' => [0.5, 1000],
+        ];
+    }
+
+    /** Clamps one editable-config value into its allowed range
+     * (null when the key has no range rule). */
+    public static function clampCfg($key, $value) {
+        $ranges = self::cfgRanges();
+        if (!isset($ranges[$key]) || !is_numeric($value)) {
+            return null;
+        }
+        return (float)max($ranges[$key][0], min($ranges[$key][1], (float)$value));
+    }
+
     /** Saves the editable client-config values + extra nodes from the form. */
     public static function handleSaveCfg() {
         if (!current_user_can('manage_options')) {
@@ -915,6 +957,7 @@ class GLPE_Hub_Admin {
         check_admin_referer('glpe_hub_admin', '_wpnonce');
         $in = isset($_POST['cfg']) && is_array($_POST['cfg']) ? wp_unslash($_POST['cfg']) : [];
 
+        $ranges = self::cfgRanges();
         $numKeys = ['connect_timeout', 'stream_read_timeout', 'write_timeout', 'max_adaptive_delay',
                     'idle_timeout', 'max_tunnel_uptime', 'low_traffic_timeout',
                     'low_traffic_threshold_mb', 'active_transfer_threshold_kbps'];
@@ -923,11 +966,18 @@ class GLPE_Hub_Admin {
         $out = [];
         foreach ($intKeys as $k) {
             $v = isset($in[$k]) ? (int)$in[$k] : 0;
-            if ($v > 0) { $out[$k] = $v; }
+            if ($v > 0) {
+                if (isset($ranges[$k])) {
+                    $v = (int)max($ranges[$k][0], min($ranges[$k][1], $v));
+                }
+                $out[$k] = $v;
+            }
         }
         foreach ($numKeys as $k) {
-            $v = isset($in[$k]) && is_numeric($in[$k]) ? (float)$in[$k] : 0;
-            if ($v > 0) { $out[$k] = $v; }
+            $clamped = isset($in[$k]) ? self::clampCfg($k, $in[$k]) : null;
+            if ($clamped !== null && $clamped > 0) {
+                $out[$k] = $clamped;
+            }
         }
         if (isset($in['prefer_fast_endpoint'])) {
             $out['prefer_fast_endpoint'] = ($in['prefer_fast_endpoint'] === '1') ? '1' : '0';
