@@ -38,8 +38,17 @@ class GLPE_Engine {
     private $srcdocDepth = 0;
     private $userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
-    public function __construct($viewScript = '', $isTempCookies = false) {
-        $this->cookies = new GLPE_Cookies($isTempCookies);
+    /**
+     * @param string $viewScript    gateway base URL
+     * @param bool   $isTempCookies temp jar mode (records never persist)
+     * @param string $jarSuffix     cookie-jar session-key suffix; the virtual
+     *                              browser's sandbox requests carry 'vs' and
+     *                              keep their destination records in a jar
+     *                              of their own — separate from the visitor's
+     *                              normal records and wiped on session close.
+     */
+    public function __construct($viewScript = '', $isTempCookies = false, $jarSuffix = '') {
+        $this->cookies = new GLPE_Cookies($isTempCookies, $jarSuffix);
         $this->viewScript = $viewScript;
         $own = strtolower((string)parse_url((string)$viewScript, PHP_URL_HOST));
         if ($own !== '') {
@@ -124,6 +133,10 @@ class GLPE_Engine {
         if (!empty($options['stripTitle']))    $viewUrl .= '&nt=1';
         if (!empty($options['showToolbar']))   $viewUrl .= '&nb=1';
         if (!empty($options['mobileView']))    $viewUrl .= '&mb=1';
+        // Sandbox requests (virtual browser's temporary environment) keep
+        // their flag so every reference of the page rides the same isolated
+        // jar and the same identity profile on follow-up requests.
+        if (!empty($options['vsProfile']))     $viewUrl .= '&vs=1';
 
         return $viewUrl;
     }
@@ -713,6 +726,23 @@ class GLPE_Engine {
                 'st'  => $stripTitle,
                 'mb'  => !empty($options['mobileView']),
             ];
+            // Virtual-browser sandbox pages carry their host-consistent
+            // identity profile: the companion spoofs navigator, Intl, screen
+            // and geolocation to EXACTLY these values, so the JavaScript that
+            // runs inside the temporary environment measures the profile —
+            // never the visitor's own locale, timezone or hardware signals.
+            if (!empty($options['vsProfile']) && is_array($options['vsProfile'])) {
+                $ctxConfig['vs'] = 1;
+                $ctxConfig['loc'] = $options['vsProfile']['locale'];
+                $ctxConfig['lng'] = $options['vsProfile']['lang'];
+                $ctxConfig['tz']  = $options['vsProfile']['tz'];
+                $ctxConfig['ua']  = $options['vsProfile']['ua'];
+                $ctxConfig['plat'] = $options['vsProfile']['plat'];
+                $ctxConfig['hc']  = $options['vsProfile']['hc'];
+                $ctxConfig['dm']  = $options['vsProfile']['dm'];
+                $ctxConfig['scrw'] = $options['vsProfile']['scrw'];
+                $ctxConfig['scrh'] = $options['vsProfile']['scrh'];
+            }
             $injection = "\n<script>\n" .
                 "window.__glpe_ctx__ = " . json_encode($ctxConfig) . ";\n" .
                 $hookScript .

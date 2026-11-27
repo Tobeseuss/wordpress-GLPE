@@ -3,7 +3,7 @@
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
  * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با کدگذاری کامل تبادلات، بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 7.0.0
+ * Version: 7.1.0
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '7.0.0');
+define('GLPE_VERSION', '7.1.0');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -90,6 +90,13 @@ if (file_exists(GLPE_DIR . 'includes/SitePacks.php')) {
 // A missing file just removes the virtual mode, never the display path.
 if (file_exists(GLPE_DIR . 'includes/VirtualBrowser.php')) {
     require_once GLPE_DIR . 'includes/VirtualBrowser.php';
+}
+
+// Virtual browser — sandbox engine (pure PHP, made for free hosting panels
+// where no server software can exist). Guarded include: a missing file
+// merely disables the sandbox engine.
+if (file_exists(GLPE_DIR . 'includes/VbSandbox.php')) {
+    require_once GLPE_DIR . 'includes/VbSandbox.php';
 }
 // Remote-diagnostics API (v6.3.0): optional by design — a missing file only
 // removes the diag card + endpoint, never the site.
@@ -288,7 +295,16 @@ class GLPE_Plugin {
 
         $viewScript  = add_query_arg(['_glpe' => '1'], home_url('/'));
         $tempCookies = (isset($_GET['tp']) && $_GET['tp'] == '1') || (isset($_POST['tp']) && $_POST['tp'] == '1');
-        $engine = new GLPE_Engine($viewScript, $tempCookies);
+        // Virtual-browser sandbox requests carry vs=1: their destination
+        // records live in a jar of their own (GLPE_Vb_Sandbox::JAR_SUFFIX)
+        // — separate from the visitor's normal records, wiped when the
+        // sandbox session closes.
+        $vsRequest = (isset($_GET['vs']) && $_GET['vs'] === '1');
+        $engine = new GLPE_Engine(
+            $viewScript,
+            $tempCookies,
+            $vsRequest && class_exists('GLPE_Vb_Sandbox') ? GLPE_Vb_Sandbox::JAR_SUFFIX : ''
+        );
 
         // 1. Extract the display link first — control modes below only apply
         //    to gateway requests that carry no display link, so displayed
@@ -310,6 +326,18 @@ class GLPE_Plugin {
                 $engine->getCookies()->addCookieFromHeader($cookie, $url);
             }
             wp_send_json(['ok' => true]);
+            exit;
+        }
+
+        // 2a. Virtual-browser sandbox endpoints (v7.1.0). Session lifecycle
+        //     plus the host-first input round trip: the visitor's gestures
+        //     arrive as one opaque token, are normalized and journaled by
+        //     THIS host, and only the host's echo drives the sandbox. The
+        //     reply payload is an opaque token again.
+        if ($rawParam === '' && isset($_GET['mode']) && preg_match('/^vb_(open|in|nav|beat|close)$/', (string)$_GET['mode'])) {
+            if (class_exists('GLPE_Vb_Sandbox')) {
+                GLPE_Vb_Sandbox::handleMode((string)$_GET['mode']);
+            }
             exit;
         }
 
@@ -338,7 +366,7 @@ class GLPE_Plugin {
         //    the scripting-disabled fallback. Forward every non-reserved
         //    field to the destination as part of its query.
         if ($method === 'GET' && isset($_SERVER['QUERY_STRING'])) {
-            $reserved = ['_glpe', 'l', 'd', 'ns', 'ni', 'nt', 'nb', 'ec', 'mb', 'tp', 'mode'];
+            $reserved = ['_glpe', 'l', 'd', 'ns', 'ni', 'nt', 'nb', 'ec', 'mb', 'tp', 'vs', 'mode'];
             $fields = [];
             foreach (explode('&', (string)$_SERVER['QUERY_STRING']) as $pair) {
                 if ($pair === '') continue;
@@ -417,6 +445,21 @@ class GLPE_Plugin {
                 . 'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
             unset($customHeaders['sec-ch-ua'], $customHeaders['sec-ch-ua-mobile'], $customHeaders['sec-ch-ua-platform']);
             $customHeaders['accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
+        }
+
+        // Virtual-browser sandbox display: the destination renders inside a
+        // locked temporary environment with a host-consistent identity —
+        // the profile below rides every request (canonical agent/locale,
+        // visitor's client hints and location signals removed) and the
+        // in-page companion mirrors the same values inside the sandbox, so
+        // the destination never measures the visitor's own signals. No
+        // floating toolbar: the virtual surface has its own controls.
+        if ($vsRequest) {
+            $options['showToolbar'] = false;
+            if (class_exists('GLPE_Vb_Sandbox')) {
+                $options['vsProfile'] = GLPE_Vb_Sandbox::profile();
+                GLPE_Vb_Sandbox::applyRequestProfile($customHeaders);
+            }
         }
 
         // Site pack for this destination — a special solution ships with the
@@ -857,10 +900,17 @@ class GLPE_Plugin {
             </form>
 
             <?php
-            // Virtual browser (v7.0.0): the destination renders entirely on
-            // this host inside a temporary isolated environment; the visitor
-            // steers a picture-only stream like a remote desktop.
-            if (class_exists('GLPE_VirtualBrowser')) {
+            // Virtual browser (v7.0.0 / v7.1.0): the destination is handled
+            // inside a temporary isolated environment on this host. Two
+            // engines serve it — the host-side renderer (full server-side
+            // painting, picture-only channel; needs runtime + renderer binary
+            // on the server) and the sandbox engine (pure PHP, runs on free
+            // hosting panels where nothing can be installed on the server:
+            // every exchange and every input gesture still rides this host).
+            $vbEngine = class_exists('GLPE_Vb_Sandbox')
+                ? GLPE_Vb_Sandbox::engineChoice()
+                : (class_exists('GLPE_VirtualBrowser') ? 'service' : 'sandbox');
+            if ($vbEngine === 'service' && class_exists('GLPE_VirtualBrowser')):
                 GLPE_VirtualBrowser::syncKeyFile();
                 $vbReady = GLPE_VirtualBrowser::ensureService();
             ?>
@@ -892,7 +942,38 @@ class GLPE_Plugin {
             </div>
             <script>window.GLPE_VB = <?php echo wp_json_encode(GLPE_VirtualBrowser::clientConfig()); ?>;</script>
             <script src="<?php echo esc_url(GLPE_URL . 'includes/vb-client.js'); ?>?v=<?php echo esc_attr(GLPE_VERSION); ?>" defer></script>
-            <?php } ?>
+            <?php
+            else:
+                // Sandbox engine — the free-hosting virtual browser. All
+                // exchanges and all input gestures ride this host; the
+                // destination renders inside a locked temporary environment.
+                $vbsCfg = class_exists('GLPE_Vb_Sandbox') ? GLPE_Vb_Sandbox::clientConfig() : [];
+            ?>
+            <div id="glpe-vbs-launch" style="background: #141e33; border: 1px solid #1e293b; border-radius: 14px; padding: 14px; margin-top: 16px;">
+                <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px;">
+                    <span style="font-size: 20px; background: #1e293b; border-radius: 12px; padding: 4px 8px;">🖥️</span>
+                    <b style="color: #fff; font-size: 13px;">مرورگر مجازی</b>
+                    <span style="background: rgba(56,189,248,0.12); color: #38bdf8; border: 1px solid rgba(56,189,248,0.35); padding: 3px 10px; border-radius: 9999px; font-size: 11px;">موتور جعبه‌ای — بدون نیاز به هیچ نرم‌افزاری روی سرور (مناسب هاست رایگان)</span>
+                    <span style="font-size: 11px; color: #6ee7b7;">وضعیت: آماده</span>
+                </div>
+                <p style="font-size: 11px; line-height: 2; color: #94a3b8; margin: 0 0 10px;">
+                    در این موتور، تمام درخواست‌ها و پاسخ‌های وب‌سایت مقصد فقط از همین میزبان شما عبور و پردازش می‌شوند (مقصد تنها IP همین هاست را می‌بیند و هرگز IP شما را)؛
+                    حرکت موس، اسکرول و کیبورد شما ابتدا رمزگذاری‌شده به همین هاست ارسال و پس از پردازش در همان‌جا، در «نمایشگر مجازی» بازپخش می‌شود؛
+                    صفحهٔ مقصد هم داخل یک جعبهٔ ایزولهٔ موقت نمایش می‌یابد — بدون دسترسی به صفحه یا کوکی‌های مرورگر شما — و با بستن، آن محیط و کوکی‌هایش به‌کلی دور ریخته می‌شود.
+                    با دکمهٔ «پیکسل» تنها تصویر صفحه را می‌بینید. برای رندرِ کامل و صددرصد سمت سرور، موتور «سرویس رندر» در تنظیمات افزونه موجود است (نیازمند سروری با دسترسی کامل).
+                </p>
+                <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                    <input id="glpe-vb-url" type="text" dir="ltr" value="https://example.com" spellcheck="false"
+                           style="flex: 1; min-width: 220px; padding: 11px 14px; background: #1e293b; border: 1px solid #334155; border-radius: 12px; color: #fff; font-size: 12px; font-family: monospace; outline: none; text-align: left;">
+                    <button type="button" class="glpe-vbs-open"
+                            style="padding: 11px 22px; background: linear-gradient(to left, #0284c7, #38bdf8); color: #fff; border: none; border-radius: 12px; font-size: 12px; font-weight: bold; cursor: pointer; font-family: inherit;">
+                        🖥️ شروع مرورگر مجازی
+                    </button>
+                </div>
+            </div>
+            <script>window.GLPE_VBS = <?php echo wp_json_encode($vbsCfg); ?>;</script>
+            <script src="<?php echo esc_url(GLPE_URL . 'includes/vb-sandbox.js'); ?>?v=<?php echo esc_attr(GLPE_VERSION); ?>" defer></script>
+            <?php endif; ?>
 
             <div style="display: flex; justify-content: center; gap: 8px; margin-top: 14px; flex-wrap: wrap; align-items: center;">
                 <a href="<?php echo esc_url($sessionsUrl); ?>" style="font-size: 12px; color: #94a3b8; text-decoration: none; background: #1e293b; border: 1px solid #334155; padding: 8px 16px; border-radius: 10px;">
@@ -955,6 +1036,7 @@ class GLPE_Plugin {
         register_setting('glpe_group', 'glpe_fetch_retries', ['sanitize_callback' => [$this, 'sanitizeRetry']]);
         register_setting('glpe_group', 'glpe_vb_port', ['sanitize_callback' => [$this, 'sanitizeVbPort']]);
         register_setting('glpe_group', 'glpe_vb_endpoint', ['sanitize_callback' => [$this, 'sanitizeVbEndpoint']]);
+        register_setting('glpe_group', 'glpe_vb_engine', ['sanitize_callback' => [$this, 'sanitizeVbEngine']]);
     }
 
     public function sanitizeVbPort($value) {
@@ -965,6 +1047,16 @@ class GLPE_Plugin {
     public function sanitizeVbEndpoint($value) {
         $v = str_replace(["\r", "\n", "\0"], '', trim((string)$value));
         return $v;
+    }
+
+    /**
+     * Virtual-browser engine choice: 'auto' picks the host-side service when
+     * its companion answers and the sandbox engine otherwise; the two forced
+     * values pin one engine regardless of the host's software.
+     */
+    public function sanitizeVbEngine($value) {
+        $value = strtolower(trim((string)$value));
+        return in_array($value, ['auto', 'service', 'sandbox'], true) ? $value : 'auto';
     }
 
     public function sanitizeDnsMode($value) {
@@ -1178,6 +1270,17 @@ class GLPE_Plugin {
                             <p style="font-size: 12px; color: #64748b; margin: 4px 0 0;">نشانی اتصال مرورگر کاربر به سرویس مجازی — خالی یعنی محاسبهٔ خودکار. فقط وقتی پر کنید که سرویس را پشت یک نشانی دیگری (مثل مسیر فرستنده یا نشانی اختصاصی) در دسترس گذاشته‌اید.</p>
                         </td>
                     </tr>
+                    <tr>
+                        <th scope="row">موتور مرورگر مجازی <code style="direction:ltr;">vb_engine</code></th>
+                        <td>
+                            <select name="glpe_vb_engine" style="max-width: 100%;">
+                                <option value="auto" <?php selected(get_option('glpe_vb_engine', 'auto'), 'auto'); ?>>auto — خودکار: سرویس رندر میزبان اگر در دسترس بود، وگرنه موتور جعبه‌ای (پیشنهادی)</option>
+                                <option value="service" <?php selected(get_option('glpe_vb_engine', 'auto'), 'service'); ?>>service — سرویس رندر میزبان: رندرِ کامل سمت سرور، فقط تصویر می‌رسد (نیازمند Bun و Chromium روی سرور)</option>
+                                <option value="sandbox" <?php selected(get_option('glpe_vb_engine', 'auto'), 'sandbox'); ?>>sandbox — موتور جعبه‌ای: تمام تبادلات و ورودی‌ها از همین هاست می‌گذرد؛ بدون نیاز به هیچ نرم‌افزاری روی سرور (مناسب هاست رایگان)</option>
+                            </select>
+                            <p style="font-size: 12px; color: #64748b; margin: 4px 0 0;">هر دو موتور تجربهٔ «مثل ریموت دسکتاپ» می‌دهند؛ تفاوت: موتور سرویس تصویر را صددرصد روی سرور می‌کشد، موتور جعبه‌ای صفحه را داخل جعبهٔ ایزولهٔ مرورگر کاربر نمایش می‌دهد و فقط تبادلات و ورودی‌ها را روی هاست پردازش می‌کند — موتوری که روی هاست رایگان بدون دسترسی سرور کار می‌کند.</p>
+                        </td>
+                    </tr>
                 </table>
 
                 <?php submit_button('ذخیره تغییرات'); ?>
@@ -1195,11 +1298,13 @@ class GLPE_Plugin {
     }
 
     /**
-     * Virtual browser card — runtime/renderer status and one-click start of
-     * the host-side rendering service (v7.0.0).
+     * Virtual browser card — both engines' status: the host-side rendering
+     * service (runtime/renderer discovery, one-click start) and the sandbox
+     * engine (always available — the free-hosting path, v7.1.0).
      */
     private function renderVirtualBrowserCard() {
         $st = GLPE_VirtualBrowser::status();
+        $engine = class_exists('GLPE_Vb_Sandbox') ? GLPE_Vb_Sandbox::engineChoice() : 'sandbox';
         $startUrl = wp_nonce_url(
             admin_url('admin-post.php?action=glpe_vb_start'),
             'glpe_vb_start'
@@ -1214,14 +1319,17 @@ class GLPE_Plugin {
         };
         ?>
         <div style="background: #fff; border: 1px solid #ccd0d4; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
-            <h3 style="margin-top: 0;">🖥️ مرورگر مجازی — رندر کامل روی میزبان</h3>
+            <h3 style="margin-top: 0;">🖥️ مرورگر مجازی — دو موتور: رندر کامل روی میزبان و موتور جعبه‌ای</h3>
             <p style="font-size: 13px; line-height: 2; color: #334155;">
-                در حالت مرورگر مجازی، کل وب‌سایت مقصد داخل یک محیط ایزولهٔ موقت روی همین سرور بارگذاری و اجرا می‌شود و به بازدیدکننده فقط تصویر فریم‌ها می‌رسد؛ حرکت موس و کیبورد او به همان محیط ارسال و در آن بازپخش می‌شود — تجربه‌ای مثل ریموت دسکتاپ. هیچ HTML/CSS/JS یا کوکی‌ای از مقصد به دستگاه کاربر نمی‌رسد.
-                این حالت به دو چیز روی سرور نیاز دارد: زمان اجرای <code>Bun</code> و یک باینری رندرکنندهٔ بدون رابط کاربری (Chromium). پس از تأمین این دو، دکمهٔ زیر سرویس را راه‌اندازی می‌کند و صفحهٔ نمایشگر به‌طور خودکار از آن استفاده می‌کند.
+                مرورگر مجازی دو موتور دارد و هر دو تجربه‌ای شبیه ریموت دسکتاپ می‌دهند:
+                <b>سرویس رندر میزبان</b> کل وب‌سایت مقصد را روی همین سرور بارگذاری و اجرا می‌کند و به بازدیدکننده فقط تصویر فریم‌ها می‌رسد — هیچ کد یا محتوایی از مقصد به دستگاه کاربر نمی‌رسد؛ نیازمند زمان اجرای <code>Bun</code> و یک باینری رندرکنندهٔ بدون رابط (Chromium) روی سرور است.
+                <b>موتور جعبه‌ای</b> (جدید — برای هاست رایگان بدون دسترسی سرور) بدون هیچ نرم‌افزاری روی سرور کار می‌کند: تمام درخواست‌ها و پاسخ‌های مقصد از همین هاست عبور و پردازش می‌شوند، ورودی‌های موس/کیبورد ابتدا به هاست ارسال و پس از پردازش همان‌جا در نمایشگر مجازی بازپخش می‌شوند، و صفحهٔ مقصد داخل یک جعبهٔ ایزولهٔ موقت (با کوکی‌های دورریز و هویتِ هماهنگ با هاست) نمایش می‌یابد.
             </p>
             <table class="widefat striped" style="max-width: 760px; direction: ltr; text-align: left;">
                 <tbody>
                 <?php
+                $row('active engine', $engine, true);
+                $row('sandbox engine', 'available — no server software required', true);
                 $row('service', $st['running'] ? 'running : ' . (int)$st['port'] : 'stopped', $st['running']);
                 $row('bun runtime', $st['bun'], $st['bun'] !== '');
                 $row('renderer binary', $st['chrome'], $st['chrome'] !== '');
@@ -1232,10 +1340,11 @@ class GLPE_Plugin {
             </table>
             <form method="post" action="<?php echo esc_url($startUrl); ?>" style="margin-top: 14px; display: inline;">
                 <?php wp_nonce_field('glpe_vb_start'); ?>
-                <button type="submit" class="button button-primary">اجرای سرویس / تازه‌سازی وضعیت</button>
+                <button type="submit" class="button button-primary">اجرای سرویس رندر / تازه‌سازی وضعیت</button>
             </form>
             <p style="font-size: 12px; color: #64748b; line-height: 1.9; margin-bottom: 0;">
-                نکته: درگاه سرویس و نشانی اتصال کاربران در فرم تنظیمات بالا قابل تغییر است. اگر هاست اجازهٔ اجرای فرایند پس‌زمینه نمی‌دهد، سرویس را به‌صورت دستی (داِیمن) اجرا کنید:
+                موتور فعال در فهرست «موتور مرورگر مجازی» فرم بالا قابل تغییر است (auto / service / sandbox).
+                اگر هاست اجازهٔ اجرای فرایند پس‌زمینه نمی‌دهد، سرویس را به‌صورت دستی (داِیمن) اجرا کنید:
                 <code style="direction:ltr; display:inline-block;">GLPE_VB_PORT=3007 GLPE_VB_KEYFILE=&lt;uploads&gt;/glpe-vb-key.txt GLPE_VB_CHROME=&lt;chromium&gt; bun &lt;plugin&gt;/vb/vb-service.js</code>
             </p>
         </div>

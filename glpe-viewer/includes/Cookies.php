@@ -8,8 +8,20 @@ class GLPE_Cookies {
     private $sessionKey = '_glpe_cookies';
     private $isTempMode = false;
 
-    public function __construct($isTempMode = false) {
-        $this->isTempMode = $isTempMode;
+    /**
+     * @param bool   $isTempMode      temp records (no persistent expiry)
+     * @param string $sessionKeySuffix optional suffix isolating this jar from
+     *                                 the default one (the virtual browser's
+     *                                 temporary environments keep their records
+     *                                 in '_glpe_cookies_vbs' — separate from
+     *                                 the visitor's normal records, and wiped
+     *                                 when the sandbox session closes).
+     */
+    public function __construct($isTempMode = false, $sessionKeySuffix = '') {
+        $this->isTempMode = (bool)$isTempMode;
+        if (is_string($sessionKeySuffix) && $sessionKeySuffix !== '') {
+            $this->sessionKey = '_glpe_cookies' . $sessionKeySuffix;
+        }
         if (session_status() === PHP_SESSION_NONE && !headers_sent()) {
             @session_start();
         }

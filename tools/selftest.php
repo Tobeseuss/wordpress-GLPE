@@ -1785,10 +1785,11 @@ check('settings expose port + endpoint with sanitizers', strpos($mainSrc25, 'san
 check('settings carry the runtime/renderer status card', strpos($mainSrc25, 'renderVirtualBrowserCard') !== false);
 check('start notices wired', strpos($mainSrc25, 'vb-started') !== false && strpos($mainSrc25, 'vb-failed') !== false);
 
-// 25h. release markers
-check('main file version bumped to 7.0.0', substr_count($mainSrc25, '7.0.0') >= 2);
+// 25h. release markers (the 7.1.0 round bumped the current version — the
+// historical 7.0.0 changelog entry stays below)
+check('main file still carries the 7.0.0 heritage marker', substr_count($mainSrc25, '7.0.0') >= 1);
 $readme25 = $readme24;
-check('readme stable tag is 7.0.0', strpos($readme25, 'Stable tag: 7.0.0') !== false);
+check('readme stable tag follows the current release (7.1.0)', strpos($readme25, 'Stable tag: 7.1.0') !== false);
 check('readme carries the 7.0.0 changelog entry', strpos($readme25, '= 7.0.0 =') !== false && strpos($readme25, 'مرورگر مجازی') !== false);
 
 // 25i. everything the shipped zip needs stays scanner-clean
@@ -1797,6 +1798,246 @@ $vbFiles = [$vbSrc, $vbClient, (string)file_get_contents($root . '/glpe-viewer/i
 $vbHits = 0;
 foreach ($vbFiles as $src) { if (preg_match('#' . $guardPattern . '#i', $src)) { $vbHits++; } }
 check('new virtual-browser files carry no scanner-flagged strings', $vbHits === 0);
+
+// == 26. v7.1.0: virtual browser — sandbox engine (pure PHP, free hosting) ==
+echo "\n== 26. Virtual browser: sandbox engine (pure PHP, free-hosting path) ==\n";
+
+// --- shims this section needs (all guarded; earlier sections may not have them) ---
+if (!function_exists('add_query_arg')) {
+    function add_query_arg($args, $uri) {
+        $sep = (strpos($uri, '?') === false) ? '?' : '&';
+        return $uri . $sep . http_build_query($args);
+    }
+}
+if (!function_exists('wp_unslash')) { function wp_unslash($v) { return is_array($v) ? array_map('wp_unslash', $v) : $v; } }
+if (!function_exists('wp_json_encode')) { function wp_json_encode($v) { return json_encode($v); } }
+$GLOBALS['__glpe_vbs_response'] = null;
+if (!function_exists('wp_send_json')) {
+    function wp_send_json($payload) { $GLOBALS['__glpe_vbs_response'] = $payload; }
+}
+
+require $root . '/glpe-viewer/includes/VbSandbox.php';
+
+$vbsSrc = (string)file_get_contents($root . '/glpe-viewer/includes/VbSandbox.php');
+$vbsClient = (string)file_get_contents($root . '/glpe-viewer/includes/vb-sandbox.js');
+$mainSrc26 = (string)file_get_contents($root . '/glpe-viewer/glpe-viewer.php');
+$engineSrc26 = (string)file_get_contents($root . '/glpe-viewer/includes/Engine.php');
+$cookiesSrc26 = (string)file_get_contents($root . '/glpe-viewer/includes/Cookies.php');
+$clientSrc26 = (string)file_get_contents($root . '/glpe-viewer/includes/client.js');
+
+check('sandbox class loads', class_exists('GLPE_Vb_Sandbox'));
+
+// 26a. constants + engine selection
+check('session TTL is 30 minutes', GLPE_Vb_Sandbox::TTL === 1800);
+check('events cap and jar suffix exposed', GLPE_Vb_Sandbox::EV_CAP === 40 && GLPE_Vb_Sandbox::JAR_SUFFIX === '_vbs');
+update_option('glpe_vb_engine', 'service');
+check('forced engine service wins', GLPE_Vb_Sandbox::engineChoice() === 'service');
+update_option('glpe_vb_engine', 'sandbox');
+check('forced engine sandbox wins', GLPE_Vb_Sandbox::engineChoice() === 'sandbox');
+update_option('glpe_vb_engine', 'auto');
+check('auto + running service picks the renderer engine', GLPE_Vb_Sandbox::engineChoice(true) === 'service');
+check('auto + dead service falls back to the sandbox engine', GLPE_Vb_Sandbox::engineChoice(false) === 'sandbox');
+update_option('glpe_vb_engine', 'nonsense');
+check('garbage setting degrades to auto semantics', GLPE_Vb_Sandbox::engineChoice(false) === 'sandbox');
+update_option('glpe_vb_engine', '');
+
+// 26b. host-consistent identity profile
+$prof26 = GLPE_Vb_Sandbox::profile();
+check('profile carries the canonical desktop identity', isset($prof26['locale'], $prof26['lang'], $prof26['tz'], $prof26['ua'], $prof26['plat'], $prof26['hc'], $prof26['dm'], $prof26['scrw'], $prof26['scrh'])
+    && $prof26['locale'] === 'en-US' && $prof26['tz'] === 'UTC' && strpos($prof26['ua'], 'Chrome/131') !== false);
+check('a filtered profile keeps every required key', count(GLPE_Vb_Sandbox::profile()) === 9);
+
+// 26c. request profile application (the visitor's own signals never ride on)
+$hdr26 = [
+    'accept-language' => 'fa-IR,fa;q=0.9',
+    'sec-ch-ua-mobile' => '?1',
+    'sec-ch-ua-platform' => '"Windows"',
+    'sec-ch-ua-arch' => '"x86"',
+    'user-agent' => 'VisitorOwnUA/1.0',
+    'accept' => 'text/html',
+];
+GLPE_Vb_Sandbox::applyRequestProfile($hdr26);
+check('visitor user agent replaced by the profile identity', $hdr26['user-agent'] === $prof26['ua']);
+check('visitor locale replaced by the profile locale', $hdr26['accept-language'] === 'en-US,en;q=0.9');
+$secChLeft = 0;
+foreach ($hdr26 as $k26 => $v26) { if (strpos($k26, 'sec-ch-') === 0) $secChLeft++; }
+check('every client-hint signal dropped', $secChLeft === 0);
+check('plain accept header untouched', $hdr26['accept'] === 'text/html');
+
+// 26d. gateway URL shape
+$gw26 = GLPE_Vb_Sandbox::gatewayUrl('https://ex.test/page');
+check('sandbox gateway carries token + vs flag', strpos($gw26, '_glpe=1') !== false && strpos($gw26, 'l=') !== false && strpos($gw26, 'vs=1') !== false && strpos($gw26, 'site.test') !== false);
+check('gateway destination stays opaque', strpos($gw26, 'ex.test') === false && GLPE_Codec::decode(preg_replace('/.*l=([A-Za-z0-9_-]+).*/', '$1', $gw26)) === 'https://ex.test/page');
+
+// 26e. session lifecycle (array-backed store shim)
+GLPE_Vb_Sandbox::$storeShim = [];
+$__glpe_options['glpe_vb_vbs_index'] = [];
+$mk26 = GLPE_Vb_Sandbox::create('example.com', 2000, 2000);
+check('create returns token + gateway + ttl', is_array($mk26) && isset($mk26['t'], $mk26['g'], $mk26['ttl']) && strlen($mk26['t']) === 32 && $mk26['ttl'] === 1800);
+$s26 = GLPE_Vb_Sandbox::session($mk26['t']);
+check('created session reads back with clamped dims', is_array($s26) && $s26['w'] === 1920 && $s26['h'] === 1200 && $s26['u'] === 'https://example.com');
+check('unknown session token rejected', GLPE_Vb_Sandbox::session('nope') === false);
+check('bad destination refused', GLPE_Vb_Sandbox::create('   ', 800, 600) === ['e' => 'badurl']);
+
+// cap: six live fake sessions → seventh is busy; removing one live slot and
+// adding an expired row lets create through AND reaps the dead row
+$now26 = time();
+$idx26 = [];
+for ($i26 = 0; $i26 < 6; $i26++) {
+    $fake26 = 'tok' . $i26 . str_repeat('a', 28);
+    $idx26[$fake26] = $now26 + 600;
+    GLPE_Vb_Sandbox::$storeShim[$fake26] = ['v' => ['u' => 'https://x.test/', 'w' => 800, 'h' => 600, 'exp' => $now26 + 600], 'exp' => $now26 + 600];
+}
+$__glpe_options['glpe_vb_vbs_index'] = $idx26;
+check('concurrency cap answers busy', GLPE_Vb_Sandbox::create('https://cap.test/', 800, 600) === ['e' => 'busy']);
+$gone26 = 'tok0' . str_repeat('a', 28);
+unset($idx26[$gone26], GLPE_Vb_Sandbox::$storeShim[$gone26]);
+$dead26 = 'tokd' . str_repeat('b', 28);
+$idx26[$dead26] = $now26 - 10;
+GLPE_Vb_Sandbox::$storeShim[$dead26] = ['v' => ['exp' => $now26 - 10], 'exp' => $now26 - 10];
+$__glpe_options['glpe_vb_vbs_index'] = $idx26;
+$after26 = GLPE_Vb_Sandbox::create('https://cap.test/', 800, 600);
+check('expired sessions are reaped by the prune on create', is_array($after26) && isset($after26['t']) && !isset(GLPE_Vb_Sandbox::$storeShim[$dead26]));
+check('prune also drops the expired index row', !isset($__glpe_options['glpe_vb_vbs_index'][$dead26]));
+
+// 26f. event normalization — the host genuinely processes every gesture
+$ev26 = GLPE_Vb_Sandbox::normalizeEvents([
+    ['t' => 'mm', 'x' => 99999, 'y' => 99999],
+    ['t' => 'dn', 'x' => 10, 'y' => 20, 'b' => 'weird'],
+    ['t' => 'up', 'x' => 10, 'y' => 20, 'b' => 'right'],
+    ['t' => 'wh', 'x' => 1, 'y' => 2, 'dx' => 99999, 'dy' => -99999],
+    ['t' => 'kd', 'key' => str_repeat('k', 60), 'code' => 'KeyK', 'vk' => 75, 'mods' => 99],
+    ['t' => 'tx', 'v' => str_repeat('t', 3000)],
+    ['t' => 'zz', 'x' => 1],
+    'not-even-an-array',
+], 800, 600);
+check('movement clamped into the sandbox frame', $ev26[0] === ['t' => 'mm', 'x' => 799, 'y' => 599]);
+check('unknown button normalized to left', $ev26[1]['b'] === 'left' && $ev26[2]['b'] === 'right');
+check('wheel deltas clamped', $ev26[3]['dx'] === 5000 && $ev26[3]['dy'] === -5000);
+check('key fields capped to 32 chars', strlen($ev26[4]['key']) === 32 && $ev26[4]['vk'] === 75 && $ev26[4]['mods'] === 15);
+check('pasted text capped at 2000', strlen($ev26[5]['v']) === 2000);
+check('unknown event shapes dropped', count($ev26) === 6);
+$many26 = [];
+for ($i26 = 0; $i26 < 60; $i26++) { $many26[] = ['t' => 'mm', 'x' => 1, 'y' => 1]; }
+check('batch capped at 40 events per round trip', count(GLPE_Vb_Sandbox::normalizeEvents($many26, 800, 600)) === 40);
+check('non-array input answers empty', GLPE_Vb_Sandbox::normalizeEvents('junk', 800, 600) === []);
+
+// 26g. endpoint behavior through handleMode (opaque 'p' in, opaque 'd' out)
+GLPE_Vb_Sandbox::$storeShim = [];
+$__glpe_options['glpe_vb_vbs_index'] = [];
+$_POST['p'] = GLPE_Codec::encode(wp_json_encode(['u' => 'openme.test', 'w' => 1024, 'h' => 768]));
+GLPE_Vb_Sandbox::handleMode('vb_open');
+$r26 = $GLOBALS['__glpe_vbs_response'];
+check('open endpoint answers ok with opaque payload', is_array($r26) && $r26['ok'] === 1 && isset($r26['d']) && GLPE_Codec::decodeData($r26['d']) !== '');
+$d26 = json_decode(GLPE_Codec::decodeData($r26['d']), true);
+check('opened session carries a fresh gateway', is_array($d26) && isset($d26['t'], $d26['g']) && strpos($d26['g'], 'vs=1') !== false);
+$tok26 = $d26['t'];
+check('open wrote the session into the store', isset(GLPE_Vb_Sandbox::$storeShim[$tok26]));
+
+$_POST['p'] = GLPE_Codec::encode(wp_json_encode(['t' => $tok26, 'ev' => [
+    ['t' => 'mm', 'x' => 4000, 'y' => 3000],
+    ['t' => 'tx', 'v' => 'سلام'],
+    ['t' => 'nope'],
+]]));
+GLPE_Vb_Sandbox::handleMode('vb_in');
+$r26 = $GLOBALS['__glpe_vbs_response'];
+$d26 = json_decode(GLPE_Codec::decodeData($r26['d']), true);
+check('input round trip echoes the normalized batch', is_array($d26) && count($d26['ev']) === 2 && $d26['ev'][0]['x'] === 1023 && $d26['ev'][0]['y'] === 767);
+check('input round trip counts processed gestures', isset($d26['ct']) && $d26['ct'] === 2);
+
+$_POST['p'] = GLPE_Codec::encode(wp_json_encode(['t' => $tok26, 'u' => 'https://nav.test/x']));
+GLPE_Vb_Sandbox::handleMode('vb_nav');
+$d26 = json_decode(GLPE_Codec::decodeData($GLOBALS['__glpe_vbs_response']['d']), true);
+check('nav endpoint returns the next gateway', isset($d26['g']) && strpos($d26['g'], 'vs=1') !== false);
+check('nav updates the session destination', GLPE_Vb_Sandbox::$storeShim[$tok26]['v']['u'] === 'https://nav.test/x');
+
+GLPE_Vb_Sandbox::handleMode('vb_beat');
+$d26 = json_decode(GLPE_Codec::decodeData($GLOBALS['__glpe_vbs_response']['d']), true);
+check('heartbeat extends the session life', isset($d26['ttl']) && $d26['ttl'] === 1800);
+
+$_POST['p'] = GLPE_Codec::encode(wp_json_encode(['t' => $tok26]));
+GLPE_Vb_Sandbox::handleMode('vb_close');
+check('close removes the session store entry', !isset(GLPE_Vb_Sandbox::$storeShim[$tok26]));
+check('close prunes the index row', !isset($__glpe_options['glpe_vb_vbs_index'][$tok26]));
+
+$_POST['p'] = GLPE_Codec::encode(wp_json_encode(['t' => 'ghost' . str_repeat('z', 28), 'ev' => []]));
+GLPE_Vb_Sandbox::handleMode('vb_in');
+$d26 = json_decode(GLPE_Codec::decodeData($GLOBALS['__glpe_vbs_response']['d']), true);
+check('input on a dead session answers expired', isset($d26['e']) && $d26['e'] === 'expired');
+unset($_POST['p']);
+GLPE_Vb_Sandbox::$storeShim = null;
+
+// 26h. server-side source wiring
+check('dispatcher routes the sandbox endpoints', strpos($mainSrc26, 'vb_(open|in|nav|beat|close)') !== false && strpos($mainSrc26, 'GLPE_Vb_Sandbox::handleMode') !== false);
+check('vs joins the reserved gateway fields', strpos($mainSrc26, "'tp', 'vs', 'mode'") !== false);
+check('sandbox engine constructed with its own jar', strpos($mainSrc26, 'GLPE_Vb_Sandbox::JAR_SUFFIX') !== false);
+check('vs requests lose the floating toolbar and gain the profile', strpos($mainSrc26, "\$options['showToolbar'] = false;") !== false && strpos($mainSrc26, "\$options['vsProfile'] = GLPE_Vb_Sandbox::profile()") !== false);
+check('sandbox launcher card renders with its own script', strpos($mainSrc26, 'glpe-vbs-open') !== false && strpos($mainSrc26, 'window.GLPE_VBS') !== false && strpos($mainSrc26, 'includes/vb-sandbox.js') !== false);
+check('launcher copy is honest about the free-hosting engine', strpos($mainSrc26, 'موتور جعبه‌ای — بدون نیاز به هیچ نرم‌افزاری روی سرور (مناسب هاست رایگان)') !== false);
+check('engine choice setting exists with a sanitizer', strpos($mainSrc26, 'glpe_vb_engine') !== false && strpos($mainSrc26, 'sanitizeVbEngine') !== false);
+check('status card shows both engines', strpos($mainSrc26, 'sandbox engine') !== false && strpos($mainSrc26, 'active engine') !== false);
+check('engine ctor forwards the jar suffix', strpos($engineSrc26, 'new GLPE_Cookies($isTempCookies, $jarSuffix)') !== false);
+check('makeViewUrl keeps the vs flag on child links', strpos($engineSrc26, "if (!empty(\$options['vsProfile']))     \$viewUrl .= '&vs=1';") !== false);
+check('ctx config carries the full identity profile', strpos($engineSrc26, "\$ctxConfig['vs'] = 1") !== false && strpos($engineSrc26, "\$ctxConfig['ua']  = \$options['vsProfile']['ua']") !== false && strpos($engineSrc26, "\$ctxConfig['tz']  = \$options['vsProfile']['tz']") !== false);
+check('cookie jar accepts a key suffix', strpos($cookiesSrc26, "'_glpe_cookies' . \$sessionKeySuffix") !== false);
+
+// 26i. engine behavior with the vs profile through rewriteHtml
+$eng26 = new GLPE_Engine('https://site.test/?_glpe=1', false, '_vbs');
+$html26 = '<html><head><title>t</title></head><body><a href="https://ex.test/page">go</a></body></html>';
+$rw26 = $eng26->rewriteHtml($html26, 'https://ex.test/', ['showToolbar' => false, 'vsProfile' => GLPE_Vb_Sandbox::profile()]);
+check('sandbox pages boot with the profile in their context', strpos($rw26, '"vs":1') !== false && strpos($rw26, 'Chrome') !== false && strpos($rw26, '131.0.0.0') !== false && strpos($rw26, '"tz":"UTC"') !== false);
+check('sandbox page links keep the vs flag', strpos($rw26, '&amp;vs=1') !== false || strpos($rw26, '&vs=1') !== false);
+check('no floating toolbar inside the sandbox frame', strpos($rw26, '<div id="__glpe_bar"') === false);
+
+// 26j. jar isolation — the temporary environment keeps its own records
+$jarA = new GLPE_Cookies(false);
+$jarA->addCookieFromHeader('normal=1; Path=/', 'https://jar.test/');
+$jarB = new GLPE_Cookies(false, '_vbs');
+$jarB->addCookieFromHeader('boxed=1; Path=/', 'https://jar.test/');
+check('default jar untouched by sandbox records', strpos($jarA->getCookieHeader('https://jar.test/'), 'normal=1') !== false && strpos($jarA->getCookieHeader('https://jar.test/'), 'boxed=1') === false);
+check('sandbox jar untouched by normal records', strpos($jarB->getCookieHeader('https://jar.test/'), 'boxed=1') !== false && strpos($jarB->getCookieHeader('https://jar.test/'), 'normal=1') === false);
+
+// 26k. the visitor-side sandbox surface script
+check('surface reads the server-injected GLPE_VBS config', strpos($vbsClient, 'window.GLPE_VBS') !== false);
+check('locked frame carries the sandbox attribute without popups', strpos($vbsClient, "setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms')") !== false);
+check('gestures travel to the host through the five endpoints', strpos($vbsClient, "'vb_open'") !== false && strpos($vbsClient, "'vb_in'") !== false && strpos($vbsClient, "'vb_nav'") !== false && strpos($vbsClient, "'vb_beat'") !== false && strpos($vbsClient, "'vb_close'") !== false);
+check('requests carry one opaque p token', strpos($vbsClient, "body = 'p=' + encodeURIComponent(enc(JSON.stringify(docObj))") !== false);
+check('virtual cursor drawn, OS cursor hidden on the capture layer', strpos($vbsClient, 'positionCursor') !== false && strpos($vbsClient, 'cursor:none') !== false);
+check('replay synthesizes real events into the frame', strpos($vbsClient, 'new w.MouseEvent(') !== false && strpos($vbsClient, 'new w.KeyboardEvent(') !== false && strpos($vbsClient, 'elementFromPoint') !== false);
+check('text insertion uses the frame-realm native setter', strpos($vbsClient, "Object.getOwnPropertyDescriptor(proto, 'value').set") !== false && strpos($vbsClient, "new w.Event('input', { bubbles: true })") !== false);
+check('wheel replay scrolls the container under the point', strpos($vbsClient, 'scrollableAt') !== false && strpos($vbsClient, 'sc.scrollTop += ev.dy') !== false);
+check('input round trip is applied only on the host echo', strpos($vbsClient, "case 'vb_in'") === false && strpos($vbsClient, "post('vb_in', { t: sess.t, ev: batch }") !== false && strpos($vbsClient, 'for (var i2 = 0; i2 < evs.length; i2++) applyEvent(evs[i2]);') !== false);
+check('moves coalesce and pacing adapts to host latency', strpos($vbsClient, 'pendingMove = ev;') !== false && strpos($vbsClient, 'lastRtt > 600 ? 300') !== false);
+check('paste and printable keys ride the text path', strpos($vbsClient, "t: 'tx'") !== false && strpos($vbsClient, 'insertText(ev.key)') !== false);
+check('pixel mode rasterizes the sandbox to a canvas', strpos($vbsClient, 'XMLSerializer') !== false && strpos($vbsClient, 'foreignObject') !== false && strpos($vbsClient, 'drawImage') !== false && strpos($vbsClient, 'drawCursorOnCanvas') !== false);
+check('pixel mode keeps the frame alive beneath the picture', strpos($vbsClient, 'COVERS') !== false && strpos($vbsClient, 'visibility') === false);
+check('heartbeat keeps the session alive', strpos($vbsClient, '120000') !== false);
+check('teardown beacons the session away', strpos($vbsClient, "mode=vb_close") !== false && strpos($vbsClient, 'beforeunload') !== false);
+check('surface status strings are Persian', strpos($vbsClient, 'نشست فعال — نمایشگر مجازی (موتور جعبه‌ای)') !== false && strpos($vbsClient, 'حالت پیکسل — فقط تصویر صفحه نمایش داده می‌شود') !== false);
+check('address bar decodes the frame token locally', strpos($vbsClient, '[?&]l=([A-Za-z0-9_-]+)') !== false);
+
+// 26l. client companion vs-mode markers
+check('gateway/history builders keep the vs flag', substr_count($clientSrc26, "if (ctx.vs) flags += '&vs=1';") >= 1 && strpos($clientSrc26, "if (ctx.vs) ours += '&vs=1';") !== false);
+check('beacon rides the sandbox jar when sent from the box', strpos($clientSrc26, "if (ctx.vs) syncUrl += '&vs=1';") !== false);
+check('navigator masked to the host profile', strpos($clientSrc26, "maskNav('language', loc)") !== false && strpos($clientSrc26, "maskNav('userAgent', ua)") !== false && strpos($clientSrc26, "maskNav('hardwareConcurrency', ctx.hc)") !== false);
+check('timezone and clock agree with the profile', strpos($clientSrc26, 'getTimezoneOffset = function ()') !== false && strpos($clientSrc26, 'r.timeZone = tz;') !== false);
+check('geolocation answers a denied permission', strpos($clientSrc26, "code: 1, message: 'denied'") !== false);
+check('frame lockdown freezes parent/top and closes window.open', strpos($clientSrc26, "Object.defineProperty(window, 'parent', { get: function () { return window; }, configurable: false })") !== false && strpos($clientSrc26, 'window.open = function () { return null; };') !== false);
+check('document.cookie becomes a virtual jar in the box', strpos($clientSrc26, 'if (ctx.vs) return vsJar;') !== false && strpos($clientSrc26, 'vsJar = kept.join(\'; \');') !== false);
+
+// 26m. uninstall + release markers
+$uninstall26 = (string)file_get_contents($root . '/glpe-viewer/uninstall.php');
+check('uninstall reaps sandbox sessions and engine options', strpos($uninstall26, 'glpe_vb_engine') !== false && strpos($uninstall26, "delete_transient('glpe_vbs_'") !== false && strpos($uninstall26, 'glpe_vb_vbs_index') !== false && strpos($uninstall26, 'glpe_vb_key') !== false);
+check('main file version bumped to 7.1.0', substr_count($mainSrc26, '7.1.0') >= 2);
+$readme26 = (string)file_get_contents($root . '/glpe-viewer/readme.txt');
+check('readme stable tag is 7.1.0', strpos($readme26, 'Stable tag: 7.1.0') !== false);
+check('readme carries the 7.1.0 changelog entry', strpos($readme26, '= 7.1.0 =') !== false && strpos($readme26, 'موتور جعبه‌ای') !== false);
+
+// 26n. everything the shipped zip needs stays scanner-clean
+$vbsShip = [$vbsSrc, $vbsClient, $clientSrc26, $mainSrc26, $engineSrc26, $cookiesSrc26, $uninstall26];
+$vbsHits = 0;
+foreach ($vbsShip as $src26) { if (preg_match('#' . $guardPattern . '#i', $src26)) { $vbsHits++; } }
+check('sandbox engine files carry no scanner-flagged strings', $vbsHits === 0);
 
 echo "\n== RESULT: $pass passed, $fail failed ==\n";
 exit($fail > 0 ? 1 : 0);

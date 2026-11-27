@@ -50,6 +50,134 @@
   // The destination reference arrives as an opaque token — never readable.
   var currentTargetUrl = cipherDecode(ctx.u) || window.location.href;
 
+  // =====================================================================
+  // Virtual-browser sandbox mode (ctx.vs): this page lives inside the
+  // locked temporary environment of the sandbox engine. Before ANY
+  // destination script boots, the environment gets (a) a host-consistent
+  // identity — the profile the host used on the wire is mirrored into
+  // navigator/Intl/screen/geolocation, so the JavaScript that runs here
+  // measures the profile, never the visitor's own locale, timezone,
+  // hardware or position signals; and (b) a hard frame lockdown — the
+  // environment's window never reaches the surface page, opens no
+  // windows, and its document.cookie is a virtual jar that never exposes
+  // this site's own records.
+  // =====================================================================
+  var vsJar = '';
+  (function virtualEnvironment() {
+    if (!ctx.vs) return;
+
+    // (a) host-consistent identity ----------------------------------
+    var loc = ctx.loc || 'en-US';
+    var lng = ctx.lng || 'en';
+    var tz = ctx.tz || 'UTC';
+    var ua = ctx.ua || '';
+    var plat = ctx.plat || 'Win32';
+
+    function maskNav(prop, value) {
+      try {
+        Object.defineProperty(window.navigator, prop, {
+          get: function () { return value; },
+          configurable: true
+        });
+      } catch (e) {}
+    }
+    maskNav('language', loc);
+    maskNav('languages', [loc, lng]);
+    if (ua) maskNav('userAgent', ua);
+    maskNav('platform', plat);
+    if (ctx.hc) maskNav('hardwareConcurrency', ctx.hc);
+    if (ctx.dm) maskNav('deviceMemory', ctx.dm);
+
+    try {
+      Object.defineProperty(window.screen, 'width', { get: function () { return ctx.scrw || 1280; }, configurable: true });
+      Object.defineProperty(window.screen, 'height', { get: function () { return ctx.scrh || 800; }, configurable: true });
+      Object.defineProperty(window.screen, 'availWidth', { get: function () { return ctx.scrw || 1280; }, configurable: true });
+      Object.defineProperty(window.screen, 'availHeight', { get: function () { return (ctx.scrh || 800) - 40; }, configurable: true });
+    } catch (e) {}
+
+    // Position requests fail like a denied permission — the environment
+    // has no location, which is exactly the truth of the arrangement.
+    try {
+      var geoError = function (ok, err) {
+        setTimeout(function () {
+          if (err) err({ code: 1, message: 'denied', PERMISSION_DENIED: 1 });
+        }, 0);
+        return 0;
+      };
+      Object.defineProperty(window.navigator, 'geolocation', {
+        get: function () {
+          return {
+            getCurrentPosition: geoError,
+            watchPosition: geoError,
+            clearWatch: function () {}
+          };
+        },
+        configurable: true
+      });
+    } catch (e) {}
+
+    // Timezone: both the formatter input and the resolved answer report the
+    // profile zone, and Date offsets agree with it, so scripts measuring
+    // the clock see the profile — never the visitor's own zone.
+    try {
+      if (window.Intl && Intl.DateTimeFormat) {
+        var OrigDTF = Intl.DateTimeFormat;
+        var PatchedDTF = function (locales, options) {
+          options = Object.assign({}, options);
+          if (options.timeZone === undefined) options.timeZone = tz;
+          return new OrigDTF(locales, options);
+        };
+        PatchedDTF.prototype = Object.create(OrigDTF.prototype);
+        PatchedDTF.supportedLocalesOf = function () {
+          return OrigDTF.supportedLocalesOf.apply(OrigDTF, arguments);
+        };
+        try { Intl.DateTimeFormat = PatchedDTF; } catch (e) {}
+        var origResolved = OrigDTF.prototype.resolvedOptions;
+        OrigDTF.prototype.resolvedOptions = function () {
+          var r = origResolved.call(this);
+          try { r.timeZone = tz; } catch (e) {}
+          return r;
+        };
+
+        var tzOffset = function (date) {
+          try {
+            var parts = new OrigDTF('en-US', {
+              timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+              hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+            }).formatToParts(date);
+            var map = {};
+            for (var i = 0; i < parts.length; i++) map[parts[i].type] = parts[i].value;
+            var asUTC = Date.UTC(map.year, map.month - 1, map.day, map.hour, map.minute, map.second);
+            return Math.round((date.getTime() - asUTC) / 60000);
+          } catch (e) {
+            return 0;
+          }
+        };
+        Date.prototype.getTimezoneOffset = function () {
+          return tzOffset(this);
+        };
+      }
+    } catch (e) {}
+
+    // (b) frame lockdown ---------------------------------------------
+    // The sandbox attribute on the surface frame already forbids top
+    // navigation and popups; these belt-and-suspenders guards make the
+    // environment's own window agree: parent/top resolve to itself,
+    // frameElement is absent, and window.open opens nothing.
+    try {
+      Object.defineProperty(window, 'parent', { get: function () { return window; }, configurable: false });
+      Object.defineProperty(window, 'top', { get: function () { return window; }, configurable: false });
+      Object.defineProperty(window, 'frameElement', { get: function () { return null; }, configurable: false });
+    } catch (e) {}
+    window.open = function () { return null; };
+
+    // document.cookie becomes a virtual jar: reads return only what the
+    // environment's own scripts stored, writes stay local — this site's
+    // own records are never exposed to the destination. (The wrapper below
+    // keeps the host-side jar in sync through the beacon.)
+    vsJar = '';
+  })();
+
   // Inside a proxied document, same-origin references are usually TARGET
   // references that the browser (or the Request constructor) already resolved
   // against OUR origin — e.g. new Request('/youtubei/v1/guide') becomes
@@ -99,6 +227,9 @@
     if (ctx.st) flags += '&nt=1';
     if (ctx.tb) flags += '&nb=1';
     if (ctx.mb) flags += '&mb=1';
+    // Virtual-browser sandbox: every reference keeps riding the isolated
+    // jar and the host-consistent identity of the temporary environment.
+    if (ctx.vs) flags += '&vs=1';
     return viewScript + sep + 'l=' + cipherEncode(destHref) + flags;
   }
 
@@ -117,6 +248,7 @@
       if (ctx.st) ours += '&nt=1';
       if (ctx.tb) ours += '&nb=1';
       if (ctx.mb) ours += '&mb=1';
+      if (ctx.vs) ours += '&vs=1';
       var destQ = u.search.replace(/^\?/, '');
       var search = destQ ? destQ + '&' + ours : ours;
       return window.location.origin + u.pathname + '?' + search + u.hash;
@@ -532,11 +664,17 @@
       var originalCookieSet = cookieDesc.set;
       Object.defineProperty(document, 'cookie', {
         get: function() {
+          // Sandbox environment: reads surface only the virtual jar — the
+          // site's own records never reach the destination's scripts.
+          if (ctx.vs) return vsJar;
           return originalCookieGet ? originalCookieGet.call(this) : '';
         },
         set: function(val) {
           var sep = viewScript.indexOf('?') !== -1 ? '&' : '?';
           var syncUrl = viewScript + sep + 'mode=sync';
+          // The beacon keeps riding the sandbox's own jar when it came from
+          // the temporary environment.
+          if (ctx.vs) syncUrl += '&vs=1';
           var encUrl = cipherEncode(currentTargetUrl);
           var encVal = cipherEncode(String(val));
           if (navigator.sendBeacon) {
@@ -549,6 +687,22 @@
             xhr.open('POST', syncUrl, true);
             xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
             xhr.send('u=' + encodeURIComponent(encUrl) + '&c=' + encodeURIComponent(encVal));
+          }
+          if (ctx.vs) {
+            // Virtual jar: keep the environment-local view coherent (last
+            // assignment of a name wins; a bare expiry clears the name).
+            try {
+              var pair = String(val).split(';')[0];
+              var eq = pair.indexOf('=');
+              var name = eq > -1 ? pair.slice(0, eq).trim() : pair.trim();
+              var kept = name === '' ? [] : String(vsJar).split('; ').filter(function (kv) {
+                return kv.split('=')[0].trim() !== name;
+              });
+              var hasValue = eq > -1 && pair.slice(eq + 1).trim() !== '';
+              if (hasValue) kept.push(pair.trim());
+              vsJar = kept.join('; ');
+            } catch (e) {}
+            return;
           }
           if (originalCookieSet) {
             originalCookieSet.call(this, val);

@@ -37,7 +37,25 @@ $glpe_options = [
     'glpe_diag_enabled',
     'glpe_diag_key',
     'glpe_diag_enabled_at',
+    'glpe_vb_key',
+    'glpe_vb_port',
+    'glpe_vb_endpoint',
+    'glpe_vb_engine',
+    'glpe_vb_vbs_index',
 ];
+
+// Virtual browser sandbox sessions: reap the live temporary environments
+// (their transient records) alongside the options themselves.
+$glpe_vbs_index = get_option('glpe_vb_vbs_index');
+if (is_array($glpe_vbs_index)) {
+    foreach (array_keys($glpe_vbs_index) as $glpe_vbs_token) {
+        if (is_string($glpe_vbs_token) && $glpe_vbs_token !== '') {
+            delete_transient('glpe_vbs_' . $glpe_vbs_token);
+        }
+    }
+}
+// Sandbox jar records inside the current session are gone with the session
+// itself — nothing more to do here.
 
 foreach ($glpe_options as $glpe_option) {
     delete_option($glpe_option);
