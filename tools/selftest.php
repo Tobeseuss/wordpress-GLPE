@@ -1789,7 +1789,7 @@ check('start notices wired', strpos($mainSrc25, 'vb-started') !== false && strpo
 // historical 7.0.0 changelog entry stays below)
 check('main file still carries the 7.0.0 heritage marker', substr_count($mainSrc25, '7.0.0') >= 1);
 $readme25 = $readme24;
-check('readme stable tag follows the current release (7.2.0)', strpos($readme25, 'Stable tag: 7.2.0') !== false);
+check('readme stable tag follows the current release (7.3.0)', strpos($readme25, 'Stable tag: 7.3.0') !== false);
 check('readme carries the 7.0.0 changelog entry', strpos($readme25, '= 7.0.0 =') !== false && strpos($readme25, 'مرورگر مجازی') !== false);
 
 // 25i. everything the shipped zip needs stays scanner-clean
@@ -1817,6 +1817,7 @@ if (!function_exists('wp_send_json')) {
 }
 
 require $root . '/glpe-viewer/includes/VbSandbox.php';
+require $root . '/glpe-viewer/includes/ResCache.php';
 
 $vbsSrc = (string)file_get_contents($root . '/glpe-viewer/includes/VbSandbox.php');
 $vbsClient = (string)file_get_contents($root . '/glpe-viewer/includes/vb-sandbox.js');
@@ -2034,7 +2035,7 @@ $uninstall26 = (string)file_get_contents($root . '/glpe-viewer/uninstall.php');
 check('uninstall reaps sandbox sessions and engine options', strpos($uninstall26, 'glpe_vb_engine') !== false && strpos($uninstall26, "delete_transient('glpe_vbs_'") !== false && strpos($uninstall26, 'glpe_vb_vbs_index') !== false && strpos($uninstall26, 'glpe_vb_key') !== false);
 check('main file version bumped to 7.1.0', substr_count($mainSrc26, '7.1.0') >= 2);
 $readme26 = (string)file_get_contents($root . '/glpe-viewer/readme.txt');
-check('readme stable tag is 7.2.0', strpos($readme26, 'Stable tag: 7.2.0') !== false);
+check('readme stable tag is 7.3.0', strpos($readme26, 'Stable tag: 7.3.0') !== false);
 check('readme carries the 7.1.0 changelog entry', strpos($readme26, '= 7.1.0 =') !== false && strpos($readme26, 'موتور جعبه‌ای') !== false);
 
 // 26n. everything the shipped zip needs stays scanner-clean
@@ -2110,18 +2111,127 @@ check('settings card renders the path-entry status row', strpos($mainSrc26, 'ren
 // 27h. uninstall + version
 $uninstall27 = (string)file_get_contents($root . '/glpe-viewer/uninstall.php');
 check('uninstall reaps the path-entry option', strpos($uninstall27, "'glpe_path_entry'") !== false);
-check('main file version bumped to 7.2.0', substr_count($mainSrc26, '7.2.0') >= 2);
 $readme27 = (string)file_get_contents($root . '/glpe-viewer/readme.txt');
-check('readme stable tag is 7.2.0', strpos($readme27, 'Stable tag: 7.2.0') !== false);
-check('readme carries the 7.2.0 changelog entry', strpos($readme27, '= 7.2.0 =') !== false);
 $readmeMd27 = (string)file_get_contents($root . '/README.md');
-check('README badge and feature bullet updated', strpos($readmeMd27, 'version-7.2.0-blue') !== false && strpos($readmeMd27, 'v7.2.0') !== false);
 
 // 27i. the new surface stays scanner-clean
 $ship27 = [$clientSrc26, $mainSrc26, $engineSrc26, $uninstall27];
 $hits27 = 0;
 foreach ($ship27 as $src27) { if (preg_match('#' . $guardPattern . '#i', $src27)) { $hits27++; } }
 check('path-entry surface carries no scanner-flagged strings', $hits27 === 0);
+
+// =====================================================================
+// Section 28 — subresource artifact cache (v7.3.0)
+// =====================================================================
+
+check('rescache class loads', class_exists('GLPE_ResCache'));
+$resSrc28 = (string)file_get_contents($root . '/glpe-viewer/includes/ResCache.php');
+$mainSrc28 = (string)file_get_contents($root . '/glpe-viewer/glpe-viewer.php');
+$engineSrc28 = (string)file_get_contents($root . '/glpe-viewer/includes/Engine.php');
+$uninstall28 = (string)file_get_contents($root . '/glpe-viewer/uninstall.php');
+
+// 28a. lifecycle + directory guards
+$rcDir28 = sys_get_temp_dir() . '/glpe-selftest-rc-' . getmypid();
+GLPE_ResCache::$testDir = $rcDir28;
+@mkdir($rcDir28, 0755, true);
+check('cache enabled by default', GLPE_ResCache::enabled() === true);
+update_option('glpe_res_cache', '0');
+check('option disables the cache', GLPE_ResCache::enabled() === false);
+update_option('glpe_res_cache', '1');
+check('option re-enables the cache', GLPE_ResCache::enabled() === true);
+
+// 28b. keys are deterministic and fold in every shaping input
+$k28a = GLPE_ResCache::keyFor('https://www.youtube.com/s/_/js/k=abc/m=base', ['accept' => '*/*', 'accept-language' => 'en-US,en;q=0.9'], ['removeScripts' => 0]);
+$k28b = GLPE_ResCache::keyFor('https://www.youtube.com/s/_/js/k=abc/m=base', ['accept' => '*/*', 'accept-language' => 'en-US,en;q=0.9'], ['removeScripts' => 0]);
+check('identical inputs collide into one key', $k28a === $k28b && preg_match('/^[a-f0-9]{64}$/', $k28a) === 1);
+$k28c = GLPE_ResCache::keyFor('https://www.youtube.com/s/_/js/k=abc/m=base', ['accept' => '*/*', 'accept-language' => 'de-DE,de;q=0.9'], ['removeScripts' => 0]);
+check('accept-language varies the key', $k28c !== $k28a);
+$k28d = GLPE_ResCache::keyFor('https://www.youtube.com/s/_/js/k=abc/m=base', ['accept' => '*/*', 'accept-language' => 'en-US,en;q=0.9'], ['removeScripts' => 1]);
+check('display options vary the key', $k28d !== $k28a);
+$k28e = GLPE_ResCache::keyFor('https://www.youtube.com/other.js', ['accept' => '*/*', 'accept-language' => 'en-US,en;q=0.9'], ['removeScripts' => 0]);
+check('destination URL varies the key', $k28e !== $k28a);
+
+// 28c. store/get roundtrip on the static class
+$res28 = [
+    'status'      => 200,
+    'contentType' => 'text/javascript; charset=utf-8',
+    'body'        => 'var x=1; /*stub*/',
+    'finalUrl'    => 'https://www.youtube.com/s/_/js/k=abc/m=base',
+    'headers'     => ['Content-Type' => ['text/javascript; charset=utf-8'], 'Cache-Control' => ['public, max-age=21600']],
+    'setCookie'   => false,
+];
+check('static js artifact is stored', GLPE_ResCache::maybeStore($k28a, $res28, 'var x=1; /*stub*/') === true);
+$hit28 = GLPE_ResCache::get($k28a);
+check('cache hit returns the exact body', is_array($hit28) && $hit28['body'] === 'var x=1; /*stub*/');
+check('cache hit carries status + content type', is_array($hit28) && (int)$hit28['status'] === 200 && strpos($hit28['contentType'], 'text/javascript') === 0);
+check('cache hit is flagged as cached', is_array($hit28) && !empty($hit28['fromCache']));
+check('cache miss on an unknown key', GLPE_ResCache::get(str_repeat('a', 64)) === null);
+check('malformed keys are refused', GLPE_ResCache::get('not-a-hash') === null);
+
+// 28d. the stored file itself: guard + zero readable destinations
+$file28 = $rcDir28 . '/' . $k28a . '.php';
+check('the entry file exists under its hash name', file_exists($file28));
+$blob28 = (string)file_get_contents($file28);
+check('the entry file starts with the PHP exit guard', strpos($blob28, '<?php exit; ?>') === 0);
+check('the entry never stores the readable destination', strpos($blob28, 'youtube.com') === false);
+check('the entry never stores cookies or visitor data', strpos($blob28, 'setCookie') === false && strpos($blob28, 'finalUrl') === false);
+$meta28 = json_decode(substr($blob28, strlen(GLPE_ResCache::FILE_GUARD), (int)strpos(substr($blob28, strlen(GLPE_ResCache::FILE_GUARD)), "\n")), true);
+check('meta carries only opaque bookkeeping', is_array($meta28) && isset($meta28['v'], $meta28['sc'], $meta28['ct'], $meta28['exp'], $meta28['h']));
+check('upstream max-age clamps at the TTL ceiling', is_array($meta28) && (int)$meta28['exp'] <= time() + GLPE_ResCache::TTL_MAX && (int)$meta28['exp'] > time() + GLPE_ResCache::TTL_MAX - 5);
+
+// 28e. verdicts — what may never be cached
+$v28 = function ($over, $body = 'x') use ($res28) {
+    $r = array_merge($res28, $over);
+    return GLPE_ResCache::maybeStore(GLPE_ResCache::keyFor('https://k28.example/' . uniqid('v'), [], []), $r, $body);
+};
+check('HTML documents are never cached', $v28(['contentType' => 'text/html; charset=utf-8']) === false);
+check('API JSON is never cached', $v28(['contentType' => 'application/json']) === false);
+check('non-200 responses are never cached', $v28(['status' => 404]) === false);
+check('Set-Cookie responses are never cached', $v28(['setCookie' => true]) === false);
+check('no-store responses are never cached', $v28(['headers' => ['Cache-Control' => ['no-store']]]) === false);
+check('private responses are never cached', $v28(['headers' => ['Cache-Control' => ['private']]]) === false);
+check('oversized bodies are never cached', $v28([], str_repeat('x', GLPE_ResCache::ENTRY_MAX + 1)) === false);
+check('POST-shaped results (non-GET callers) are not the cache decision here — verdicts stay verdicts', $v28(['contentType' => 'image/png']) === true);
+
+// 28f. expiry behaviour
+$expKey28 = hash('sha256', 'expiry-probe');
+@file_put_contents($rcDir28 . '/' . $expKey28 . '.php', GLPE_ResCache::FILE_GUARD . json_encode(['v' => 1, 'sc' => 200, 'ct' => 'text/css', 'h' => [], 'exp' => time() - 10]) . "\n" . 'body');
+check('expired entries miss and reap themselves', GLPE_ResCache::get($expKey28) === null && !file_exists($rcDir28 . '/' . $expKey28 . '.php'));
+
+// 28g. purge + stats + trim run clean
+$stats28 = GLPE_ResCache::stats();
+check('stats count the stored entries', (int)$stats28['files'] >= 1 && (int)$stats28['bytes'] > 0);
+check('trim runs without touching live entries', GLPE_ResCache::trim() === null && file_exists($file28));
+check('purge empties the store', GLPE_ResCache::purge() === true && count((array)glob($rcDir28 . '/*.php')) === 0);
+check('purged keys miss afterwards', GLPE_ResCache::get($k28a) === null);
+GLPE_ResCache::$testDir = null;
+@rmdir($rcDir28);
+
+// 28h. engine wiring — Set-Cookie detection on both transports
+check('engine reports Set-Cookie presence (WP API path)', substr_count($engineSrc28, "'setCookie'   =>") === 2);
+check('both fetch paths track the flag', substr_count($engineSrc28, '$hadSetCookie') >= 4);
+
+// 28i. dispatcher wiring
+check('dispatcher consults the cache before fetching', strpos($mainSrc28, 'GLPE_ResCache::keyFor') !== false && strpos($mainSrc28, 'GLPE_ResCache::get') !== false);
+check('dispatcher stores the final artifact after the rewrite', strpos($mainSrc28, 'GLPE_ResCache::maybeStore') !== false);
+check('cached artifacts skip the rewriting passes', strpos($mainSrc28, '!$fromCache && stripos($contentType') !== false);
+check('guarded include keeps a missing module non-fatal', strpos($mainSrc28, "includes/ResCache.php") !== false);
+check('admin purge action is registered', strpos($mainSrc28, 'admin_post_glpe_res_purge') !== false);
+check('settings toggle registered + card rendered', strpos($mainSrc28, "'glpe_res_cache'") !== false && strpos($mainSrc28, 'renderResCacheCard') !== false);
+check('purge notice wired', strpos($mainSrc28, 'res-purged') !== false);
+
+// 28j. uninstall + version markers
+check('uninstall reaps the cache option and directory', strpos($uninstall28, "'glpe_res_cache'") !== false && strpos($uninstall28, 'glpe-res-cache') !== false);
+check('main file version bumped to 7.3.0', substr_count($mainSrc28, '7.3.0') >= 2);
+check('readme stable tag is 7.3.0', strpos($readme27, 'Stable tag: 7.3.0') !== false);
+check('readme carries the 7.3.0 changelog entry', strpos($readme27, '= 7.3.0 =') !== false);
+check('README badge and feature bullet updated', strpos($readmeMd27, 'version-7.3.0-blue') !== false && strpos($readmeMd27, 'v7.3.0') !== false);
+
+// 28k. the new surface stays scanner-clean
+$ship28 = [$resSrc28, $mainSrc28, $engineSrc28, $uninstall28];
+$hits28 = 0;
+foreach ($ship28 as $src28) { if (preg_match('#' . $guardPattern . '#i', $src28)) { $hits28++; } }
+check('rescache surface carries no scanner-flagged strings', $hits28 === 0);
 
 echo "\n== RESULT: $pass passed, $fail failed ==\n";
 exit($fail > 0 ? 1 : 0);

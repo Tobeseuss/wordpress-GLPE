@@ -3,7 +3,7 @@
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
  * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با کدگذاری کامل تبادلات، بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 7.2.0
+ * Version: 7.3.0
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '7.2.0');
+define('GLPE_VERSION', '7.3.0');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -103,6 +103,11 @@ if (file_exists(GLPE_DIR . 'includes/VbSandbox.php')) {
 if (file_exists(GLPE_DIR . 'includes/DiagApi.php')) {
     require_once GLPE_DIR . 'includes/DiagApi.php';
 }
+// Subresource artifact cache (v7.3.0): optional — a missing file only means
+// every subresource exchange is fetched live (v7.2.0 behavior).
+if (file_exists(GLPE_DIR . 'includes/ResCache.php')) {
+    require_once GLPE_DIR . 'includes/ResCache.php';
+}
 // Host evaluation is an admin-only surface — never loaded on front-end
 // requests (one less file that can break the visitor path).
 if (is_admin()) {
@@ -179,6 +184,9 @@ class GLPE_Plugin {
         // Virtual browser service control (v7.0.0).
         if (class_exists('GLPE_VirtualBrowser')) {
             add_action('admin_post_glpe_vb_start', ['GLPE_VirtualBrowser', 'handleStart']);
+        }
+        if (class_exists('GLPE_ResCache')) {
+            add_action('admin_post_glpe_res_purge', ['GLPE_ResCache', 'handlePurge']);
         }
         // Path-preserving gateway entry self-test (v7.2.0).
         add_action('admin_post_glpe_path_probe', [$this, 'handlePathProbe']);
@@ -530,7 +538,24 @@ class GLPE_Plugin {
                 exit;
             }
 
-            $result = $engine->executeRequest($targetUrl, $method, $postData, $customHeaders);
+            // Subresource artifact cache (v7.3.0): the buffered path is where
+            // every subresource that needs rewriting (or is simply buffered)
+            // lands after the streamers above declined it. Serve a cached
+            // final artifact when one exists — no upstream fetch, no
+            // rewriting pass, just the stored bytes. The key folds in every
+            // input that shapes both the fetch and the rewrite.
+            $resKey = null;
+            $resHit = null;
+            if ($method === 'GET' && class_exists('GLPE_ResCache') && GLPE_ResCache::enabled()) {
+                $resKey = GLPE_ResCache::keyFor($targetUrl, $customHeaders, $options);
+                $resHit = GLPE_ResCache::get($resKey);
+            }
+
+            if ($resHit !== null) {
+                $result = $resHit;
+            } else {
+                $result = $engine->executeRequest($targetUrl, $method, $postData, $customHeaders);
+            }
 
             // Fresh content on every request; allow embedding from any origin.
             header('Cache-Control: no-store, max-age=0');
@@ -570,6 +595,12 @@ class GLPE_Plugin {
 
             $body = $result['body'];
 
+            // A cached artifact is the FINAL serialized body — the rewriting
+            // passes already ran before it was stored, so replaying them
+            // would double-wrap every reference. Fresh fetches keep the
+            // full pipeline below.
+            $fromCache = !empty($result['fromCache']);
+
             // Rewrite against the address that actually served the content —
             // a redirect chain can land somewhere else than the request began,
             // and relative references must follow the final landing page.
@@ -577,7 +608,7 @@ class GLPE_Plugin {
                 ? $result['finalUrl']
                 : $targetUrl;
 
-            if (stripos($contentType, 'text/html') !== false) {
+            if (!$fromCache && stripos($contentType, 'text/html') !== false) {
                 // Megabyte-class documents (modern search results and app
                 // shells) can exceed the default PCRE backtrack budget inside
                 // the rewriting passes — raise it for this request (silently:
@@ -636,6 +667,14 @@ class GLPE_Plugin {
                 // through a script hook), so icon/start_url references must
                 // be wrapped server-side or they load around the gateway.
                 $body = $engine->rewriteJs($body, $rewriteBase, $options);
+            }
+
+            // Store the final artifact for the subresource class (v7.3.0).
+            // The full verdict — status 200, static content classes only,
+            // no Set-Cookie, upstream freshness respected — lives inside the
+            // cache module, so a refusal here is silent and cost-free.
+            if ($resKey !== null && $resHit === null) {
+                GLPE_ResCache::maybeStore($resKey, $result, $body);
             }
 
             echo $body;
@@ -1125,7 +1164,7 @@ class GLPE_Plugin {
     }
 
     public function registerSettings() {
-        $flags = ['glpe_toolbar', 'glpe_blank_title', 'glpe_no_scripts', 'glpe_no_images', 'glpe_ssl_verify', 'glpe_hub_enabled', 'glpe_ipresolve_v4'];
+        $flags = ['glpe_toolbar', 'glpe_blank_title', 'glpe_no_scripts', 'glpe_no_images', 'glpe_ssl_verify', 'glpe_hub_enabled', 'glpe_ipresolve_v4', 'glpe_res_cache'];
         foreach ($flags as $flag) {
             register_setting('glpe_group', $flag, ['sanitize_callback' => [$this, 'sanitizeFlag']]);
         }
@@ -1206,6 +1245,7 @@ class GLPE_Plugin {
                 'vb-started'     => 'سرویس مرورگر مجازی روی میزبان اجرا شد و به سلامت پاسخ می‌دهد.',
                 'vb-failed'      => 'اجرای سرویس مرورگر مجازی ممکن نشد — وضعیت دقیق در کارت «مرورگر مجازی» آمده است.',
                 'path-ok'        => 'تست مسیر موفق بود — پیشوند مسیر مقصد روی نشانی زیرمنبع‌ها فعال شد.',
+                'res-purged'    => 'کش زیرمنبع‌ها پاک شد.',
             ];
             if ($cpNotice !== '' && isset($cpNotices[$cpNotice])) {
                 echo '<div class="notice notice-success is-dismissible"><p>' . esc_html($cpNotices[$cpNotice]) . '</p></div>';
@@ -1312,6 +1352,16 @@ class GLPE_Plugin {
                             </label>
                         </td>
                     </tr>
+                    <tr>
+                        <th scope="row">کش زیرمنبع‌ها <code style="direction:ltr;">res_cache</code></th>
+                        <td>
+                            <label>
+                                <input type="hidden" name="glpe_res_cache" value="0">
+                                <input type="checkbox" name="glpe_res_cache" value="1" <?php checked(get_option('glpe_res_cache', '1'), '1'); ?> />
+                                نگه‌داشتن نسخهٔ نهایی اسکریپت‌ها، شیوه‌نامه‌ها، فونت‌ها و تصاویر روی هاست (تازه‌سازی خودکار بر اساس مدت اعتبار خود سایت مقصد) — برای سایت‌های سنگین مثل یوتیوب بارِ ثانویه را از هاست برمی‌دارد؛ فقط محتوای ثابت و بی‌کوکی ذخیره می‌شود
+                            </label>
+                        </td>
+                    </tr>
                 </table>
 
                 <h3 style="margin-top: 10px;">⚡ سرعت اتصال و DNS مرورگر</h3>
@@ -1393,6 +1443,8 @@ class GLPE_Plugin {
             <?php if (class_exists('GLPE_VirtualBrowser')) { $this->renderVirtualBrowserCard(); } ?>
 
             <?php $this->renderPathEntryCard(); ?>
+
+            <?php if (class_exists('GLPE_ResCache')) { $this->renderResCacheCard(); } ?>
 
             <?php $this->renderAccessCard(); ?>
 
@@ -1502,6 +1554,42 @@ class GLPE_Plugin {
             </form>
             <p style="font-size: 12px; color: #64748b; line-height: 1.9; margin-bottom: 0;">
                 تست، یک درخواست از خود هاست به نشانی <code style="direction:ltr;">/_glpe-probe/route-check</code> می‌فرستد؛ اگر پاسخ رسید یعنی سرور مسیرهای دلخواه را به وردپرس می‌رساند و لایه فعال می‌شود — وگرنه همه‌چیز مثل قبل روی نشانی ریشه کار می‌کند.
+            </p>
+        </div>
+        <?php
+    }
+
+    /**
+     * Subresource cache card (v7.3.0) — state, volume, and the one-click
+     * purge. Entries expire by their own upstream-freshness clocks and the
+     * quota keeper drops the oldest ones automatically.
+     */
+    private function renderResCacheCard() {
+        $enabled = class_exists('GLPE_ResCache') ? GLPE_ResCache::enabled() : false;
+        $stats = class_exists('GLPE_ResCache') ? GLPE_ResCache::stats() : ['files' => 0, 'bytes' => 0, 'dir' => ''];
+        $purgeUrl = wp_nonce_url(
+            admin_url('admin-post.php?action=glpe_res_purge'),
+            'glpe_res_purge'
+        );
+        ?>
+        <div style="background: #fff; border: 1px solid #ccd0d4; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+            <h3 style="margin-top: 0;">📦 کش زیرمنبع‌ها</h3>
+            <p style="font-size: 13px; line-height: 2; color: #334155;">
+                نسخهٔ نهایی زیرمنبع‌های ثابت (اسکریپت، شیوه‌نامه، فونت، تصویر) روی هاست نگه داشته می‌شود تا مراجعه‌های بعدی همان منبع بدون رفت‌وبرگشت به سایت مقصد و بدون پردازش مجدد بازنویسی سرو شوند — تازه‌سازی هر مدخل بر اساس مدت اعتبار اعلام‌شدهٔ خود سایت مقصد است و سقف کل فضای مصرفی با حذف قدیمی‌ترین مدخل‌ها خودکار رعایت می‌شود.
+            </p>
+            <table class="widefat striped" style="max-width: 760px; direction: ltr; text-align: left;">
+                <tbody>
+                <tr><th style="width:170px;">state</th><td><?php echo $enabled ? '<span style="color:#059669;font-weight:bold;">enabled</span>' : '<span style="color:#b45309;font-weight:bold;">disabled</span>'; ?></td></tr>
+                <tr><th>entries</th><td><?php echo (int)$stats['files']; ?> (<?php echo number_format((float)$stats['bytes'] / 1048576, 1); ?> MB)</td></tr>
+                <tr><th>storage</th><td><code style="direction:ltr;"><?php echo esc_html($stats['dir']); ?></code> — guarded runtime directory</td></tr>
+                </tbody>
+            </table>
+            <form method="post" action="<?php echo esc_url($purgeUrl); ?>" style="margin-top: 14px; display: inline;">
+                <?php wp_nonce_field('glpe_res_purge'); ?>
+                <button type="submit" class="button" onclick="return confirm('همه مدخل‌های کش زیرمنبع‌ها پاک شوند؟');">پاک‌سازی کش</button>
+            </form>
+            <p style="font-size: 12px; color: #64748b; line-height: 1.9; margin-bottom: 0;">
+                محتوای دارای کوکی یا پویا (سندهای HTML و پاسخ‌های API) هرگز ذخیره نمی‌شود؛ نام فایل‌ها هش مبهم است و فایل‌ها با گارد PHP و htaccess deny-all محافظت‌اند.
             </p>
         </div>
         <?php

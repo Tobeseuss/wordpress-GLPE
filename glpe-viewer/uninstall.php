@@ -43,6 +43,7 @@ $glpe_options = [
     'glpe_vb_engine',
     'glpe_vb_vbs_index',
     'glpe_path_entry',
+    'glpe_res_cache',
 ];
 
 // Virtual browser sandbox sessions: reap the live temporary environments
@@ -115,4 +116,19 @@ if (is_dir($glpe_diag_dir)) {
         }
     }
     @rmdir($glpe_diag_dir);
+}
+
+// Subresource artifact cache (v7.3.0): every stored entry leaves the disk.
+$glpe_res_dir = wp_normalize_path(trailingslashit((string)wp_upload_dir()['basedir']) . 'glpe-res-cache');
+if (is_dir($glpe_res_dir)) {
+    foreach ((array)scandir($glpe_res_dir) as $glpe_res_node) {
+        if ($glpe_res_node === '.' || $glpe_res_node === '..') {
+            continue;
+        }
+        $glpe_res_path = $glpe_res_dir . '/' . $glpe_res_node;
+        if (is_file($glpe_res_path)) {
+            @unlink($glpe_res_path);
+        }
+    }
+    @rmdir($glpe_res_dir);
 }

@@ -1132,6 +1132,7 @@ class GLPE_Engine {
 
                 $headersObj = wp_remote_retrieve_headers($response);
                 $all = (is_object($headersObj) && method_exists($headersObj, 'getAll')) ? $headersObj->getAll() : (array)$headersObj;
+                $hadSetCookie = isset($all['set-cookie']);
                 if (isset($all['set-cookie'])) {
                     foreach ((array)$all['set-cookie'] as $line) {
                         $this->cookies->addCookieFromHeader($line, $currentUrl);
@@ -1168,6 +1169,7 @@ class GLPE_Engine {
                     'body'        => wp_remote_retrieve_body($response),
                     'finalUrl'    => $currentUrl,
                     'headers'     => $collected,
+                    'setCookie'   => $hadSetCookie,
                 ];
             }
 
@@ -1252,9 +1254,11 @@ class GLPE_Engine {
 
                 $location = '';
                 $collected = [];
+                $hadSetCookie = false;
                 $lines = explode("\r\n", $respHeaders);
                 foreach ($lines as $line) {
                     if (stripos($line, 'Set-Cookie:') === 0) {
+                        $hadSetCookie = true;
                         $this->cookies->addCookieFromHeader(trim(substr($line, 11)), $currentUrl);
                         continue;
                     }
@@ -1297,6 +1301,7 @@ class GLPE_Engine {
                     'body'        => $body,
                     'finalUrl'    => $currentUrl,
                     'headers'     => $collected,
+                    'setCookie'   => $hadSetCookie,
                 ];
             }
 
