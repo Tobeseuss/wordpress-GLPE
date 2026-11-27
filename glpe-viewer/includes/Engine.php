@@ -236,10 +236,11 @@ class GLPE_Engine {
                 }
             }
             // Specification and namespace URIs embedded in code (SVG factories,
-            // markup vocabularies, document type definitions) are opaque
-            // identifiers, not fetchable documents — rewriting them breaks the
-            // page's own scripts, so they always pass through untouched.
-            if (preg_match('#^https?://(www\\.)?(w3\\.org|whatwg\\.org|schema\\.org|ogp\\.me|gmpg\\.org|purl\\.org|xmlsoap\\.org|openxmlformats\\.org|ns\\.adobe\\.com|java\\.sun\\.com|xmlns\\.jcp\\.org|xml\\.apache\\.org|ietf\\.org|rfc-editor\\.org)(/|$)#i', $url)
+            // markup vocabularies, document type definitions, validator
+            // meta-schemas) are opaque identifiers, not fetchable documents —
+            // rewriting them breaks the page's own scripts, so they always
+            // pass through untouched.
+            if (preg_match('#^https?://(www\\.)?(w3\\.org|whatwg\\.org|schema\\.org|ogp\\.me|gmpg\\.org|purl\\.org|xmlsoap\\.org|openxmlformats\\.org|ns\\.adobe\\.com|java\\.sun\\.com|xmlns\\.jcp\\.org|xml\\.apache\\.org|ietf\\.org|rfc-editor\\.org|json-schema\\.org)(/|$)#i', $url)
                 || preg_match('#^https?://schemas\\.#i', $url)
                 || preg_match('#\\.dtd$#i', $url)) {
                 return $matches[0];
@@ -281,6 +282,38 @@ class GLPE_Engine {
                 }
                 $link = $this->makeViewUrl($spec, $baseUrl, $options);
                 return 'new URL(' . $m[1] . $link . $m[1] . ', import.meta.url' . (isset($m[3]) ? ',' . $m[3] . $m[3] : '') . ')';
+            },
+            $js
+        );
+
+        // 4. Off-main-thread scripts. A worker script spawned from a relative
+        // specifier resolves against the page origin in the browser — inside
+        // a displayed document that is THIS site, and the spawn 404s. The
+        // classic importScripts(...) loader and the Worker/SharedWorker
+        // constructors both take such specifiers; wrap them like any other
+        // reference. (data:/blob: spawn addresses pass through untouched —
+        // the client companion patches those at runtime.)
+        $js = preg_replace_callback(
+            '/importScripts\s*\(([^)]*)\)/i',
+            function($m) use ($baseUrl, $options) {
+                return 'importScripts(' . preg_replace_callback('/([\'"])([^\'"]+)\1/', function($sm) use ($baseUrl, $options) {
+                    $spec = $sm[2];
+                    if (preg_match('/^(data:|blob:|javascript:|#)/i', $spec) || strpos($spec, '_glpe=') !== false) {
+                        return $sm[0];
+                    }
+                    return $sm[1] . $this->makeViewUrl($spec, $baseUrl, $options) . $sm[1];
+                }, $m[1]) . ')';
+            },
+            $js
+        );
+        $js = preg_replace_callback(
+            '/new\s+((?:Shared)?Worker)\s*\(\s*([\'"])([^\'"]+)\2/im',
+            function($m) use ($baseUrl, $options) {
+                $spec = $m[3];
+                if (preg_match('/^(data:|blob:|javascript:|#)/i', $spec) || strpos($spec, '_glpe=') !== false) {
+                    return $m[0];
+                }
+                return 'new ' . $m[1] . '(' . $m[2] . $this->makeViewUrl($spec, $baseUrl, $options) . $m[2];
             },
             $js
         );
@@ -684,6 +717,12 @@ class GLPE_Engine {
                 "window.__glpe_ctx__ = " . json_encode($ctxConfig) . ";\n" .
                 $hookScript .
                 "\n</script>\n";
+            // Site-pack client helpers ride right after the companion —
+            // they run inside the same wrapped context and may use its
+            // re-anchoring helpers.
+            if (!empty($options['packJs']) && is_string($options['packJs'])) {
+                $injection .= "\n<script>\n" . $options['packJs'] . "\n</script>\n";
+            }
 
             if (stripos($html, '<head>') !== false) {
                 // Callback injection: replacement strings would interpret $/
@@ -712,35 +751,14 @@ class GLPE_Engine {
             }
         }
 
-        // 18. YouTube watch pages: the in-page player cannot operate inside
-        // the viewer — YouTube's server-side streaming stack (SABR/PoToken)
-        // rejects streams whose session was not opened by the real client.
-        // Give every watch page the official embed player instead: it plays
-        // video and advertisements natively, exactly like the original site.
-        // The iframe is injected verbatim (never rewritten) and loads from
-        // YouTube directly in the visitor's own browser.
-        $ytVideoId = '';
-        if (preg_match('#youtube(?:-nocookie)?\.com/watch\?(?:[^\#]*&)?v=([A-Za-z0-9_-]{6,20})#i', $targetUrl, $vm)) {
-            $ytVideoId = $vm[1];
-        } elseif (preg_match('#youtu\.be/([A-Za-z0-9_-]{6,20})#i', $targetUrl, $vm)) {
-            $ytVideoId = $vm[1];
-        }
-        if ($ytVideoId !== '' && preg_match('#^[A-Za-z0-9_-]+$#', $ytVideoId)) {
-            $playerHtml = '<style>'
-                . 'ytd-player,#movie_player,#player-container-01,.html5-video-player,#player-wrap{display:none!important}'
-                . '</style>'
-                . '<div id="__glpe_ytplayer" style="position:relative;z-index:2147483646;background:#000;'
-                . 'margin:52px auto 0 auto;max-width:960px;width:calc(100% - 24px);aspect-ratio:16/9;">'
-                . '<iframe src="https://www.youtube-nocookie.com/embed/' . $ytVideoId . '" '
-                . 'style="position:absolute;inset:0;width:100%;height:100%;border:0;" '
-                . 'allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" '
-                . 'allowfullscreen title="Video player"></iframe></div>';
-            if (stripos($html, '<body') !== false) {
-                $html = preg_replace_callback('/<body\b([^>]*)>/i', function($bm) use ($playerHtml) {
-                    return '<body' . $bm[1] . '>' . $playerHtml;
-                }, $html, 1);
-            } else {
-                $html = $playerHtml . $html;
+        // 18. Site-pack document post-processing — destinations with a
+        // matching pack get their special solution applied last (e.g. the
+        // YouTube pack swaps the in-page player for the official embed
+        // player on watch pages).
+        if (!empty($options['docFilter']) && is_callable($options['docFilter'])) {
+            $filtered = call_user_func($options['docFilter'], $html, $targetUrl, $options);
+            if (is_string($filtered) && $filtered !== '') {
+                $html = $filtered;
             }
         }
 
@@ -807,12 +825,95 @@ class GLPE_Engine {
     }
 
     /**
+     * Header names that must never ride back to the visitor's browser:
+     * hop-by-hop plumbing, session records (already consumed into the
+     * store), transport framing, and every isolation/directive header that
+     * describes the ORIGINAL origin — applied to this site's own response
+     * those directives would wrongly isolate or frame-break the viewer.
+     * Everything else (API tokens, challenge headers, Link pagination,
+     * Retry-After, request ids) is relayed verbatim — applications read
+     * them through response.headers.get() and break silently otherwise.
+     */
+    public static function relayableHeaderValues($headers) {
+        $skip = [
+            'host', 'content-type', 'content-length', 'content-encoding', 'content-location',
+            'transfer-encoding', 'connection', 'keep-alive',
+            'set-cookie', 'set-cookie2', 'trailer', 'te', 'upgrade',
+            'server', 'date', 'via', 'x-powered-by', 'alt-svc', 'alt-used',
+            'cache-control', 'pragma', 'age', 'etag', 'last-modified', 'expires', 'vary',
+            'location', 'refresh',
+            'strict-transport-security', 'expect-ct', 'clear-site-data',
+            'content-security-policy', 'content-security-policy-report-only',
+            'x-frame-options', 'x-content-type-options', 'x-xss-protection',
+            'cross-origin-opener-policy', 'cross-origin-opener-policy-report-only',
+            'cross-origin-embedder-policy', 'cross-origin-embedder-policy-report-only',
+            'cross-origin-resource-policy', 'cross-origin-isolated',
+            'permissions-policy', 'feature-policy', 'report-to', 'nel', 'reporting-endpoints',
+            'access-control-allow-origin', 'access-control-allow-credentials',
+            'access-control-allow-headers', 'access-control-allow-methods',
+            'access-control-expose-headers', 'access-control-max-age',
+            'referer-policy', 'referrer-policy',
+        ];
+        $out = [];
+        foreach ((array)$headers as $name => $values) {
+            $lower = strtolower(trim((string)$name));
+            if ($lower === '' || in_array($lower, $skip, true)) {
+                continue;
+            }
+            $vals = is_array($values) ? $values : [$values];
+            $clean = [];
+            foreach ($vals as $v) {
+                $v = str_replace(["\r", "\n", "\0"], '', trim((string)$v));
+                if ($v !== '') {
+                    $clean[] = $v;
+                }
+            }
+            if (!empty($clean)) {
+                $out[$name] = implode(', ', $clean);
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * Per-exchange wall-clock budget. Documents keep the admin-tuned value;
+     * subresources and API calls (bundles, JSON endpoints, streams) get a
+     * wider floor — a full application bundle easily outlasts the DNS-tuned
+     * document budget on a slow destination, and one dropped bundle kills
+     * the whole application boot.
+     */
+    private function hopTimeout($customHeaders) {
+        $cfg = GLPE_Dns::settings();
+        $dest = isset($customHeaders['sec-fetch-dest']) ? strtolower(trim((string)$customHeaders['sec-fetch-dest'])) : '';
+        $subresource = ($dest !== '' && !in_array($dest, ['document', 'iframe', 'frame'], true));
+        return $subresource ? max((int)$cfg['timeout'], 30) : (int)$cfg['timeout'];
+    }
+
+    /**
+     * Decides whether a transport failure deserves a fresh chain attempt.
+     * Only genuinely transient conditions qualify — timeout, refused/reset
+     * or dropped connection, empty reply. Permanent configuration errors
+     * (certificate mismatch, DNS-level resolve errors that already went
+     * through their own pinned retry) fail fast so a broken setup surfaces
+     * immediately instead of burning a second full-chain attempt.
+     */
+    private static function isTransientTransport($message) {
+        return (bool)preg_match('#cURL error (7|28|52|56):#i', (string)$message)
+            || stripos((string)$message, 'timed out') !== false
+            || stripos((string)$message, 'connection reset') !== false;
+    }
+
+    /**
      * Executes the fetch through the standard WordPress HTTP layer
      * (identical transport signature to core/theme/plugin updates),
      * with a raw client fallback for non-WP contexts.
      * Redirects are followed one hop at a time so session records returned
      * by intermediate responses are kept and the final effective address is
      * reported back for correct link rewriting.
+     * GET exchanges get ONE transparent whole-chain retry on transport
+     * failure (timeout, dropped connection) — subresource fetches race the
+     * page boot and a single transient timeout would otherwise surface as
+     * a dead application instead of a slow one.
      */
     public function executeRequest($targetUrl, $method = 'GET', $postData = null, $customHeaders = []) {
         self::raiseMemoryBudget();
@@ -865,13 +966,17 @@ class GLPE_Engine {
         if (function_exists('wp_remote_request')) {
             $sslVerify = function_exists('get_option') ? (get_option('glpe_ssl_verify', '1') === '1') : true;
 
+            $dnsCfg    = GLPE_Dns::settings();
+            $dnsBudget = max(1, (int)$dnsCfg['retries'] + 1); // one extra attempt carries a fresh DoH pin
+            $hopBudget = $this->hopTimeout($customHeaders);
+            $chainTries = (strtoupper($method) === 'GET') ? 2 : 1;
+
+            for ($chain = 0; $chain < $chainTries && !isset($result); $chain++) {
+            try {
             $currentUrl    = $targetUrl;
             $currentMethod = strtoupper($method);
             $currentBody   = ($currentMethod === 'POST') ? $postData : null;
             $result        = null;
-
-            $dnsCfg    = GLPE_Dns::settings();
-            $dnsBudget = max(1, (int)$dnsCfg['retries'] + 1); // one extra attempt carries a fresh DoH pin
 
             for ($hop = 0; $hop < 6 && $result === null; $hop++) {
                 $hopHeaders = $this->hopHeaders($headers, $currentUrl, $currentMethod);
@@ -888,7 +993,7 @@ class GLPE_Engine {
                         'method'             => $currentMethod,
                         'body'               => (!empty($currentBody)) ? $currentBody : null,
                         'headers'            => $hopHeaders,
-                        'timeout'            => (int)$dnsCfg['timeout'],
+                        'timeout'            => $hopBudget,
                         'redirection'        => 0,
                         'sslverify'          => $sslVerify,
                         'reject_unsafe_urls' => true,
@@ -924,6 +1029,11 @@ class GLPE_Engine {
                         $this->cookies->addCookieFromHeader($line, $currentUrl);
                     }
                 }
+                $collected = [];
+                foreach ($all as $hName => $hVal) {
+                    if (is_string($hName) && strtolower($hName) === 'set-cookie') continue;
+                    $collected[$hName] = $hVal;
+                }
 
                 if ($status >= 300 && $status < 400 && (string)$location !== '') {
                     $nextUrl = $this->resolveRelativeUrl(trim((string)$location), $currentUrl);
@@ -949,11 +1059,21 @@ class GLPE_Engine {
                     'contentType' => $contentType ? $contentType : 'text/html; charset=UTF-8',
                     'body'        => wp_remote_retrieve_body($response),
                     'finalUrl'    => $currentUrl,
+                    'headers'     => $collected,
                 ];
             }
 
             if ($result === null) {
                 throw new Exception("تعداد تغییرمسیرهای پیاپی مقصد بیش از حد مجاز است.");
+            }
+            } catch (Exception $e) {
+                // Transient transport failures (timeout, reset connection) get
+                // one fresh full-chain attempt for idempotent GET exchanges.
+                if ($chain + 1 >= $chainTries || !self::isTransientTransport($e->getMessage())) {
+                    throw $e;
+                }
+                continue;
+            }
             }
 
             return $result;
@@ -961,6 +1081,10 @@ class GLPE_Engine {
 
         // --- Fallback transport: raw client ---
         if (function_exists('curl_init')) {
+            $chainTries = (strtoupper($method) === 'GET') ? 2 : 1;
+
+            for ($chain = 0; $chain < $chainTries && !isset($result); $chain++) {
+            try {
             $currentUrl    = $targetUrl;
             $currentMethod = strtoupper($method);
             $currentBody   = ($currentMethod === 'POST') ? $postData : null;
@@ -983,7 +1107,7 @@ class GLPE_Engine {
                     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
                     curl_setopt($ch, CURLOPT_HEADER, true);
                     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
-                    curl_setopt($ch, CURLOPT_TIMEOUT, (int)GLPE_Dns::settings()['timeout']);
+                    curl_setopt($ch, CURLOPT_TIMEOUT, $this->hopTimeout($customHeaders));
                     GLPE_Dns::applyCurl($ch, $currentUrl, $try > 0);
                     $sslVerify = function_exists('get_option') ? (get_option('glpe_ssl_verify', '1') === '1') : false;
                     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, $sslVerify);
@@ -1019,13 +1143,26 @@ class GLPE_Engine {
                 $body = substr($rawResponse, $headerSize);
 
                 $location = '';
+                $collected = [];
                 $lines = explode("\r\n", $respHeaders);
                 foreach ($lines as $line) {
                     if (stripos($line, 'Set-Cookie:') === 0) {
                         $this->cookies->addCookieFromHeader(trim(substr($line, 11)), $currentUrl);
+                        continue;
                     }
                     if (stripos($line, 'Location:') === 0) {
                         $location = trim(substr($line, 9));
+                    }
+                    if (stripos($line, 'HTTP/') === 0) {
+                        continue; // status line of this hop
+                    }
+                    $pair = explode(':', $line, 2);
+                    if (count($pair) === 2 && trim($pair[0]) !== '') {
+                        $name = trim($pair[0]);
+                        if (!isset($collected[$name])) {
+                            $collected[$name] = [];
+                        }
+                        $collected[$name][] = trim($pair[1]);
                     }
                 }
 
@@ -1051,11 +1188,19 @@ class GLPE_Engine {
                     'contentType' => $contentType ? $contentType : 'text/html; charset=UTF-8',
                     'body'        => $body,
                     'finalUrl'    => $currentUrl,
+                    'headers'     => $collected,
                 ];
             }
 
             if ($result === null) {
                 throw new Exception("تعداد تغییرمسیرهای پیاپی مقصد بیش از حد مجاز است.");
+            }
+            } catch (Exception $e) {
+                if ($chain + 1 >= $chainTries || !self::isTransientTransport($e->getMessage())) {
+                    throw $e;
+                }
+                continue;
+            }
             }
 
             return $result;
@@ -1087,6 +1232,7 @@ class GLPE_Engine {
 
         $status = 200;
         $contentType = 'text/html; charset=UTF-8';
+        $collected = [];
         if (isset($http_response_header)) {
             if (preg_match('#HTTP/\S+\s+(\d{3})#', $http_response_header[0], $m)) {
                 $status = (int)$m[1];
@@ -1094,9 +1240,17 @@ class GLPE_Engine {
             foreach ($http_response_header as $hdr) {
                 if (stripos($hdr, 'Set-Cookie:') === 0) {
                     $this->cookies->addCookieFromHeader(trim(substr($hdr, 11)), $targetUrl);
+                    continue;
                 }
                 if (stripos($hdr, 'Content-Type:') === 0) {
                     $contentType = trim(substr($hdr, 13));
+                }
+                if (stripos($hdr, 'HTTP/') === 0) {
+                    continue;
+                }
+                $pair = explode(':', $hdr, 2);
+                if (count($pair) === 2 && trim($pair[0]) !== '') {
+                    $collected[trim($pair[0])][] = trim($pair[1]);
                 }
             }
         }
@@ -1106,7 +1260,184 @@ class GLPE_Engine {
             'contentType' => $contentType,
             'body'        => $body,
             'finalUrl'    => $targetUrl,
+            'headers'     => $collected,
         ];
+    }
+
+    /**
+     * Streams an application-exchange response (JSON payload, server-sent
+     * event stream, plain/binary body) straight to the visitor without
+     * buffering it. Two problems of the buffered path are cured here:
+     * (1) the wall-clock budget — a long generation on a chat-style
+     * endpoint outlasts every sane timeout and the buffered fetch dies
+     * mid-body; (2) progressive rendering — event streams only make sense
+     * when chunks reach the browser as the destination emits them.
+     * Responses whose content type needs server-side rewriting (HTML
+     * fragments, stylesheets, script files, manifests) are NOT streamed:
+     * the transfer is aborted and false is returned so the caller falls
+     * back to the buffered rewriter. Redirect hops are followed with fresh
+     * identity headers, session records from every hop are kept.
+     * Returns true once bytes (or a complete empty body) have been flushed;
+     * the caller must exit. Returns false when the buffered path must run.
+     */
+    public function streamApiRequest($targetUrl, $method = 'GET', $body = null, $customHeaders = []) {
+        self::raiseMemoryBudget();
+        $parsed = parse_url($targetUrl);
+        if (!isset($parsed['host'])) {
+            throw new Exception("آدرس وارد شده نامعتبر است.");
+        }
+        if ($this->isBlockedHost($parsed['host'])) {
+            throw new Exception("دسترسی به آدرس‌های داخلی و شبکه محلی مجاز نیست.");
+        }
+        if (!function_exists('curl_init') || headers_sent()) {
+            return false;
+        }
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(0);
+        }
+        @ini_set('zlib.output_compression', 'Off');
+        while (ob_get_level() > 0) {
+            @ob_end_flush();
+        }
+
+        $currentUrl    = $targetUrl;
+        $currentMethod = strtoupper($method);
+        $currentBody   = in_array($currentMethod, ['POST', 'PUT', 'PATCH', 'DELETE'], true) ? $body : null;
+        $dnsCfg        = GLPE_Dns::settings();
+        $dnsRetried    = false; // one transparent DoH-pinned retry per request
+
+        for ($hop = 0; $hop < 4; $hop++) {
+            $headers = $this->hopHeaders($customHeaders, $currentUrl, $currentMethod);
+            $cookieHeader = $this->cookies->getCookieHeader($currentUrl);
+            if ($cookieHeader !== '') {
+                $headers['Cookie'] = $cookieHeader;
+            }
+            $raw = [];
+            foreach ($headers as $k => $v) {
+                $raw[] = $k . ': ' . $v;
+            }
+
+            $statusLine   = null;
+            $collected    = [];
+            $needsRewrite = false;
+            $headersSent  = false;
+            $sendHeaders = function() use (&$statusLine, &$collected, &$headersSent) {
+                if ($headersSent) return;
+                http_response_code($statusLine ? $statusLine : 200);
+                header('Cache-Control: no-store, max-age=0');
+                header('Access-Control-Allow-Origin: *');
+                header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
+                header('Access-Control-Allow-Headers: *');
+                header('Access-Control-Expose-Headers: *');
+                // The buffered dispatcher sends Content-Type itself; on the
+                // streaming path nothing else would, so it is emitted here
+                // from the destination's own value.
+                $ctList = isset($collected['Content-Type']) ? $collected['Content-Type'] : (isset($collected['content-type']) ? $collected['content-type'] : null);
+                if ($ctList) {
+                    header('Content-Type: ' . trim(implode(', ', (array)$ctList)));
+                }
+                foreach (self::relayableHeaderValues($collected) as $name => $value) {
+                    header($name . ': ' . $value, false);
+                }
+                $headersSent = true;
+            };
+
+            $ch = curl_init();
+            curl_setopt($ch, CURLOPT_URL, $currentUrl);
+            curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $currentMethod);
+            curl_setopt($ch, CURLOPT_HTTPHEADER, $raw);
+            curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 0);
+            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, max(5, (int)$dnsCfg['connect']));
+            curl_setopt($ch, CURLOPT_BUFFERSIZE, 131072);
+            curl_setopt($ch, CURLOPT_ENCODING, '');
+            GLPE_Dns::applyCurl($ch, $currentUrl, false);
+            $sslVerify = function_exists('get_option') ? (get_option('glpe_ssl_verify', '1') === '1') : false;
+            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, $sslVerify);
+            curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, $sslVerify ? 2 : 0);
+
+            if (!empty($currentBody)) {
+                curl_setopt($ch, CURLOPT_POSTFIELDS, $currentBody);
+            }
+
+            curl_setopt($ch, CURLOPT_HEADERFUNCTION, function($ch, $line) use (&$statusLine, &$collected, &$needsRewrite, &$currentUrl) {
+                $trim = trim($line);
+                if ($trim === '') return strlen($line);
+                if (stripos($trim, 'HTTP/') === 0) {
+                    if (preg_match('#HTTP/\S+\s+(\d{3})#i', $trim, $m)) {
+                        $statusLine = (int)$m[1];
+                    }
+                    $collected = []; // redirect hops reset the collected headers
+                    return strlen($line);
+                }
+                $parts = explode(':', $trim, 2);
+                if (count($parts) !== 2) return strlen($line);
+                $name  = trim($parts[0]);
+                $lower = strtolower($name);
+                $value = str_replace(["\r", "\n", "\0"], '', trim($parts[1]));
+                if ($lower === 'set-cookie') {
+                    if ($value !== '') {
+                        $this->cookies->addCookieFromHeader($value, $currentUrl);
+                    }
+                    return strlen($line);
+                }
+                if ($value === '') return strlen($line);
+                $collected[$name][] = $value;
+                if ($lower === 'content-type'
+                    && preg_match('#(text/html|application/xhtml|text/css|javascript|manifest\+json|text/cache-manifest)#i', $value)) {
+                    $needsRewrite = true; // buffered rewriter must handle this body
+                }
+                return strlen($line);
+            });
+            curl_setopt($ch, CURLOPT_WRITEFUNCTION, function($ch, $chunk) use ($sendHeaders, &$needsRewrite, &$outStream) {
+                if ($needsRewrite) {
+                    return -1; // abort — the caller falls back to the buffered rewriter
+                }
+                $sendHeaders();
+                if ($outStream === null) {
+                    $outStream = fopen('php://output', 'wb');
+                }
+                $n = fwrite($outStream, $chunk);
+                if (function_exists('flush')) @flush();
+                return ($n === false) ? -1 : strlen($chunk);
+            });
+
+            curl_exec($ch);
+            $errNo   = curl_errno($ch);
+            $nextUrl = curl_getinfo($ch, CURLINFO_REDIRECT_URL);
+            $status  = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+            $errMsg  = $errNo !== 0 ? (string)curl_error($ch) : '';
+            curl_close($ch);
+
+            if ($needsRewrite && !$headersSent) {
+                return false; // hand this body to the buffered rewriter
+            }
+            if ($status >= 300 && $status < 400 && $nextUrl && $hop < 3) {
+                $nextHost = strtolower((string)parse_url($nextUrl, PHP_URL_HOST));
+                if ($nextHost === '' || $this->isBlockedHost($nextHost)) {
+                    throw new Exception("دسترسی به آدرس‌های داخلی و شبکه محلی مجاز نیست.");
+                }
+                // Per spec 303 always switches to GET; 301/302 switch a
+                // POST as well, matching what browsers actually do.
+                if ($currentMethod === 'POST' && in_array($status, [301, 302, 303], true)) {
+                    $currentMethod = 'GET';
+                    $currentBody   = null;
+                }
+                $currentUrl = $nextUrl;
+                continue;
+            }
+            if ($errNo !== 0 && !$headersSent) {
+                if (!$dnsRetried && GLPE_Dns::isResolveError($errMsg) && GLPE_Dns::forceResolve($currentUrl)) {
+                    $dnsRetried = true; // one pinned retry before giving up
+                    $hop--;
+                    continue;
+                }
+                return false; // let the caller fall back to the buffered path
+            }
+            $sendHeaders();
+            return true;
+        }
+        return true;
     }
 
     /**

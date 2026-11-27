@@ -172,7 +172,11 @@
 
   // 2. Intercept window.fetch (dynamic content, form endpoints, JSON APIs)
   if (window.fetch) {
-    function deepRewriteJson(obj) {
+    // Schema-identifier keys carry vocabulary URIs (validator meta-schemas)
+    // — opaque identifiers, never fetchable documents; wrapping them breaks
+    // the application's own schema compilation.
+    var schemaIdKeys = { '$schema': 1, '$id': 1, '$ref': 1, 'id': 1 };
+    function deepRewriteJson(obj, rootKey) {
       if (!obj || typeof obj !== 'object') {
         if (typeof obj === 'string' && /^https?:\/\//i.test(obj)) {
           return resolveViewUrl(obj);
@@ -186,7 +190,7 @@
       for (var k in obj) {
         if (Object.prototype.hasOwnProperty.call(obj, k)) {
           var val = obj[k];
-          if (typeof val === 'string' && /^https?:\/\//i.test(val)) {
+          if (typeof val === 'string' && /^https?:\/\//i.test(val) && !schemaIdKeys[k]) {
             res[k] = resolveViewUrl(val);
           } else {
             res[k] = deepRewriteJson(val);
@@ -254,6 +258,109 @@
       return originalOpen.call(this, method, resolved);
     };
   }
+
+  // 3a. Pre-insertion reference rewriting.
+  // Dynamically spawned elements (application code bundles above all) get
+  // their network fetch started at the moment of insertion — a rewrite that
+  // only runs after insertion (MutationObserver) loses that race and the
+  // request lands on this site's own paths. Rewriting AT ASSIGNMENT TIME
+  // closes the race: the reference is already wrapped when the element is
+  // inserted. Two assignment paths exist and both are covered:
+  // (1) element.src/href/data property assignment — shadowed per instance
+  //     at creation time with a resolving setter;
+  // (2) element.setAttribute(...) — wrapped centrally.
+  try {
+    var urlAttrs = { src: 1, href: 1, action: 1, formaction: 1, poster: 1, data: 1 };
+    var originalSetAttribute = Element.prototype.setAttribute;
+    Element.prototype.setAttribute = function(name, value) {
+      try {
+        var n = String(name).toLowerCase();
+        if (urlAttrs[n] && typeof value === 'string' && value && value.indexOf('_glpe=') === -1
+            && !/^(data:|blob:|javascript:|#)/i.test(value) && !isOwnUi(this)) {
+          value = resolveViewUrl(value);
+        }
+      } catch (e) {}
+      return originalSetAttribute.call(this, name, value);
+    };
+    var originalCreateElement = document.createElement.bind(document);
+    var propertyTargets = { script: 'src', img: 'src', iframe: 'src', source: 'src', video: 'src', audio: 'src', track: 'src', embed: 'data', input: 'src', link: 'href', a: 'href', area: 'href' };
+    document.createElement = function(tag, opts) {
+      var el = originalCreateElement(tag, opts);
+      try {
+        var name = String(tag || '').toLowerCase();
+        var prop = propertyTargets[name];
+        if (prop && el && el.nodeType === 1 && !isOwnUi(el)) {
+          var desc = null;
+          var proto = Object.getPrototypeOf(el);
+          while (proto && !desc) {
+            desc = Object.getOwnPropertyDescriptor(proto, prop);
+            proto = Object.getPrototypeOf(proto);
+          }
+          if (desc && desc.set && desc.get && !Object.prototype.hasOwnProperty.call(el, prop)) {
+            Object.defineProperty(el, prop, {
+              get: function() { return desc.get.call(this); },
+              set: function(v) {
+                try {
+                  if (typeof v === 'string' && v && v.indexOf('_glpe=') === -1 && !/^(data:|blob:|javascript:|#)/i.test(v)) {
+                    v = resolveViewUrl(v);
+                  }
+                } catch (e) {}
+                return desc.set.call(this, v);
+              },
+              configurable: true,
+              enumerable: true
+            });
+          }
+        }
+      } catch (e) {}
+      return el;
+    };
+  } catch (e) {}
+
+  // 3b. Inline-style reference rewriting.
+  // A reference can also enter the page through the CSS object model —
+  // element.style.backgroundImage = 'url(...)' (image grids, challenge
+  // tiles, preloaded artwork) — which skips both the attribute and the
+  // markup rewriters entirely. The style declarations' url-bearing
+  // properties are shadowed so every url(...) inside an assigned value is
+  // re-anchored and wrapped at assignment time.
+  try {
+    var cssProto = window.CSSStyleDeclaration && CSSStyleDeclaration.prototype;
+    if (cssProto) {
+      function rewriteCssUrls(value) {
+        try {
+          if (typeof value === 'string' && value.indexOf('url(') !== -1 && value.indexOf('_glpe=') === -1) {
+            return value.replace(/url\(\s*(['"]?)([^)'"]+)\1\s*\)/g, function(m, q, u) {
+              if (/^(data:|blob:|#)/i.test(u)) return m;
+              var wrapped;
+              try { wrapped = resolveViewUrl(u); } catch (e) { return m; }
+              return 'url(' + (q || '"') + wrapped + (q || '"') + ')';
+            });
+          }
+        } catch (e) {}
+        return value;
+      }
+      ['background', 'backgroundImage'].forEach(function(prop) {
+        var desc = Object.getOwnPropertyDescriptor(cssProto, prop);
+        if (desc && desc.set && desc.get && desc.configurable) {
+          Object.defineProperty(cssProto, prop, {
+            get: function() { return desc.get.call(this); },
+            set: function(v) {
+              return desc.set.call(this, rewriteCssUrls(v));
+            },
+            configurable: true,
+            enumerable: true
+          });
+        }
+      });
+      var originalSetProperty = cssProto.setProperty;
+      if (typeof originalSetProperty === 'function') {
+        cssProto.setProperty = function(name, value, priority) {
+          return originalSetProperty.call(this, name, rewriteCssUrls(value), priority);
+        };
+      }
+    }
+  } catch (e) {}
 
   // 4. Intercept dynamic form submits
   if (window.HTMLFormElement) {
@@ -460,33 +567,207 @@
   };
 
   // 6a. Socket guard — core tenet: no exchange may leave the gateway path.
-  // A socket connection to an external origin would carry traffic around the
-  // display pipeline entirely, so constructor calls pointing at another
-  // origin are rejected up front (socket-centric apps are documented as
-  // structurally incompatible anyway).
+  // A socket connection would carry traffic around the display pipeline
+  // entirely (the site host cannot answer socket handshakes, and a direct
+  // socket to the destination would leak the address in clear text), so
+  // socket construction never opens a real connection. Construction used
+  // to throw — that hard-crashes boot paths of stream-centric applications
+  // that treat construction failure as fatal. It now yields a socket-shaped
+  // object that fails exactly like a refused connection: applications with
+  // stream fallbacks (server-sent events, polled exchanges) detect the
+  // closed state, take their fallback route and boot normally; the rest
+  // show their own connection error instead of a blank page.
   try {
     if (window.WebSocket) {
       var OriginalSocket = window.WebSocket;
       var GuardedSocket = function(url, protocols) {
-        var origin = '';
-        try { origin = new URL(url, window.location.href).origin; } catch (e) {}
-        if (origin && origin !== window.location.origin) {
-          throw new Error('GLPE: socket exchanges with external origins are disabled; every exchange must ride the gateway.');
+        if (!(this instanceof GuardedSocket)) {
+          return new GuardedSocket(url, protocols);
         }
-        return protocols === undefined
-          ? new OriginalSocket(url)
-          : new OriginalSocket(url, protocols);
+        var self = this;
+        this.url = String(url || '');
+        this.readyState = 0; // CONNECTING
+        this.bufferedAmount = 0;
+        this.extensions = '';
+        this.protocol = typeof protocols === 'string' ? protocols : (Array.isArray(protocols) ? protocols[0] || '' : '');
+        this.binaryType = 'blob';
+        this.onopen = null;
+        this.onmessage = null;
+        this.onerror = null;
+        this.onclose = null;
+        this.__listeners = {};
+        this.__closed = false;
+        function fire(type, event) {
+          try {
+            var handler = self['on' + type];
+            if (typeof handler === 'function') handler.call(self, event);
+            var list = self.__listeners[type] || [];
+            for (var i = 0; i < list.length; i++) {
+              try { list[i].call(self, event); } catch (e) {}
+            }
+          } catch (e) {}
+        }
+        // Asynchronous refusal — the exact shape a blocked handshake produces.
+        setTimeout(function() {
+          if (self.__closed) return;
+          self.readyState = 3; // CLOSED
+          fire('error', { type: 'error', target: self, message: 'GLPE: socket exchanges are disabled; every exchange must ride the gateway.' });
+          fire('close', { type: 'close', wasClean: false, code: 1006, reason: '', target: self });
+        }, 0);
+        this.send = function(data) {
+          // Refused sockets swallow outgoing frames like a dead connection.
+          this.bufferedAmount = 0;
+        };
+        this.close = function(code, reason) {
+          if (this.__closed || this.readyState === 3) return;
+          this.__closed = true;
+          this.readyState = 3;
+          fire('close', { type: 'close', wasClean: true, code: typeof code === 'number' ? code : 1000, reason: String(reason || ''), target: self });
+        };
+        this.addEventListener = function(type, fn) {
+          if (!this.__listeners[type]) this.__listeners[type] = [];
+          this.__listeners[type].push(fn);
+        };
+        this.removeEventListener = function(type, fn) {
+          var list = this.__listeners[type] || [];
+          var idx = list.indexOf(fn);
+          if (idx !== -1) list.splice(idx, 1);
+        };
+        this.dispatchEvent = function() { return true; };
       };
-      GuardedSocket.prototype = OriginalSocket.prototype;
       try {
-        GuardedSocket.CONNECTING = OriginalSocket.CONNECTING;
-        GuardedSocket.OPEN = OriginalSocket.OPEN;
-        GuardedSocket.CLOSING = OriginalSocket.CLOSING;
-        GuardedSocket.CLOSED = OriginalSocket.CLOSED;
+        GuardedSocket.CONNECTING = 0;
+        GuardedSocket.OPEN = 1;
+        GuardedSocket.CLOSING = 2;
+        GuardedSocket.CLOSED = 3;
       } catch (e) {}
       window.WebSocket = GuardedSocket;
     }
   } catch (e) {}
+
+  // 6b. Event streams — same-origin stream references resolve against THIS
+  // site inside a displayed document (and die with a 404 against our own
+  // paths), so the constructor re-anchors them onto the real target and
+  // wraps them like every other dynamic reference.
+  try {
+    if (window.EventSource) {
+      var OriginalEventSource = window.EventSource;
+      var WrappedEventSource = function(url, cfg) {
+        var resolved = url;
+        try {
+          resolved = resolveViewUrl(typeof url === 'string' ? url : String(url));
+        } catch (e) {}
+        return cfg === undefined
+          ? new OriginalEventSource(resolved)
+          : new OriginalEventSource(resolved, cfg);
+      };
+      WrappedEventSource.prototype = OriginalEventSource.prototype;
+      try {
+        WrappedEventSource.CONNECTING = OriginalEventSource.CONNECTING;
+        WrappedEventSource.OPEN = OriginalEventSource.OPEN;
+        WrappedEventSource.CLOSED = OriginalEventSource.CLOSED;
+      } catch (e) {}
+      window.EventSource = WrappedEventSource;
+    }
+  } catch (e) {}
+
+  // 6c. Delivery beacons fire their own exchanges; same-origin addresses
+  // would land on this site's own paths and vanish. Re-anchor them onto the
+  // real target and wrap them so the ride stays on the gateway. The
+  // companion's own sync channel (mode=sync) passes through untouched.
+  try {
+    if (navigator.sendBeacon) {
+      var originalSendBeacon = navigator.sendBeacon.bind(navigator);
+      navigator.sendBeacon = function(url, data) {
+        var resolved = url;
+        try {
+          var raw = (typeof url === 'string') ? url : (url && typeof url.href === 'string') ? url.href : String(url);
+          if (raw.indexOf('mode=sync') === -1) {
+            resolved = resolveViewUrl(raw);
+          }
+        } catch (e) {}
+        return originalSendBeacon(resolved, data);
+      };
+    }
+  } catch (e) {}
+
+  // 6d. Offline scripts — a registered worker would intercept every later
+  // exchange with its own requests, and those requests never pass through
+  // this companion (workers do not inherit page patches), silently routing
+  // traffic around the display pipeline. Registration is denied in the
+  // shape applications treat as "unsupported", and lookup helpers answer
+  // empty; .ready stays pending so await-chains neither crash nor proceed.
+  try {
+    if (navigator.serviceWorker) {
+      var sw = navigator.serviceWorker;
+      try { sw.register = function() { return Promise.reject(new Error('GLPE: offline scripts are disabled inside the viewer.')); }; } catch (e) {}
+      try { sw.getRegistration = function() { return Promise.resolve(undefined); }; } catch (e) {}
+      try { sw.getRegistrations = function() { return Promise.resolve([]); }; } catch (e) {}
+      try { sw.ready = new Promise(function() {}); } catch (e) {}
+    }
+  } catch (e) {}
+
+  // 6e. Off-main-thread scripts spawned from blob addresses run without this
+  // companion — every request they issue would ride straight against this
+  // site and 404. Prepend a compact bootstrap to the blob payload so fetch
+  // calls inside the worker re-anchor onto the target and ride the gateway.
+  try {
+    if (window.Worker && window.Blob && window.URL) {
+      var OriginalWorker = window.Worker;
+      var workerBootstrap =
+        ';(function(){' +
+        'var ctx=self.__glpe_worker_ctx__;if(!ctx||!self.fetch)return;' +
+        'var KEY=ctx.k,GATE=ctx.g;' +
+        'var TARGET="";try{var _b=ctx.u.replace(/-/g,"+").replace(/_/g,"/");while(_b.length%4)_b+="=";' +
+        'var _r=atob(_b),_o="";for(var _i=0;_i<_r.length;_i++)_o+=String.fromCharCode(_r.charCodeAt(_i)^KEY.charCodeAt(_i%KEY.length));' +
+        'TARGET=decodeURIComponent(escape(_o));}catch(e){}' +
+        'var ORIGIN="";try{ORIGIN=new URL(TARGET).origin;}catch(e){}' +
+        'function dec(t){try{var b=t.replace(/-/g,"+").replace(/_/g,"/");while(b.length%4)b+="=";' +
+        'var raw=atob(b),o="";for(var i=0;i<raw.length;i++)o+=String.fromCharCode(raw.charCodeAt(i)^KEY.charCodeAt(i%KEY.length));' +
+        'return decodeURIComponent(escape(o));}catch(e){return "";}}' +
+        'function enc(s){try{var bytes=unescape(encodeURIComponent(s)),o="";' +
+        'for(var i=0;i<bytes.length;i++)o+=String.fromCharCode(bytes.charCodeAt(i)^KEY.charCodeAt(i%KEY.length));' +
+        'return btoa(o).replace(/\\+/g,"-").replace(/\\//g,"_").replace(/=+$/,"");}catch(e){return "";}}' +
+        'var OWN=/^(\\/(wp-admin|wp-login|wp-json|wp-content|wp-includes|feed|view)(\\/|$)|\\/\\?)/i;' +
+        'function wrap(u){try{if(!u||typeof u!=="string")return u;' +
+        'if(/^(data:|blob:|javascript:|#)/i.test(u)||u.indexOf("_glpe=")!==-1)return u;' +
+        'var a=new URL(u,ORIGIN||u);' +
+        'if(a.origin===self.location.origin&&!OWN.test(a.pathname+a.search)){a=new URL(ORIGIN+a.pathname+a.search+a.hash);}' +
+        'var sep=GATE.indexOf("?")!==-1?"&":"?";return GATE+sep+"l="+enc(a.href);}catch(e){return u;}}' +
+        'var of=self.fetch.bind(self);' +
+        'self.fetch=function(input,init){try{' +
+        'if(typeof input==="string"){input=wrap(input);}' +
+        'else if(input&&input.href){input=wrap(input.href);}' +
+        'else if(input&&input.url){init=init||{};init.method=input.method||"GET";' +
+        'if(input.headers)init.headers=input.headers;if(input.body!==undefined&&init.body===undefined)init.body=input.body;' +
+        'if(input.credentials)init.credentials=input.credentials;if(input.signal)init.signal=input.signal;' +
+        'input=wrap(input.url);}' +
+        '}catch(e){}return of(input,init);};' +
+        '})();';
+      var ctxSnapshot = '';
+      try {
+        ctxSnapshot = 'self.__glpe_worker_ctx__=' + JSON.stringify({ k: encKey, g: viewScript, u: ctx.u || '' }) + ';';
+      } catch (e) {}
+      var WrappedWorker = function(url, opts) {
+        var target = url;
+        try {
+          if (typeof url === 'string' && url.indexOf('blob:') === 0) {
+            var xhr = new XMLHttpRequest();
+            xhr.open('GET', url, false); // blob: — synchronous read is local and instant
+            xhr.send(null);
+            if (xhr.status === 200 && xhr.responseText && xhr.responseText.indexOf('__glpe_worker_ctx__') === -1) {
+              var blob = new Blob([ctxSnapshot, workerBootstrap, xhr.responseText], { type: 'application/javascript' });
+              target = URL.createObjectURL(blob);
+            }
+          }
+        } catch (e) {}
+        return opts === undefined ? new OriginalWorker(target) : new OriginalWorker(target, opts);
+      };
+      WrappedWorker.prototype = OriginalWorker.prototype;
+      window.Worker = WrappedWorker;
+    }
+  } catch (e) {}
+
 
   // 7. Intercept SPA navigation (pushState & replaceState)
   if (window.history && window.history.pushState) {

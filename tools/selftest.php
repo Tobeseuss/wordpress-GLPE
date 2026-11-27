@@ -62,6 +62,7 @@ if (!defined('ABSPATH')) { define('ABSPATH', __FILE__); }
 require $root . '/glpe-viewer/includes/Cookies.php';
 require $root . '/glpe-viewer/includes/Codec.php';
 require $root . '/glpe-viewer/includes/Engine.php';
+require $root . '/glpe-viewer/includes/SitePacks.php';
 
 $pass = 0;
 $fail = 0;
@@ -300,11 +301,17 @@ $outEsc = $engine->rewriteJs($jsEsc, 'https://www.youtube.com/');
 check('JSON escapes decoded', (bool)preg_match('/l=([^&\'"]+)/', $outEsc, $em2) && strpos(GLPE_Codec::decode($em2[1]), '&ei=abc&ip=1.2.3.4') !== false, isset($em2[1]) ? GLPE_Codec::decode($em2[1]) : $outEsc);
 check('no unicode escapes left', isset($em2[1]) && strpos(GLPE_Codec::decode($em2[1]), '\\u0026') === false);
 
-echo "\n== 10d. YouTube embed player injection ==\n";
-$ytPage = $engine->rewriteHtml('<html><head><title>t</title></head><body><p>x</p></body></html>', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', ['showToolbar' => false]);
+echo "\n== 10d. YouTube embed player injection (site pack) ==\n";
+$ytPack10d = class_exists('GLPE_SitePacks') ? GLPE_SitePacks::forUrl('https://www.youtube.com/watch?v=dQw4w9WgXcQ') : null;
+$ytOpts10d = ['showToolbar' => false];
+if ($ytPack10d && !empty($ytPack10d['doc_filter']) && is_callable($ytPack10d['doc_filter'])) {
+    $ytOpts10d['docFilter'] = $ytPack10d['doc_filter'];
+}
+$ytPage = $engine->rewriteHtml('<html><head><title>t</title></head><body><p>x</p></body></html>', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', $ytOpts10d);
 check('watch page gets embed player', strpos($ytPage, 'youtube-nocookie.com/embed/dQw4w9WgXcQ') !== false, $ytPage);
 check('iframe src stays direct (documented exception)', strpos($ytPage, 'src="https://www.youtube-nocookie.com/embed/') !== false);
-$ytShort = $engine->rewriteHtml('<html><body></body></html>', 'https://youtu.be/dQw4w9WgXcQ', ['showToolbar' => false]);
+$ytShortOpts = $ytOpts10d;
+$ytShort = $engine->rewriteHtml('<html><body></body></html>', 'https://youtu.be/dQw4w9WgXcQ', $ytShortOpts);
 check('short links get embed player', strpos($ytShort, 'embed/dQw4w9WgXcQ') !== false);
 $nonYt = $engine->rewriteHtml('<html><body></body></html>', 'https://www.google.com/', ['showToolbar' => false]);
 check('other pages untouched', strpos($nonYt, '__glpe_ytplayer') === false);
@@ -1494,6 +1501,131 @@ check('py: writer POSTs replay through a challenge', strpos($pySrc22, 'class Edg
 check('py: stream reader recovers from a stale challenge', strpos($pySrc22, '_recover_edge_challenge') !== false);
 check('py: PHP and Python share the canonical browser UA', strpos($pySrc22, 'Chrome/131.0.0.0 Safari/537.36') !== false
     && strpos($pySrc22, 'AppleWebKit/537.36') !== false && strpos($pySrc22, 'WordPress/') === false);
+
+// section cleanup
+foreach ((array)@scandir($diagStoreDir) as $n21) { if ($n21 !== '.' && $n21 !== '..') { @unlink($diagStoreDir . '/' . $n21); } }
+@rmdir($diagStoreDir);
+foreach ((array)@scandir($diagEmptyDir) as $n21) { if ($n21 !== '.' && $n21 !== '..') { @unlink($diagEmptyDir . '/' . $n21); } }
+@rmdir($diagEmptyDir);
+GLPE_Hub::$testDir = null;
+GLPE_Diag_Api::$testDir = null;
+update_option('glpe_diag_enabled', '0');
+update_option('glpe_diag_key', '');
+
+// == 23. v6.5.0: site packs (per-site special solutions) + SPA-era engine upgrades ==
+echo "\n== 23. Site packs: registry, matching, injection ==\n";
+
+if (!class_exists('GLPE_SitePacks')) {
+    require_once $root . '/glpe-viewer/includes/SitePacks.php';
+}
+
+// 23a. registry loads the shipped packs
+$packs23 = GLPE_SitePacks::all();
+$packIds23 = [];
+foreach ($packs23 as $p23) { $packIds23[] = $p23['id']; }
+check('registry: youtube pack loaded', in_array('youtube', $packIds23, true), implode(',', $packIds23));
+check('registry: duck.ai pack loaded', in_array('duck-ai', $packIds23, true));
+check('registry: every pack has match list', (bool)array_reduce($packs23, function($carry, $p) { return $carry && !empty($p['match']) && is_array($p['match']); }, true));
+
+// 23b. host matching matrix
+check('match: exact host', GLPE_SitePacks::hostMatches('duck.ai', 'duck.ai'));
+check('match: wildcard covers bare host', GLPE_SitePacks::hostMatches('duck.ai', '*.duck.ai'));
+check('match: wildcard covers subdomain', GLPE_SitePacks::hostMatches('www.duck.ai', '*.duck.ai'));
+check('match: wildcard rejects sibling', !GLPE_SitePacks::hostMatches('notduck.ai', '*.duck.ai'));
+check('match: wildcard rejects deeper suffix', !GLPE_SitePacks::hostMatches('evil-duck.ai', '*.duck.ai'));
+check('match: exact rejects subdomain', !GLPE_SitePacks::hostMatches('www.example.com', 'example.com'));
+check('match: empty pattern never matches', !GLPE_SitePacks::hostMatches('anything.test', ''));
+
+check('forUrl: duck.ai gets its pack', ($p23a = GLPE_SitePacks::forUrl('https://duck.ai/')) !== null && $p23a['id'] === 'duck-ai');
+check('forUrl: duck.ai subdomain gets its pack', ($p23b = GLPE_SitePacks::forUrl('https://mx.duck.ai/x')) !== null && $p23b['id'] === 'duck-ai');
+check('forUrl: youtube watch gets its pack', ($p23c = GLPE_SitePacks::forUrl('https://www.youtube.com/watch?v=x')) !== null && $p23c['id'] === 'youtube');
+check('forUrl: youtu.be gets its pack', ($p23d = GLPE_SitePacks::forUrl('https://youtu.be/x')) !== null && $p23d['id'] === 'youtube');
+check('forUrl: unknown host gets none', GLPE_SitePacks::forUrl('https://example.org/') === null);
+check('forUrl: garbage input gets none', GLPE_SitePacks::forUrl('not-a-url') === null);
+
+// 23c. samples feed the viewer list
+$samples23 = GLPE_SitePacks::samples();
+$sampleUrls23 = [];
+foreach ($samples23 as $s23) { $sampleUrls23[] = $s23['sample']; }
+check('samples: duck.ai advertised', in_array('https://duck.ai/', $sampleUrls23, true));
+check('samples: youtube advertised', in_array('https://www.youtube.com/', $sampleUrls23, true));
+check('samples: every entry carries a Persian label', (bool)array_reduce($samples23, function($carry, $s) { return $carry && $s['label'] !== ''; }, true));
+
+// 23d. request-header fills — gaps only, client wins, injection-safe
+$hdrBase23 = ['user-agent' => 'Browser/1.0'];
+GLPE_SitePacks::applyRequestHeaders($hdrBase23, ['req_headers' => ['X-Test-A' => "val\r\n-injected", 'user-agent' => 'PACK-OOVERRIDE']]);
+check('req headers: missing header filled', isset($hdrBase23['x-test-a']));
+check('req headers: CR/LF stripped', $hdrBase23['x-test-a'] === 'val-injected', isset($hdrBase23['x-test-a']) ? $hdrBase23['x-test-a'] : '');
+check('req headers: client header never overridden', $hdrBase23['user-agent'] === 'Browser/1.0');
+GLPE_SitePacks::applyRequestHeaders($hdrBase23, null);
+check('req headers: null pack tolerated', count($hdrBase23) === 2);
+
+// 23e. pack client helper rides after the companion
+$duckOpts23 = ['showToolbar' => false];
+$duckPack23 = GLPE_SitePacks::forUrl('https://duck.ai/');
+if ($duckPack23 && !empty($duckPack23['pack_js'])) { $duckOpts23['packJs'] = $duckPack23['pack_js']; }
+$duckPage23 = $engine->rewriteHtml('<html><head><title>t</title></head><body><p>x</p></body></html>', 'https://duck.ai/', $duckOpts23);
+check('pack js injected for duck.ai documents', strpos($duckPage23, '/duckchat/v1/status') !== false);
+check('pack js follows the companion context', strpos($duckPage23, 'window.__glpe_ctx__') !== false && strpos($duckPage23, 'window.__glpe_ctx__') < strpos($duckPage23, '/duckchat/v1/status'));
+$plainPage23 = $engine->rewriteHtml('<html><head></head><body></body></html>', 'https://example.org/', ['showToolbar' => false]);
+check('pack js absent without a pack', strpos($plainPage23, '/duckchat/v1/status') === false);
+
+// 23f. doc filter hook — post-processing, invalid return ignored
+$optsFilter23 = ['showToolbar' => false, 'docFilter' => function($html) { return str_replace('<p>x</p>', '<p>filtered</p>', $html); }];
+$filteredPage23 = $engine->rewriteHtml('<html><body><p>x</p></body></html>', 'https://example.org/', $optsFilter23);
+check('doc filter transforms the document', strpos($filteredPage23, '<p>filtered</p>') !== false);
+$optsBadFilter23 = ['showToolbar' => false, 'docFilter' => function($html) { return 42; }];
+$badFilterPage23 = $engine->rewriteHtml('<html><body><p>keep</p></body></html>', 'https://example.org/', $optsBadFilter23);
+check('doc filter non-string return ignored', strpos($badFilterPage23, '<p>keep</p>') !== false);
+$optsNullFilter23 = ['showToolbar' => false, 'docFilter' => null];
+$nullFilterPage23 = $engine->rewriteHtml('<html><body><p>keep</p></body></html>', 'https://example.org/', $optsNullFilter23);
+check('doc filter null tolerated', strpos($nullFilterPage23, '<p>keep</p>') !== false);
+
+// 23g. YouTube embed now lives in the pack, not the engine
+$engineSrc23 = (string)file_get_contents($root . '/glpe-viewer/includes/Engine.php');
+check('engine: hardcoded youtube embed removed', strpos($engineSrc23, '__glpe_ytplayer') === false);
+check('engine: pack js injection hook present', strpos($engineSrc23, "options['packJs']") !== false);
+check('engine: doc filter hook present', strpos($engineSrc23, "options['docFilter']") !== false);
+$ytPackSrc23 = (string)file_get_contents($root . '/glpe-viewer/site-packs/youtube.php');
+check('youtube pack: embed injection present', strpos($ytPackSrc23, '__glpe_ytplayer') !== false && strpos($ytPackSrc23, 'youtube-nocookie.com/embed/') !== false);
+check('youtube pack: id guard on video id', strpos($ytPackSrc23, 'preg_match(\'#^[A-Za-z0-9_-]+$#\'') !== false);
+
+// 23h. dispatcher + viewer wiring
+$mainSrc23 = (string)file_get_contents($root . '/glpe-viewer/glpe-viewer.php');
+check('dispatcher resolves the site pack', strpos($mainSrc23, 'GLPE_SitePacks::forUrl') !== false);
+check('dispatcher applies pack request headers', strpos($mainSrc23, 'GLPE_SitePacks::applyRequestHeaders') !== false);
+check('viewer lists special-sample sites', strpos($mainSrc23, 'GLPE_SitePacks::samples') !== false && strpos($mainSrc23, 'سایت‌های نمونه با راه‌حل ویژه') !== false);
+check('main file guards optional SitePacks include', strpos($mainSrc23, "file_exists(GLPE_DIR . 'includes/SitePacks.php')") !== false);
+
+// 23i. response-header relay + streaming (engine upgrades of this release)
+check('relay: filter drops session records', !isset(GLPE_Engine::relayableHeaderValues(['Set-Cookie' => 'a=1', 'X-Keep' => 'yes'])['Set-Cookie'])
+    && isset(GLPE_Engine::relayableHeaderValues(['Set-Cookie' => 'a=1', 'X-Keep' => 'yes'])['X-Keep']));
+$relayOut23 = GLPE_Engine::relayableHeaderValues(['X-Multi' => ['a', 'b'], 'X-Inj' => "bad\r\nX-Evil: 1", 'x-frame-options' => 'DENY', 'Content-Security-Policy' => "default-src 'none'"]);
+check('relay: multi-value joined', $relayOut23['X-Multi'] === 'a, b', isset($relayOut23['X-Multi']) ? $relayOut23['X-Multi'] : '');
+check('relay: CR/LF stripped from values', $relayOut23['X-Inj'] === 'badX-Evil: 1', isset($relayOut23['X-Inj']) ? $relayOut23['X-Inj'] : '');
+check('relay: isolation headers dropped', !isset($relayOut23['x-frame-options']) && !isset($relayOut23['Content-Security-Policy']));
+check('relay: challenge/token headers survive', !isset(GLPE_Engine::relayableHeaderValues(['X-Vqd-Hash-1' => 'tok', 'Link' => '<a>; rel=next', 'Retry-After' => '3'])['skip-me'])
+    && isset(GLPE_Engine::relayableHeaderValues(['X-Vqd-Hash-1' => 'tok'])['X-Vqd-Hash-1'])
+    && isset(GLPE_Engine::relayableHeaderValues(['Retry-After' => '3'])['Retry-After']));
+check('engine: api streaming entry present', strpos($engineSrc23, 'function streamApiRequest') !== false);
+check('engine: streaming aborts for rewritable bodies', strpos($engineSrc23, 'needsRewrite') !== false);
+check('engine: content-type emitted on the stream path', strpos($engineSrc23, "'Content-Type: ' . trim(implode(', ', (array)") !== false);
+check('engine: GET chains retry once on transport failure', substr_count($engineSrc23, 'chainTries') >= 2);
+check('engine: subresource budget widened', strpos($engineSrc23, 'function hopTimeout') !== false);
+check('engine: worker/importScripts references wrapped', strpos($engineSrc23, 'importScripts') !== false && strpos($engineSrc23, '(?:Shared)?Worker') !== false);
+check('engine: json-schema identifiers untouched', strpos($engineSrc23, 'json-schema') !== false);
+
+// 23j. client companion additions (source checks)
+$clientSrc23 = (string)file_get_contents($root . '/glpe-viewer/includes/client.js');
+check('client: pre-insertion rewriting (createElement)', strpos($clientSrc23, 'document.createElement = function(tag, opts)') !== false);
+check('client: setAttribute rewriting', strpos($clientSrc23, 'Element.prototype.setAttribute') !== false);
+check('client: CSSOM url() guard', strpos($clientSrc23, 'rewriteCssUrls') !== false);
+check('client: event streams wrapped', strpos($clientSrc23, 'window.EventSource = WrappedEventSource') !== false);
+check('client: beacons ride the gateway', strpos($clientSrc23, 'navigator.sendBeacon = function') !== false);
+check('client: offline scripts denied gracefully', strpos($clientSrc23, 'sw.register = function') !== false);
+check('client: blob workers get the bootstrap', strpos($clientSrc23, '__glpe_worker_ctx__') !== false);
+check('client: refused sockets degrade, never throw', strpos($clientSrc23, "throw new Error('GLPE: socket") === false && strpos($clientSrc23, 'window.WebSocket = GuardedSocket') !== false);
+check('client: schema identifier keys skipped in JSON', strpos($clientSrc23, "schemaIdKeys") !== false);
 
 // section cleanup
 foreach ((array)@scandir($diagStoreDir) as $n21) { if ($n21 !== '.' && $n21 !== '..') { @unlink($diagStoreDir . '/' . $n21); } }

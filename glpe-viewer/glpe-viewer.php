@@ -3,7 +3,7 @@
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
  * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با کدگذاری کامل تبادلات، بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 6.4.0
+ * Version: 6.5.0
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '6.4.0');
+define('GLPE_VERSION', '6.5.0');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -79,6 +79,12 @@ require_once GLPE_DIR . 'includes/Codec.php';
 require_once GLPE_DIR . 'includes/Engine.php';
 require_once GLPE_DIR . 'includes/Access.php';
 require_once GLPE_DIR . 'includes/Hub.php';
+// Per-site special solutions (v6.5.0) — one adapter file per destination
+// that needs tuning beyond the general engine; a missing directory or a
+// malformed pack only removes the tuning, never the display path.
+if (file_exists(GLPE_DIR . 'includes/SitePacks.php')) {
+    require_once GLPE_DIR . 'includes/SitePacks.php';
+}
 // Remote-diagnostics API (v6.3.0): optional by design — a missing file only
 // removes the diag card + endpoint, never the site.
 if (file_exists(GLPE_DIR . 'includes/DiagApi.php')) {
@@ -402,6 +408,20 @@ class GLPE_Plugin {
             $customHeaders['accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
         }
 
+        // Site pack for this destination — a special solution ships with the
+        // plugin as a per-site adapter (request-header fills, client-side
+        // helper, document post-processing).
+        $sitePack = class_exists('GLPE_SitePacks') ? GLPE_SitePacks::forUrl($targetUrl) : null;
+        if ($sitePack) {
+            GLPE_SitePacks::applyRequestHeaders($customHeaders, $sitePack);
+            if (!empty($sitePack['pack_js']) && is_string($sitePack['pack_js'])) {
+                $options['packJs'] = $sitePack['pack_js'];
+            }
+            if (!empty($sitePack['doc_filter']) && is_callable($sitePack['doc_filter'])) {
+                $options['docFilter'] = $sitePack['doc_filter'];
+            }
+        }
+
         try {
             // Media targets (video/audio bytes) stream straight through:
             // buffering a full video in PHP memory would exhaust the server
@@ -413,6 +433,22 @@ class GLPE_Plugin {
                 // streaming unavailable → fall through to the buffered path
             }
 
+            // Application exchanges (fetch/XHR — every request whose
+            // sec-fetch-dest is not a document/frame, plus explicit
+            // event-stream accepts) stream their response body straight
+            // through: long-running chat-style endpoints outlast any sane
+            // buffered timeout, and event streams only make sense when the
+            // chunks arrive live. Bodies that need server-side rewriting
+            // (HTML fragments, sheets, script files) abort the stream and
+            // land in the buffered path below.
+            $fetchDest = isset($customHeaders['sec-fetch-dest']) ? strtolower(trim((string)$customHeaders['sec-fetch-dest'])) : '';
+            $acceptHdr = isset($customHeaders['accept']) ? strtolower((string)$customHeaders['accept']) : '';
+            $isAppExchange = ($fetchDest !== '' && !in_array($fetchDest, ['document', 'iframe', 'frame'], true))
+                || strpos($acceptHdr, 'text/event-stream') !== false;
+            if ($isAppExchange && $engine->streamApiRequest($targetUrl, $method, $postData, $customHeaders)) {
+                exit;
+            }
+
             $result = $engine->executeRequest($targetUrl, $method, $postData, $customHeaders);
 
             // Fresh content on every request; allow embedding from any origin.
@@ -420,11 +456,31 @@ class GLPE_Plugin {
             header('Access-Control-Allow-Origin: *');
             header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
             header('Access-Control-Allow-Headers: *');
+            header('Access-Control-Expose-Headers: *');
 
             if (function_exists('header_remove')) {
                 header_remove('X-Frame-Options');
                 header_remove('Content-Security-Policy');
                 header_remove('X-Powered-By');
+                header_remove('Cross-Origin-Opener-Policy');
+                header_remove('Cross-Origin-Embedder-Policy');
+                header_remove('Cross-Origin-Resource-Policy');
+                header_remove('Permissions-Policy');
+                header_remove('Clear-Site-Data');
+                header_remove('Report-To');
+                header_remove('NEL');
+            }
+
+            // Relay the destination's own response headers (API tokens,
+            // challenge headers, pagination links, Retry-After — filtered
+            // through GLPE_Engine::relayableHeaderValues). Applications read
+            // these through response.headers.get(); a silently missing header
+            // breaks header-driven flows without any console error.
+            $relayHeaders = (isset($result['headers']) && is_array($result['headers']))
+                ? GLPE_Engine::relayableHeaderValues($result['headers'])
+                : [];
+            foreach ($relayHeaders as $hName => $hValue) {
+                header($hName . ': ' . $hValue, false);
             }
 
             $contentType = $result['contentType'];
@@ -726,7 +782,7 @@ class GLPE_Plugin {
                     </div>
                 </div>
 
-                <div style="display: flex; align-items: center; gap: 8px; font-size: 11px; color: #94a3b8;">
+                <div style="display: flex; align-items: center; gap: 8px; font-size: 11px; color: #94a3b8; flex-wrap: wrap;">
                     <span>سایت‌های نمونه:</span>
                     <?php
                     $presets = [
@@ -743,6 +799,25 @@ class GLPE_Plugin {
                         </a>
                     <?php endforeach; ?>
                 </div>
+
+                <?php
+                // Destinations with a site pack — the plugin ships a special
+                // solution for each of these (پلاگین داخلی سایت).
+                $siteSamples = class_exists('GLPE_SitePacks') ? GLPE_SitePacks::samples() : [];
+                if (!empty($siteSamples)): ?>
+                <div style="display: flex; align-items: center; gap: 8px; font-size: 11px; color: #94a3b8; flex-wrap: wrap; margin-top: 8px;">
+                    <span>سایت‌های نمونه با راه‌حل ویژه:</span>
+                    <?php foreach ($siteSamples as $sp):
+                        $encS = GLPE_Codec::encode($sp['sample']);
+                        $spUrl = add_query_arg(['_glpe' => '1', 'l' => $encS, 'nb' => '1'], home_url('/'));
+                    ?>
+                        <a href="<?php echo esc_url($spUrl); ?>" title="<?php echo esc_attr($sp['note']); ?>"
+                           style="color: #6ee7b7; text-decoration: none; background: rgba(5,150,105,0.10); border: 1px solid #059669; padding: 3px 8px; border-radius: 6px;">
+                            ⚡ <?php echo esc_html($sp['label']); ?>
+                        </a>
+                    <?php endforeach; ?>
+                </div>
+                <?php endif; ?>
             </form>
 
             <div style="display: flex; justify-content: center; gap: 8px; margin-top: 14px; flex-wrap: wrap; align-items: center;">
