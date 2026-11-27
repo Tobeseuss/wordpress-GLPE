@@ -36,6 +36,7 @@ class GLPE_Engine {
     private $viewScript;
     private $ownHost = '';
     private $srcdocDepth = 0;
+    private $pathEntry = false;
     private $userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
     /**
@@ -46,10 +47,15 @@ class GLPE_Engine {
      *                              keep their destination records in a jar
      *                              of their own — separate from the visitor's
      *                              normal records and wiped on session close.
+     * @param bool   $pathEntry     the host routes the reserved /_glpe/...
+     *                              namespace into WordPress, so subresource
+     *                              references may carry the destination's
+     *                              own URL path (see subEntryPath).
      */
-    public function __construct($viewScript = '', $isTempCookies = false, $jarSuffix = '') {
+    public function __construct($viewScript = '', $isTempCookies = false, $jarSuffix = '', $pathEntry = false) {
         $this->cookies = new GLPE_Cookies($isTempCookies, $jarSuffix);
         $this->viewScript = $viewScript;
+        $this->pathEntry = $pathEntry ? true : false;
         $own = strtolower((string)parse_url((string)$viewScript, PHP_URL_HOST));
         if ($own !== '') {
             $this->ownHost = $own;
@@ -97,6 +103,7 @@ class GLPE_Engine {
             strpos($trimmed, 'data:') === 0 ||
             strpos($trimmed, 'blob:') === 0 ||
             strpos($trimmed, 'javascript:') === 0 ||
+            strpos($trimmed, 'about:') === 0 ||
             strpos($trimmed, '#') === 0 ||
             strpos($trimmed, '_glpe=') !== false ||
             strpos($trimmed, '?l=') !== false ||
@@ -124,8 +131,22 @@ class GLPE_Engine {
         // emitted, unconditionally: there is no optional mode anymore.
         $payload = GLPE_Codec::encode($resolved);
 
-        $sep = (strpos($this->viewScript, '?') !== false) ? '&' : '?';
-        $viewUrl = $this->viewScript . $sep . 'l=' . $payload;
+        // Subresource references may additionally carry the destination's
+        // own URL path under the reserved /_glpe/ namespace (see
+        // subEntryPath) — destination-side code that validates its script
+        // and stylesheet URLs by path shape (module loaders, CDN row-key
+        // checks — e.g. YouTube's base module manager) keeps seeing the
+        // path it expects, while the host and query stay inside the token.
+        $entry = $this->viewScript;
+        if (!empty($options['sub']) && $this->pathEntry) {
+            $destPath = $this->subEntryPath($resolved);
+            if ($destPath !== '') {
+                $entry = add_query_arg(['_glpe' => '1'], home_url($destPath));
+            }
+        }
+
+        $sep = (strpos($entry, '?') !== false) ? '&' : '?';
+        $viewUrl = $entry . $sep . 'l=' . $payload;
 
         // Keep display flags on child links
         if (!empty($options['removeScripts'])) $viewUrl .= '&ns=1';
@@ -139,6 +160,28 @@ class GLPE_Engine {
         if (!empty($options['vsProfile']))     $viewUrl .= '&vs=1';
 
         return $viewUrl;
+    }
+
+    /**
+     * Path-preserving gateway entry for a subresource reference: the
+     * destination's own URL path rides the URL under the reserved /_glpe/
+     * namespace. Only the PATH is mirrored — scheme, host, port and query
+     * of the destination remain inside the opaque token, so the reference
+     * still reveals nothing about where it actually goes. Returns '' when
+     * the path cannot be mirrored safely (shape, size or charset).
+     */
+    private function subEntryPath($resolved) {
+        $p = (string)parse_url((string)$resolved, PHP_URL_PATH);
+        if ($p === '' || $p[0] !== '/' || strlen($p) > 384) {
+            return '';
+        }
+        // RFC 3986 path characters only — anything else (raw quotes, angle
+        // brackets, control bytes from a malformed reference) drops the
+        // decoration and falls back to the root entry.
+        if (!preg_match('#^/[A-Za-z0-9%.\-_~!$&\'()*+,;=:@/]*$#', $p)) {
+            return '';
+        }
+        return '/_glpe' . $p;
     }
 
     /**
@@ -193,6 +236,8 @@ class GLPE_Engine {
      * Rewrites CSS url(...) and @import references.
      */
     public function rewriteCss($css, $baseUrl, $options = []) {
+        // CSS-served references are subresources.
+        $options['sub'] = 1;
         $css = preg_replace_callback('/@import\s+[\'"](.*?)[\'"]/i', function($m) use ($baseUrl, $options) {
             return '@import "' . $this->makeViewUrl($m[1], $baseUrl, $options) . '"';
         }, $css);
@@ -211,6 +256,8 @@ class GLPE_Engine {
      * Rewrites responsive srcset attributes (comma-separated URL descriptor pairs).
      */
     public function rewriteSrcset($srcset, $baseUrl, $options = []) {
+        // Image candidates are subresources.
+        $options['sub'] = 1;
         // Candidate separators are commas FOLLOWED BY whitespace (or the end
         // of the attribute). Commas inside a reference (e.g. a CDN size hint
         // like "s(w:526,h:298),webp/…") belong to the URL itself and must
@@ -234,6 +281,9 @@ class GLPE_Engine {
      */
     public function rewriteJs($js, $baseUrl, $options = []) {
         if (empty($js)) return $js;
+        // JS-borne references (chunks, workers, XHR endpoints) are
+        // subresources.
+        $options['sub'] = 1;
         // 1. Absolute AND protocol-relative references in string literals.
         // Bundler-era sites (e.g. CDN-hosted module graphs) reference their
         // chunks as "//host/path" — protocol-relative strings would resolve
@@ -426,11 +476,21 @@ class GLPE_Engine {
         if (strpos($html, '=') === false || strpos($html, '<') === false) {
             return $html;
         }
+        // Megabyte-class documents can exceed the default PCRE backtrack
+        // budget inside the code-span split below — raise it for this pass
+        // (silently: hosts may lock it) so the normaliser survives pages the
+        // size of modern search results.
+        @ini_set('pcre.backtrack_limit', '100000000');
         $parts = preg_split(
             '/(<script\b[^>]*>[\s\S]*?<\/script\s*>|<style\b[^>]*>[\s\S]*?<\/style\s*>|<!--[\s\S]*?-->)/i',
             $html, -1, PREG_SPLIT_DELIM_CAPTURE
         );
-        if (count($parts) === 1) {
+        // A failed split (budget or engine error) must degrade gracefully:
+        // unquoted attributes stay as delivered instead of fataling the page.
+        if (!is_array($parts) || count($parts) === 1) {
+            if (!is_array($parts)) {
+                return $html;
+            }
             return $this->quoteUnquotedInTags($html);
         }
         $out = '';
@@ -497,6 +557,12 @@ class GLPE_Engine {
         // directly around the gateway. Normalising to quoted form up front
         // makes the whole pipeline cover this page style as well.
         $html = $this->quoteUnquotedAttributes($html);
+        // Subresource attribute passes (scripts, sheets, images, media, SVG)
+        // may adopt the path-preserving gateway entry; document-level
+        // references (links, forms, frames, meta refresh) keep the plain
+        // root entry so the visible address bar never leaks a path.
+        $subOptions = $options;
+        $subOptions['sub'] = 1;
         $removeScripts = !empty($options['removeScripts']);
         $removeImages  = !empty($options['removeImages']);
         $stripTitle    = !empty($options['stripTitle']);
@@ -549,32 +615,32 @@ class GLPE_Engine {
             $html = preg_replace('/<img\b[^>]*>/i', '<span style="display:inline-block; padding:4px 8px; font-size:11px; color:#94a3b8; border:1px dashed #cbd5e1; border-radius:4px;">[تصویر حذف شد]</span>', $html);
             $html = preg_replace('/<picture\b[^>]*>(.*?)<\/picture>/is', '', $html);
         } else {
-            $html = preg_replace_callback('/<img\b([^>]*?)\bsrc=([\'"])(.*?)\2([^>]*)>/i', function($m) use ($targetUrl, $options) {
-                return '<img' . $m[1] . 'src=' . $m[2] . $this->makeViewUrl($m[3], $targetUrl, $options) . $m[2] . $m[4] . '>';
+            $html = preg_replace_callback('/<img\b([^>]*?)\bsrc=([\'"])(.*?)\2([^>]*)>/i', function($m) use ($targetUrl, $subOptions) {
+                return '<img' . $m[1] . 'src=' . $m[2] . $this->makeViewUrl($m[3], $targetUrl, $subOptions) . $m[2] . $m[4] . '>';
             }, $html);
 
             $html = preg_replace_callback('/<(img|source)\b([^>]*?)\bsrcset=([\'"])(.*?)\3([^>]*)>/i', function($m) use ($targetUrl, $options) {
                 return '<' . $m[1] . $m[2] . 'srcset=' . $m[3] . $this->rewriteSrcset($m[4], $targetUrl, $options) . $m[3] . $m[5] . '>';
             }, $html);
 
-            $html = preg_replace_callback('/<(img|source)\b([^>]*?)\b(data-src|data-url|data-original)=([\'"])(.*?)\4([^>]*)>/i', function($m) use ($targetUrl, $options) {
-                return '<' . $m[1] . $m[2] . $m[3] . '=' . $m[4] . $this->makeViewUrl($m[5], $targetUrl, $options) . $m[4] . $m[6] . '>';
+            $html = preg_replace_callback('/<(img|source)\b([^>]*?)\b(data-src|data-url|data-original)=([\'"])(.*?)\4([^>]*)>/i', function($m) use ($targetUrl, $subOptions) {
+                return '<' . $m[1] . $m[2] . $m[3] . '=' . $m[4] . $this->makeViewUrl($m[5], $targetUrl, $subOptions) . $m[4] . $m[6] . '>';
             }, $html);
         }
 
         // 7. Media elements
-        $html = preg_replace_callback('/<(video|audio|track|embed|object)\b([^>]*?)\bsrc=([\'"])(.*?)\3([^>]*)>/i', function($m) use ($targetUrl, $options) {
-            return '<' . $m[1] . $m[2] . 'src=' . $m[3] . $this->makeViewUrl($m[4], $targetUrl, $options) . $m[3] . $m[5] . '>';
+        $html = preg_replace_callback('/<(video|audio|track|embed|object)\b([^>]*?)\bsrc=([\'"])(.*?)\3([^>]*)>/i', function($m) use ($targetUrl, $subOptions) {
+            return '<' . $m[1] . $m[2] . 'src=' . $m[3] . $this->makeViewUrl($m[4], $targetUrl, $subOptions) . $m[3] . $m[5] . '>';
         }, $html);
 
         // 7a. <object data="..."> resolves exactly like a src attribute —
         // left alone it would fetch the resource straight from the origin.
-        $html = preg_replace_callback('/<(object|embed)\b([^>]*?)\bdata=([\'"])(.*?)\3([^>]*)>/i', function($m) use ($targetUrl, $options) {
-            return '<' . $m[1] . $m[2] . 'data=' . $m[3] . $this->makeViewUrl($m[4], $targetUrl, $options) . $m[3] . $m[5] . '>';
+        $html = preg_replace_callback('/<(object|embed)\b([^>]*?)\bdata=([\'"])(.*?)\3([^>]*)>/i', function($m) use ($targetUrl, $subOptions) {
+            return '<' . $m[1] . $m[2] . 'data=' . $m[3] . $this->makeViewUrl($m[4], $targetUrl, $subOptions) . $m[3] . $m[5] . '>';
         }, $html);
 
-        $html = preg_replace_callback('/<video\b([^>]*?)\bposter=([\'"])(.*?)\2([^>]*)>/i', function($m) use ($targetUrl, $options) {
-            return '<video' . $m[1] . 'poster=' . $m[2] . $this->makeViewUrl($m[3], $targetUrl, $options) . $m[2] . $m[4] . '>';
+        $html = preg_replace_callback('/<video\b([^>]*?)\bposter=([\'"])(.*?)\2([^>]*)>/i', function($m) use ($targetUrl, $subOptions) {
+            return '<video' . $m[1] . 'poster=' . $m[2] . $this->makeViewUrl($m[3], $targetUrl, $subOptions) . $m[2] . $m[4] . '>';
         }, $html);
 
         // 8. Anchors
@@ -652,14 +718,14 @@ class GLPE_Engine {
         }, $html);
 
         // 10. External references (sheets, icons, fonts)
-        $html = preg_replace_callback('/<link\b([^>]*?)\bhref=([\'"])(.*?)\2([^>]*)>/i', function($m) use ($targetUrl, $options) {
-            return '<link' . $m[1] . 'href=' . $m[2] . $this->makeViewUrl($m[3], $targetUrl, $options) . $m[2] . $m[4] . '>';
+        $html = preg_replace_callback('/<link\b([^>]*?)\bhref=([\'"])(.*?)\2([^>]*)>/i', function($m) use ($targetUrl, $subOptions) {
+            return '<link' . $m[1] . 'href=' . $m[2] . $this->makeViewUrl($m[3], $targetUrl, $subOptions) . $m[2] . $m[4] . '>';
         }, $html);
 
         // 11. Source files
         if (!$removeScripts) {
-            $html = preg_replace_callback('/<script\b([^>]*?)\bsrc=([\'"])(.*?)\2([^>]*)>/i', function($m) use ($targetUrl, $options) {
-                return '<script' . $m[1] . 'src=' . $m[2] . $this->makeViewUrl($m[3], $targetUrl, $options) . $m[2] . $m[4] . '>';
+            $html = preg_replace_callback('/<script\b([^>]*?)\bsrc=([\'"])(.*?)\2([^>]*)>/i', function($m) use ($targetUrl, $subOptions) {
+                return '<script' . $m[1] . 'src=' . $m[2] . $this->makeViewUrl($m[3], $targetUrl, $subOptions) . $m[2] . $m[4] . '>';
             }, $html);
 
             $html = preg_replace_callback('/<script\b([^>]*)>(.*?)<\/script>/is', function($m) use ($targetUrl, $options) {
@@ -688,8 +754,8 @@ class GLPE_Engine {
         }, $html);
 
         // 15. SVG references
-        $html = preg_replace_callback('/<(use|image)\b([^>]*?)\b(href|xlink:href)=([\'"])(.*?)\4([^>]*)>/i', function($m) use ($targetUrl, $options) {
-            return '<' . $m[1] . $m[2] . $m[3] . '=' . $m[4] . $this->makeViewUrl($m[5], $targetUrl, $options) . $m[4] . $m[6] . '>';
+        $html = preg_replace_callback('/<(use|image)\b([^>]*?)\b(href|xlink:href)=([\'"])(.*?)\4([^>]*)>/i', function($m) use ($targetUrl, $subOptions) {
+            return '<' . $m[1] . $m[2] . $m[3] . '=' . $m[4] . $this->makeViewUrl($m[5], $targetUrl, $subOptions) . $m[4] . $m[6] . '>';
         }, $html);
 
         // 15a. Inline event handlers (onclick="location='https://…'") carry
@@ -731,6 +797,12 @@ class GLPE_Engine {
                 'ri'  => $removeImages,
                 'st'  => $stripTitle,
                 'mb'  => !empty($options['mobileView']),
+                // Path-preserving entry available: runtime-built subresource
+                // URLs adopt the same /_glpe/<destination path> shape, and
+                // references the page's own code constructs out of a
+                // path-shaped entry get re-anchored back onto the
+                // destination before they are wrapped afresh.
+                'pe'  => $this->pathEntry ? 1 : 0,
             ];
             // Virtual-browser sandbox pages carry their host-consistent
             // identity profile: the companion spoofs navigator, Intl, screen

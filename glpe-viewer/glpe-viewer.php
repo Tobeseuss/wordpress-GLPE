@@ -3,7 +3,7 @@
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
  * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با کدگذاری کامل تبادلات، بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 7.1.0
+ * Version: 7.2.0
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '7.1.0');
+define('GLPE_VERSION', '7.2.0');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -180,6 +180,8 @@ class GLPE_Plugin {
         if (class_exists('GLPE_VirtualBrowser')) {
             add_action('admin_post_glpe_vb_start', ['GLPE_VirtualBrowser', 'handleStart']);
         }
+        // Path-preserving gateway entry self-test (v7.2.0).
+        add_action('admin_post_glpe_path_probe', [$this, 'handlePathProbe']);
 
         // DNS hardening: every WP-HTTP request through the cURL transport gets
         // resolve pins staged by GLPE_Dns::planHop plus tuned connect budgets.
@@ -280,6 +282,19 @@ class GLPE_Plugin {
             return;
         }
 
+        // 0z. Path-entry self-check marker: a signed-out zero-data reply
+        //     that answers BEFORE the access gate so the admin self-test can
+        //     verify the front controller routes the reserved /_glpe/...
+        //     namespace into WordPress. It reveals only that the plugin is
+        //     present (the viewer page already does that publicly).
+        if (!isset($_GET['l']) && !isset($_POST['l']) && isset($_GET['mode']) && $_GET['mode'] === 'gwprobe') {
+            status_header(200);
+            nocache_headers();
+            header('Content-Type: text/plain; charset=utf-8');
+            echo 'glpe-path-ok';
+            exit;
+        }
+
         // 0. Access gate — the viewer is reserved for signed-in users that
         //    hold the "glpe_browser" permission (administrators included).
         $verdict = GLPE_Access::verdict();
@@ -300,10 +315,22 @@ class GLPE_Plugin {
         // — separate from the visitor's normal records, wiped when the
         // sandbox session closes.
         $vsRequest = (isset($_GET['vs']) && $_GET['vs'] === '1');
+
+        // 0b. Path-entry evidence: a request that reached the dispatcher
+        //     through a /_glpe/... path proves the front controller routes
+        //     the reserved namespace — remember it once so subresource
+        //     references can adopt the path-preserving entry.
+        $reqPath = isset($_SERVER['REQUEST_URI']) ? (string)parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH) : '';
+        if ($reqPath !== '' && strpos($reqPath, '/_glpe') === 0 && get_option('glpe_path_entry', '') !== 'yes') {
+            update_option('glpe_path_entry', 'yes', false);
+        }
+        $pathEntry = $this->pathEntryAvailable();
+
         $engine = new GLPE_Engine(
             $viewScript,
             $tempCookies,
-            $vsRequest && class_exists('GLPE_Vb_Sandbox') ? GLPE_Vb_Sandbox::JAR_SUFFIX : ''
+            $vsRequest && class_exists('GLPE_Vb_Sandbox') ? GLPE_Vb_Sandbox::JAR_SUFFIX : '',
+            $pathEntry
         );
 
         // 1. Extract the display link first — control modes below only apply
@@ -551,6 +578,12 @@ class GLPE_Plugin {
                 : $targetUrl;
 
             if (stripos($contentType, 'text/html') !== false) {
+                // Megabyte-class documents (modern search results and app
+                // shells) can exceed the default PCRE backtrack budget inside
+                // the rewriting passes — raise it for this request (silently:
+                // hosts may lock it) before the pipeline starts.
+                @ini_set('pcre.backtrack_limit', '100000000');
+                @ini_set('pcre.recursion_limit', '1000000');
                 $body = $engine->rewriteHtml($body, $rewriteBase, $options);
 
                 // Region-restricted service: some destinations offer their
@@ -643,6 +676,73 @@ class GLPE_Plugin {
     private function currentRequestUrl() {
         $uri = isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : '/';
         return esc_url_raw(home_url($uri));
+    }
+
+    /**
+     * Whether the path-preserving gateway entry (/_glpe/<destination path>)
+     * is servable on this host: the web server's front controller must
+     * route non-file paths into WordPress. Resolution order: an explicit
+     * filter, the stored probe verdict, then the permalink structure as a
+     * passive heuristic (pretty permalinks imply a working front
+     * controller; PATHINFO-style structures do not).
+     */
+    private function pathEntryAvailable() {
+        $forced = apply_filters('glpe_path_entry', null);
+        if ($forced !== null) {
+            return (bool)$forced;
+        }
+        $opt = get_option('glpe_path_entry', '');
+        if ($opt === 'yes') {
+            return true;
+        }
+        if ($opt === 'no') {
+            return false;
+        }
+        $struct = (string)get_option('permalink_structure', '');
+        if ($struct !== '' && strpos($struct, '/index.php/') !== 0) {
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Admin self-test for the path-preserving entry: the host fetches its
+     * own /_glpe/ probe URL once and stores the verdict, so subresource
+     * references know whether the front controller routes the namespace.
+     * The browser identity rides the probe (edge layers reject the CMS's
+     * default identity before PHP runs).
+     */
+    public function handlePathProbe() {
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html__('Not permitted.', 'glpe-viewer'));
+        }
+        check_admin_referer('glpe_path_probe');
+
+        $probeUrl = add_query_arg(
+            ['_glpe' => '1', 'mode' => 'gwprobe'],
+            home_url('/_glpe-probe/route-check')
+        );
+        $ua = defined('HubTune::BROWSER_UA') ? constant('HubTune::BROWSER_UA') : '';
+        if ($ua === '') {
+            $ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+        }
+        $args = [
+            'timeout'    => 8,
+            'redirection' => 0,
+            'user-agent' => $ua,
+            'headers'    => ['Accept' => 'text/plain, */*;q=0.8'],
+        ];
+        $response = wp_remote_get($probeUrl, $args);
+        $ok = !is_wp_error($response)
+            && (int)wp_remote_retrieve_response_code($response) === 200
+            && trim((string)wp_remote_retrieve_body($response)) === 'glpe-path-ok';
+        update_option('glpe_path_entry', $ok ? 'yes' : 'no', false);
+
+        wp_safe_redirect(add_query_arg(
+            ['page' => 'glpe-viewer', 'cp_msg' => $ok ? 'path-ok' : 'path-no'],
+            admin_url('admin.php')
+        ));
+        exit;
     }
 
     /**
@@ -1105,9 +1205,13 @@ class GLPE_Plugin {
                 'diag-off'       => 'رابط تشخیص از راه دور غیرفعال شد و فایل واگذاری آن حذف شد.',
                 'vb-started'     => 'سرویس مرورگر مجازی روی میزبان اجرا شد و به سلامت پاسخ می‌دهد.',
                 'vb-failed'      => 'اجرای سرویس مرورگر مجازی ممکن نشد — وضعیت دقیق در کارت «مرورگر مجازی» آمده است.',
+                'path-ok'        => 'تست مسیر موفق بود — پیشوند مسیر مقصد روی نشانی زیرمنبع‌ها فعال شد.',
             ];
             if ($cpNotice !== '' && isset($cpNotices[$cpNotice])) {
                 echo '<div class="notice notice-success is-dismissible"><p>' . esc_html($cpNotices[$cpNotice]) . '</p></div>';
+            }
+            if ($cpNotice === 'path-no') {
+                echo '<div class="notice notice-error is-dismissible"><p>تست مسیر ناموفق بود — سرور این هاست نشانی‌های /_glpe/... را به وردپرس نمی‌رساند؛ زیرمنبع‌ها روی نشانی ریشه می‌مانند (کارکرد عادی سالم است، فقط قابلیت سازگاری با سایت‌هایی مثل یوتیوب فعال نمی‌شود).</p></div>';
             }
             if ($cpNotice === 'diag-self-code') {
                 $dcode = isset($_GET['dcode']) ? (int)$_GET['dcode'] : 0;
@@ -1288,6 +1392,8 @@ class GLPE_Plugin {
 
             <?php if (class_exists('GLPE_VirtualBrowser')) { $this->renderVirtualBrowserCard(); } ?>
 
+            <?php $this->renderPathEntryCard(); ?>
+
             <?php $this->renderAccessCard(); ?>
 
             <?php if (class_exists('GLPE_Diag_Api')) { GLPE_Diag_Api::renderCard(); } ?>
@@ -1346,6 +1452,56 @@ class GLPE_Plugin {
                 موتور فعال در فهرست «موتور مرورگر مجازی» فرم بالا قابل تغییر است (auto / service / sandbox).
                 اگر هاست اجازهٔ اجرای فرایند پس‌زمینه نمی‌دهد، سرویس را به‌صورت دستی (داِیمن) اجرا کنید:
                 <code style="direction:ltr; display:inline-block;">GLPE_VB_PORT=3007 GLPE_VB_KEYFILE=&lt;uploads&gt;/glpe-vb-key.txt GLPE_VB_CHROME=&lt;chromium&gt; bun &lt;plugin&gt;/vb/vb-service.js</code>
+            </p>
+        </div>
+        <?php
+    }
+
+    /**
+     * Path-entry card (v7.2.0): shows whether subresource references may
+     * carry the destination's URL path under the reserved /_glpe/ namespace
+     * — the compatibility layer that lets path-validating destinations
+     * (module loaders such as YouTube's) boot inside the gateway — and
+     * offers the admin self-test that proves the front controller routes
+     * that namespace on this host.
+     */
+    private function renderPathEntryCard() {
+        $opt = get_option('glpe_path_entry', '');
+        $struct = (string)get_option('permalink_structure', '');
+        if ($opt === 'yes') {
+            $state = 'active — verified';
+            $ok = true;
+        } elseif ($opt === 'no') {
+            $state = 'inactive — probe says this host does not route /_glpe/ paths';
+            $ok = false;
+        } elseif ($struct !== '' && strpos($struct, '/index.php/') !== 0) {
+            $state = 'active — inferred from pretty permalinks';
+            $ok = true;
+        } else {
+            $state = 'inactive — run the self-test to check this host';
+            $ok = false;
+        }
+        $probeUrl = wp_nonce_url(
+            admin_url('admin-post.php?action=glpe_path_probe'),
+            'glpe_path_probe'
+        );
+        ?>
+        <div style="background: #fff; border: 1px solid #ccd0d4; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+            <h3 style="margin-top: 0;">🧭 سازگاری نشانی زیرمنبع‌ها (پیشوند مسیر مقصد)</h3>
+            <p style="font-size: 13px; line-height: 2; color: #334155;">
+                زیرمنبع‌های صفحه (اسکریپت‌ها، شییت‌های استایل، تصاویر) می‌توانند مسیر خودشان از سایت مقصد را زیر فضای نام رزرو‌شدهٔ <code style="direction:ltr;">/_glpe/…</code> حمل کنند — میزبان و کوئری همچنان داخل توکن مبهم می‌مانند. برخی سایت‌ها (مثل یوتیوب) آدرس اسکریپت‌های خود را از نظر شکل مسیر اعتبارسنجی می‌کنند و بدون این لایه، بارگذاریشان داخل دروازه شکست می‌خورد.
+            </p>
+            <table class="widefat striped" style="max-width: 760px; direction: ltr; text-align: left;">
+                <tbody>
+                <tr><th style="width:170px;">path entry</th><td><span style="color:<?php echo $ok ? '#059669' : '#b45309'; ?>; font-weight:bold;"><?php echo esc_html($state); ?></span></td></tr>
+                </tbody>
+            </table>
+            <form method="post" action="<?php echo esc_url($probeUrl); ?>" style="margin-top: 14px; display: inline;">
+                <?php wp_nonce_field('glpe_path_probe'); ?>
+                <button type="submit" class="button button-primary">اجرای تست مسیر</button>
+            </form>
+            <p style="font-size: 12px; color: #64748b; line-height: 1.9; margin-bottom: 0;">
+                تست، یک درخواست از خود هاست به نشانی <code style="direction:ltr;">/_glpe-probe/route-check</code> می‌فرستد؛ اگر پاسخ رسید یعنی سرور مسیرهای دلخواه را به وردپرس می‌رساند و لایه فعال می‌شود — وگرنه همه‌چیز مثل قبل روی نشانی ریشه کار می‌کند.
             </p>
         </div>
         <?php

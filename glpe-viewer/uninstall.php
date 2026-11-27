@@ -42,6 +42,7 @@ $glpe_options = [
     'glpe_vb_endpoint',
     'glpe_vb_engine',
     'glpe_vb_vbs_index',
+    'glpe_path_entry',
 ];
 
 // Virtual browser sandbox sessions: reap the live temporary environments

@@ -220,7 +220,6 @@
   // Builds the display navigation address for a destination: the destination
   // itself only ever appears inside the wrapped token.
   function buildGatewayUrl(destHref) {
-    var sep = viewScript.indexOf('?') !== -1 ? '&' : '?';
     var flags = '';
     if (ctx.rs) flags += '&ns=1';
     if (ctx.ri) flags += '&ni=1';
@@ -230,6 +229,23 @@
     // Virtual-browser sandbox: every reference keeps riding the isolated
     // jar and the host-consistent identity of the temporary environment.
     if (ctx.vs) flags += '&vs=1';
+    // Path-preserving entry (server verified the host routes /_glpe/...):
+    // subresource references mirror the destination's own URL path under
+    // the reserved namespace — destination-side code that validates its
+    // script/stylesheet URLs by path shape keeps seeing what it expects.
+    // The destination's host and query stay inside the token.
+    if (ctx.pe) {
+      try {
+        var pu = new URL(destHref, currentTargetUrl);
+        if ((pu.protocol === 'http:' || pu.protocol === 'https:') &&
+            pu.pathname && pu.pathname.length <= 384 &&
+            /^[A-Za-z0-9%.\-_~!$&'()*+,;=:@\/]+$/.test(pu.pathname.slice(1))) {
+          return window.location.origin + '/_glpe' + pu.pathname +
+            '?_glpe=1&l=' + cipherEncode(pu.href) + flags;
+        }
+      } catch (e) {}
+    }
+    var sep = viewScript.indexOf('?') !== -1 ? '&' : '?';
     return viewScript + sep + 'l=' + cipherEncode(destHref) + flags;
   }
 
@@ -257,6 +273,20 @@
     }
   }
 
+  // True for references that carry the reserved /_glpe namespace: either
+  // a relative path form or a same-origin absolute form. Destination-side
+  // code constructs such URLs out of gateway URLs it READ from the DOM
+  // (module loaders derive follow-up URLs from their script's prefix), so
+  // every wrapper must re-anchor them instead of passing them through.
+  function isGwPathUrl(v) {
+    if (typeof v !== 'string' || !v) return false;
+    if (v.indexOf('/_glpe') === 0) return true;
+    try {
+      return !!(window.location && window.location.origin &&
+        v.indexOf(window.location.origin + '/_glpe') === 0);
+    } catch (e) { return false; }
+  }
+
   function resolveViewUrl(url) {
     if (!url) return url;
     if (typeof url !== 'string') {
@@ -270,10 +300,16 @@
       }
     }
     var trimmed = url.trim();
-    if (trimmed.startsWith('data:') || trimmed.startsWith('blob:') || trimmed.startsWith('javascript:') || trimmed.startsWith('#')) {
+    if (trimmed.startsWith('data:') || trimmed.startsWith('blob:') || trimmed.startsWith('javascript:') || trimmed.startsWith('about:') || trimmed.startsWith('#')) {
       return trimmed;
     }
-    if (trimmed.indexOf('_glpe=') !== -1 || trimmed.indexOf('?l=') !== -1 || trimmed.indexOf('&l=') !== -1) {
+    // A reference built by the destination's own code out of a path-shaped
+    // gateway URL (module loaders construct follow-up URLs from their
+    // script's prefix) carries the /_glpe namespace — it must be
+    // re-anchored below, gateway markers in its query and all, so it never
+    // passes through as a half-gateway address.
+    var gwShaped = isGwPathUrl(trimmed);
+    if (!gwShaped && (trimmed.indexOf('_glpe=') !== -1 || trimmed.indexOf('?l=') !== -1 || trimmed.indexOf('&l=') !== -1)) {
       return trimmed;
     }
     try {
@@ -284,15 +320,41 @@
         // proxied page, same-origin references are re-anchored onto the
         // target site — otherwise SPA fetches (Request objects, service
         // style relative URLs) silently hit this site and die with a 404.
-        if (!isProxiedPage || isOwnAppRef(absObj)) {
+        var isGwPath = absObj.pathname.indexOf('/_glpe') === 0;
+        if (!isProxiedPage || (isOwnAppRef(absObj) && !isGwPath)) {
           return absolute;
         }
-        absolute = _ctxOrigin + absObj.pathname + absObj.search + absObj.hash;
+        if (isGwPath) {
+          absolute = rebaseGatewayRef(absObj);
+        } else {
+          absolute = _ctxOrigin + absObj.pathname + absObj.search + absObj.hash;
+        }
       }
       return buildGatewayUrl(absolute);
     } catch(e) {
       return trimmed;
     }
+  }
+
+  // Re-anchors a reference the destination's code constructed out of a
+  // path-shaped gateway URL: strip the reserved namespace and every
+  // gateway parameter from it, then put the remaining path (and any
+  // non-gateway query values) back onto the destination origin — the
+  // result is wrapped afresh by resolveViewUrl's caller flow, so the
+  // reference rides the gateway with a token of its own.
+  function rebaseGatewayRef(absObj) {
+    var p = absObj.pathname.replace(/^\/_glpe/, '');
+    var kept = [];
+    try {
+      absObj.searchParams.forEach(function(v, k) {
+        if (k !== '_glpe' && k !== 'l' && k !== 'ns' && k !== 'ni' &&
+            k !== 'nt' && k !== 'nb' && k !== 'mb' && k !== 'vs' &&
+            k !== 'tp' && k !== 'mode') {
+          kept.push(k + '=' + v);
+        }
+      });
+    } catch (e) {}
+    return _ctxOrigin + p + (kept.length ? '?' + kept.join('&') : '') + absObj.hash;
   }
 
   // 1. Frame-buster neutralization
@@ -407,9 +469,16 @@
     Element.prototype.setAttribute = function(name, value) {
       try {
         var n = String(name).toLowerCase();
-        if (urlAttrs[n] && typeof value === 'string' && value && value.indexOf('_glpe=') === -1
-            && !/^(data:|blob:|javascript:|#)/i.test(value) && !isOwnUi(this)) {
-          value = resolveViewUrl(value);
+        // setAttribute stringifies per the spec — objects (e.g. trusted-URL
+        // wrappers) must be coerced BEFORE the guard, or the native setter
+        // would coerce the unwrapped value and the fetch would leave the
+        // gateway path (live-caught on YouTube's player loader).
+        if (urlAttrs[n] && value !== null && value !== undefined) {
+          var sv = typeof value === 'string' ? value : String(value);
+          if (sv && (sv.indexOf('_glpe=') === -1 || isGwPathUrl(sv))
+              && !/^(data:|blob:|javascript:|about:|#)/i.test(sv) && !isOwnUi(this)) {
+            value = resolveViewUrl(sv);
+          }
         }
       } catch (e) {}
       return originalSetAttribute.call(this, name, value);
@@ -433,8 +502,18 @@
               get: function() { return desc.get.call(this); },
               set: function(v) {
                 try {
-                  if (typeof v === 'string' && v && v.indexOf('_glpe=') === -1 && !/^(data:|blob:|javascript:|#)/i.test(v)) {
-                    v = resolveViewUrl(v);
+                  // Property assignments coerce through the same path: a
+                  // non-string value (trusted-URL object, URL instance) is
+                  // stringified first — the native setter would coerce it
+                  // anyway, so rewriting the coerced string keeps the fetch
+                  // on the gateway instead of letting it slip out raw.
+                  var sv = null;
+                  if (typeof v === 'string') sv = v;
+                  else if (v !== null && v !== undefined && typeof v.toString === 'function') {
+                    try { sv = String(v); } catch (e2) { sv = null; }
+                  }
+                  if (sv && (sv.indexOf('_glpe=') === -1 || isGwPathUrl(sv)) && !/^(data:|blob:|javascript:|about:|#)/i.test(sv)) {
+                    v = resolveViewUrl(sv);
                   }
                 } catch (e) {}
                 return desc.set.call(this, v);
@@ -1007,7 +1086,42 @@
           // shell (verified live). Only real route changes (/results,
           // /watch, channel pages…) are converted to gateway loads.
           if (dest.pathname === '/' || dest.pathname === '') return;
-          if (e.sameDocument === true) return;
+          // Same-document transitions belong to the router (its pushState
+          // is already wrapped and keeps the gateway identity inside the
+          // history entry). The flag lives on the DESTINATION, not on
+          // the event — reading it there (live-caught: reading
+          // e.sameDocument yields undefined and the guard never fired,
+          // so every SPA transition was turned into a full reload).
+          if (e.destination && e.destination.sameDocument) return;
+          // Self-canonicalization guard: applications "clean" their URL
+          // after boot by navigating to the same route without the
+          // gateway parameters (live-caught on YouTube's results router:
+          // location.replace of the canonical form, once per boot). The
+          // destination already IS this document — re-loading it through
+          // the gateway lands on the same page and restarts the boot,
+          // which re-issues the same canonical navigation: an endless
+          // reload loop. Cancel and stay.
+          if (dest.pathname === window.location.pathname) {
+            try {
+              var cur = new URL(window.location.href);
+              var curP = new URLSearchParams(cur.search);
+              var destP = new URLSearchParams(dest.search);
+              var same = true;
+              curP.forEach(function(v, k) {
+                if (k === '_glpe' || k === 'l' || k === 'ns' || k === 'ni' ||
+                    k === 'nt' || k === 'nb' || k === 'mb' || k === 'vs' ||
+                    k === 'tp' || k === 'mode') return;
+                if (destP.get(k) !== v) same = false;
+              });
+              destP.forEach(function(v, k) {
+                if (curP.get(k) !== v) same = false;
+              });
+              if (same) {
+                e.preventDefault();
+                return;
+              }
+            } catch (ce) {}
+          }
           e.preventDefault();
           window.location.href = resolveViewUrl(dest.href);
         } catch (err) {}

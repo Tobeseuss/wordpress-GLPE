@@ -1789,7 +1789,7 @@ check('start notices wired', strpos($mainSrc25, 'vb-started') !== false && strpo
 // historical 7.0.0 changelog entry stays below)
 check('main file still carries the 7.0.0 heritage marker', substr_count($mainSrc25, '7.0.0') >= 1);
 $readme25 = $readme24;
-check('readme stable tag follows the current release (7.1.0)', strpos($readme25, 'Stable tag: 7.1.0') !== false);
+check('readme stable tag follows the current release (7.2.0)', strpos($readme25, 'Stable tag: 7.2.0') !== false);
 check('readme carries the 7.0.0 changelog entry', strpos($readme25, '= 7.0.0 =') !== false && strpos($readme25, 'مرورگر مجازی') !== false);
 
 // 25i. everything the shipped zip needs stays scanner-clean
@@ -2034,7 +2034,7 @@ $uninstall26 = (string)file_get_contents($root . '/glpe-viewer/uninstall.php');
 check('uninstall reaps sandbox sessions and engine options', strpos($uninstall26, 'glpe_vb_engine') !== false && strpos($uninstall26, "delete_transient('glpe_vbs_'") !== false && strpos($uninstall26, 'glpe_vb_vbs_index') !== false && strpos($uninstall26, 'glpe_vb_key') !== false);
 check('main file version bumped to 7.1.0', substr_count($mainSrc26, '7.1.0') >= 2);
 $readme26 = (string)file_get_contents($root . '/glpe-viewer/readme.txt');
-check('readme stable tag is 7.1.0', strpos($readme26, 'Stable tag: 7.1.0') !== false);
+check('readme stable tag is 7.2.0', strpos($readme26, 'Stable tag: 7.2.0') !== false);
 check('readme carries the 7.1.0 changelog entry', strpos($readme26, '= 7.1.0 =') !== false && strpos($readme26, 'موتور جعبه‌ای') !== false);
 
 // 26n. everything the shipped zip needs stays scanner-clean
@@ -2042,6 +2042,86 @@ $vbsShip = [$vbsSrc, $vbsClient, $clientSrc26, $mainSrc26, $engineSrc26, $cookie
 $vbsHits = 0;
 foreach ($vbsShip as $src26) { if (preg_match('#' . $guardPattern . '#i', $src26)) { $vbsHits++; } }
 check('sandbox engine files carry no scanner-flagged strings', $vbsHits === 0);
+
+// == 27. v7.2.0: path-preserving subresource entry + YouTube-class boot fixes ==
+echo "\n== 27. Path-preserving subresource entry (YouTube-class destinations) ==\n";
+
+$eng27 = new GLPE_Engine('https://site.test/?_glpe=1', false, '', true);
+$eng27Off = new GLPE_Engine('https://site.test/?_glpe=1', false, '', false);
+
+// 27a. makeViewUrl decoration — subresource flag + availability
+$u27 = $eng27->makeViewUrl('https://www.youtube.com/s/_/js/k=abc/d=1/rs=x/m=base', null, ['sub' => 1]);
+check('sub flag emits the path-preserving entry', strpos($u27, 'https://site.test/_glpe/s/_/js/k=abc/d=1/rs=x/m=base') === 0);
+check('path entry carries the opaque token + no readable host', strpos($u27, 'l=') !== false && strpos($u27, 'youtube.com') === false);
+check('youtube path shape survives (validator passes)', strpos($u27, '/_/js/') !== false && strpos($u27, '/k=') !== false);
+$u27b = $eng27->makeViewUrl('https://www.youtube.com/watch?v=xyz', null, []);
+check('document references keep the root entry', strpos($u27b, 'https://site.test/?_glpe=1&l=') === 0);
+$u27c = $eng27Off->makeViewUrl('https://www.youtube.com/s/_/js/k=abc/m=base', null, ['sub' => 1]);
+check('no path entry availability means no decoration', strpos($u27c, 'https://site.test/?_glpe=1&l=') === 0);
+
+// 27b. subEntryPath sanitizer matrix (via makeViewUrl behavior)
+$bad27a = $eng27->makeViewUrl('https://x.example/' . str_repeat('a', 500), null, ['sub' => 1]);
+check('overlong paths fall back to the root entry', strpos($bad27a, '/_glpe/') === false);
+$bad27b = $eng27->makeViewUrl("https://x.example/a\"b<c", null, ['sub' => 1]);
+check('unsafe characters fall back to the root entry', strpos($bad27b, '/_glpe/') === false);
+$u27d = $eng27->makeViewUrl('about:blank', null, ['sub' => 1]);
+check('about: references pass through untouched', $u27d === 'about:blank');
+
+// 27c. rewriteHtml keeps doc refs root-shaped while subresources carry paths
+$html27 = '<html><head><script src="https://cdn.example.com/app.js"></script><link rel="stylesheet" href="https://cdn.example.com/a.css"><a href="https://cdn.example.com/page">go</a></head><body></body></html>';
+$out27 = $eng27->rewriteHtml($html27, 'https://origin.example.com/', []);
+check('script src rewrites with the path entry', substr_count($out27, 'https://site.test/_glpe/app.js') === 1);
+check('link href rewrites with the path entry', substr_count($out27, 'https://site.test/_glpe/a.css') === 1);
+check('anchor href keeps the root entry', substr_count($out27, 'https://site.test/?_glpe=1&l=') === 1);
+check('rewriteHtml stamps pe=1 into the companion config', strpos($out27, '"pe":1') !== false);
+$out27b = $eng27Off->rewriteHtml($html27, 'https://origin.example.com/', []);
+check('engine without path entry stamps pe=0', strpos($out27b, '"pe":0') !== false);
+
+// 27d. CSS/JS/srcset rewriting marks subresources (source wiring)
+check('rewriteCss marks its references as subresources', strpos($engineSrc26, "\$options['sub'] = 1;") !== false && substr_count($engineSrc26, "\$options['sub'] = 1;") >= 3);
+check('rewriteHtml builds subOptions for subresource passes', strpos($engineSrc26, "\$subOptions['sub'] = 1;") !== false);
+check('script/link/img/attribute passes use subOptions', substr_count($engineSrc26, 'use ($targetUrl, $subOptions)') >= 4);
+check('form and anchor passes stay on plain options', strpos($engineSrc26, 'use ($targetUrl, $options)') !== false);
+
+// 27e. PCRE budget guard (megabyte-class documents)
+check('quoteUnquotedAttributes degrades on failed splits', strpos($engineSrc26, '!is_array($parts)') !== false && strpos($engineSrc26, "pcre.backtrack_limit") !== false);
+check('display pipeline raises the PCRE budget for big pages', strpos($mainSrc26, "pcre.backtrack_limit") !== false);
+
+// 27f. client.js — path form + rebasing + event fixes
+check('client builds the /_glpe path form for subresources', strpos($clientSrc26, "'/_glpe' + pu.pathname") !== false);
+check('client path form only for http(s) destinations', strpos($clientSrc26, "pu.protocol === 'http:' || pu.protocol === 'https:'") !== false);
+check('client exposes the gateway-path recognizer', strpos($clientSrc26, 'function isGwPathUrl(') !== false);
+check('client rebases gateway-path refs onto the destination', strpos($clientSrc26, 'function rebaseGatewayRef(') !== false && strpos($clientSrc26, "pathname.replace(/^\\/_glpe/, '')") !== false);
+check('rebasing drops every reserved gateway param', strpos($clientSrc26, "k !== '_glpe' && k !== 'l'") !== false);
+check('sameDocument is read on the destination object', strpos($clientSrc26, 'e.destination && e.destination.sameDocument') !== false && strpos($clientSrc26, 'e.sameDocument === true') === false);
+check('self-canonicalization guard cancels same-route navigations', strpos($clientSrc26, 'dest.pathname === window.location.pathname') !== false);
+check('setAttribute coerces non-string values before rewriting', strpos($clientSrc26, 'typeof value === \'string\' ? value : String(value)') !== false);
+check('property setter coerces non-string values before rewriting', strpos($clientSrc26, 'try { sv = String(v); } catch (e2)') !== false);
+check('about: references pass through the client resolver', strpos($clientSrc26, "startsWith('about:')") !== false);
+
+// 27g. dispatcher wiring — path-entry availability + self-check
+check('gwprobe marker answers before the access gate', strpos($mainSrc26, "=== 'gwprobe'") !== false && strpos($mainSrc26, 'glpe-path-ok') !== false);
+check('path entry availability: filter beats stored option beats permalink', strpos($mainSrc26, 'glpe_path_entry') !== false && strpos($mainSrc26, "apply_filters('glpe_path_entry'") !== false);
+check('pretty-permalink heuristic excludes PATHINFO structures', strpos($mainSrc26, 'strpos($struct, \'/index.php/\') !== 0') !== false);
+check('dispatcher learns path routing from arriving requests', strpos($mainSrc26, 'strpos($reqPath, \'/_glpe\') === 0') !== false);
+check('admin self-test action is registered', strpos($mainSrc26, 'admin_post_glpe_path_probe') !== false && strpos($mainSrc26, 'handlePathProbe') !== false);
+check('settings card renders the path-entry status row', strpos($mainSrc26, 'renderPathEntryCard') !== false);
+
+// 27h. uninstall + version
+$uninstall27 = (string)file_get_contents($root . '/glpe-viewer/uninstall.php');
+check('uninstall reaps the path-entry option', strpos($uninstall27, "'glpe_path_entry'") !== false);
+check('main file version bumped to 7.2.0', substr_count($mainSrc26, '7.2.0') >= 2);
+$readme27 = (string)file_get_contents($root . '/glpe-viewer/readme.txt');
+check('readme stable tag is 7.2.0', strpos($readme27, 'Stable tag: 7.2.0') !== false);
+check('readme carries the 7.2.0 changelog entry', strpos($readme27, '= 7.2.0 =') !== false);
+$readmeMd27 = (string)file_get_contents($root . '/README.md');
+check('README badge and feature bullet updated', strpos($readmeMd27, 'version-7.2.0-blue') !== false && strpos($readmeMd27, 'v7.2.0') !== false);
+
+// 27i. the new surface stays scanner-clean
+$ship27 = [$clientSrc26, $mainSrc26, $engineSrc26, $uninstall27];
+$hits27 = 0;
+foreach ($ship27 as $src27) { if (preg_match('#' . $guardPattern . '#i', $src27)) { $hits27++; } }
+check('path-entry surface carries no scanner-flagged strings', $hits27 === 0);
 
 echo "\n== RESULT: $pass passed, $fail failed ==\n";
 exit($fail > 0 ? 1 : 0);
