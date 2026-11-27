@@ -3,7 +3,7 @@
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
  * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با کدگذاری کامل تبادلات، بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 7.3.0
+ * Version: 7.4.0
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '7.3.0');
+define('GLPE_VERSION', '7.4.0');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -97,6 +97,11 @@ if (file_exists(GLPE_DIR . 'includes/VirtualBrowser.php')) {
 // merely disables the sandbox engine.
 if (file_exists(GLPE_DIR . 'includes/VbSandbox.php')) {
     require_once GLPE_DIR . 'includes/VbSandbox.php';
+}
+// Virtual-browser file downloads (v7.4.0): guarded include like its
+// siblings — a missing file only disables the download module.
+if (file_exists(GLPE_DIR . 'includes/VbDl.php')) {
+    require_once GLPE_DIR . 'includes/VbDl.php';
 }
 // Remote-diagnostics API (v6.3.0): optional by design — a missing file only
 // removes the diag card + endpoint, never the site.
@@ -188,6 +193,14 @@ class GLPE_Plugin {
         if (class_exists('GLPE_ResCache')) {
             add_action('admin_post_glpe_res_purge', ['GLPE_ResCache', 'handlePurge']);
         }
+        // Virtual-browser file downloads (v7.4.0).
+        if (class_exists('GLPE_VbDl')) {
+            add_action('admin_post_glpe_dl_purge', ['GLPE_VbDl', 'handlePurge']);
+        }
+        // Host test for the virtual-browser settings page (v7.4.0):
+        // measures the real hosting limits and auto-fills the recommended
+        // values into the form.
+        add_action('admin_post_glpe_vb_hosttest', [$this, 'handleVbHostTest']);
         // Path-preserving gateway entry self-test (v7.2.0).
         add_action('admin_post_glpe_path_probe', [$this, 'handlePathProbe']);
 
@@ -368,11 +381,25 @@ class GLPE_Plugin {
         //     plus the host-first input round trip: the visitor's gestures
         //     arrive as one opaque token, are normalized and journaled by
         //     THIS host, and only the host's echo drives the sandbox. The
-        //     reply payload is an opaque token again.
-        if ($rawParam === '' && isset($_GET['mode']) && preg_match('/^vb_(open|in|nav|beat|close)$/', (string)$_GET['mode'])) {
+        //     reply payload is an opaque token again. v7.4.0: the download
+        //     endpoints (dlopen/dlchunk) joined the family and receive the
+        //     gateway engine of this very request so their upstream fetches
+        //     ride the same jar, identity and relay pipeline.
+        if ($rawParam === '' && isset($_GET['mode']) && preg_match('/^vb_(open|in|nav|beat|close|dlopen|dlchunk)$/', (string)$_GET['mode'])) {
             if (class_exists('GLPE_Vb_Sandbox')) {
-                GLPE_Vb_Sandbox::handleMode((string)$_GET['mode']);
+                GLPE_Vb_Sandbox::handleMode((string)$_GET['mode'], $engine);
             }
+            exit;
+        }
+
+        // 2b. Stored-file serving (v7.4.0): a short-lived opaque token
+        //     (issued by the download module when a host-side stored file
+        //     completed) streams the stored bytes from disk with the
+        //     destination's own filename. Nothing about the destination
+        //     travels in the clear — the token is opaque like every other
+        //     gateway reference.
+        if ($rawParam === '' && isset($_GET['dlt']) && class_exists('GLPE_VbDl')) {
+            GLPE_VbDl::serveStored($_GET['dlt']);
             exit;
         }
 
@@ -401,7 +428,7 @@ class GLPE_Plugin {
         //    the scripting-disabled fallback. Forward every non-reserved
         //    field to the destination as part of its query.
         if ($method === 'GET' && isset($_SERVER['QUERY_STRING'])) {
-            $reserved = ['_glpe', 'l', 'd', 'ns', 'ni', 'nt', 'nb', 'ec', 'mb', 'tp', 'vs', 'mode'];
+            $reserved = ['_glpe', 'l', 'd', 'ns', 'ni', 'nt', 'nb', 'ec', 'mb', 'tp', 'vs', 'dl', 'dlt', 'mode'];
             $fields = [];
             foreach (explode('&', (string)$_SERVER['QUERY_STRING']) as $pair) {
                 if ($pair === '') continue;
@@ -512,6 +539,22 @@ class GLPE_Plugin {
         }
 
         try {
+            // 6. Download tunnel (v7.4.0): a request the client marked as a
+            //    file download (dl=1 — download-shaped links, the virtual
+            //    browser's download flow) skips the buffered pipeline
+            //    entirely and streams the destination's own response to
+            //    the visitor in chunks — a big file never lands in PHP
+            //    memory. Range requests (206) are relayed as-is, and the
+            //    destination's own Content-Disposition/Content-Length
+            //    reach the visitor's save dialog.
+            if ($method === 'GET' && isset($_GET['dl']) && $_GET['dl'] === '1') {
+                if ($engine->streamMediaRequest($targetUrl, $customHeaders)) {
+                    exit;
+                }
+                // streaming unavailable on this host → fall through to the
+                // buffered path (small files still download fine that way).
+            }
+
             // Media targets (video/audio bytes) stream straight through:
             // buffering a full video in PHP memory would exhaust the server
             // and stall playback. Range requests (206) are relayed as-is.
@@ -1161,6 +1204,17 @@ class GLPE_Plugin {
             'glpe-viewer-relay',
             ['GLPE_Hub_Admin', 'renderRelayPage']
         );
+        // Dedicated page for the Virtual Browser (v7.4.0 request): every
+        // virtual-browser setting, status card and self-test moved here so
+        // the main settings page stays about the viewer itself.
+        add_submenu_page(
+            'glpe-viewer',
+            'مرورگر مجازی',
+            'مرورگر مجازی',
+            'manage_options',
+            'glpe-viewer-vb',
+            [$this, 'renderAdminVbPage']
+        );
     }
 
     public function registerSettings() {
@@ -1176,6 +1230,20 @@ class GLPE_Plugin {
         register_setting('glpe_group', 'glpe_vb_port', ['sanitize_callback' => [$this, 'sanitizeVbPort']]);
         register_setting('glpe_group', 'glpe_vb_endpoint', ['sanitize_callback' => [$this, 'sanitizeVbEndpoint']]);
         register_setting('glpe_group', 'glpe_vb_engine', ['sanitize_callback' => [$this, 'sanitizeVbEngine']]);
+        // Virtual-browser session tuning (v7.4.0).
+        register_setting('glpe_group', 'glpe_vb_session_ttl', ['sanitize_callback' => [$this, 'sanitizeVbSessionTtl']]);
+        register_setting('glpe_group', 'glpe_vb_max_sessions', ['sanitize_callback' => [$this, 'sanitizeVbMaxSessions']]);
+        // Subresource-cache tuning (v7.4.0 — was fixed constants before).
+        register_setting('glpe_group', 'glpe_res_ttl_def', ['sanitize_callback' => [$this, 'sanitizeResTtlDef']]);
+        register_setting('glpe_group', 'glpe_res_ttl_max', ['sanitize_callback' => [$this, 'sanitizeResTtlMax']]);
+        register_setting('glpe_group', 'glpe_res_entry_cap', ['sanitize_callback' => [$this, 'sanitizeResEntryCap']]);
+        register_setting('glpe_group', 'glpe_res_quota', ['sanitize_callback' => [$this, 'sanitizeResQuota']]);
+        // Download delivery tuning (v7.4.0).
+        register_setting('glpe_group', 'glpe_dl_threshold', ['sanitize_callback' => [$this, 'sanitizeDlMiB']]);
+        register_setting('glpe_group', 'glpe_dl_folder', ['sanitize_callback' => [$this, 'sanitizeDlFolder']]);
+        register_setting('glpe_group', 'glpe_dl_retention', ['sanitize_callback' => [$this, 'sanitizeDlRetention']]);
+        register_setting('glpe_group', 'glpe_dl_maxsize', ['sanitize_callback' => [$this, 'sanitizeDlMaxSize']]);
+        register_setting('glpe_group', 'glpe_dl_quota', ['sanitize_callback' => [$this, 'sanitizeDlQuota']]);
     }
 
     public function sanitizeVbPort($value) {
@@ -1196,6 +1264,72 @@ class GLPE_Plugin {
     public function sanitizeVbEngine($value) {
         $value = strtolower(trim((string)$value));
         return in_array($value, ['auto', 'service', 'sandbox'], true) ? $value : 'auto';
+    }
+
+    /** Virtual-browser session life: 5..240 minutes (blank = 30 default). */
+    public function sanitizeVbSessionTtl($value) {
+        $v = (int)$value;
+        return ($v >= 5 && $v <= 240) ? (string)$v : '';
+    }
+
+    /** Concurrent sandbox sessions: 1..32 (blank = 6 default). */
+    public function sanitizeVbMaxSessions($value) {
+        $v = (int)$value;
+        return ($v >= 1 && $v <= 32) ? (string)$v : '';
+    }
+
+    /** Subresource-cache default entry TTL: 2..360 minutes. */
+    public function sanitizeResTtlDef($value) {
+        $v = (int)$value;
+        return ($v >= 2 && $v <= 360) ? (string)$v : '';
+    }
+
+    /** Subresource-cache entry TTL ceiling: 5..720 minutes. */
+    public function sanitizeResTtlMax($value) {
+        $v = (int)$value;
+        return ($v >= 5 && $v <= 720) ? (string)$v : '';
+    }
+
+    /** Per-entry size cap for the subresource cache: 1..16 MiB. */
+    public function sanitizeResEntryCap($value) {
+        $v = (int)$value;
+        return ($v >= 1 && $v <= 16) ? (string)$v : '';
+    }
+
+    /** Total subresource-cache quota: 16..1024 MiB. */
+    public function sanitizeResQuota($value) {
+        $v = (int)$value;
+        return ($v >= 16 && $v <= 1024) ? (string)$v : '';
+    }
+
+    /** Direct-tunnel ceiling for downloads: 1..512 MiB. */
+    public function sanitizeDlMiB($value) {
+        $v = (int)$value;
+        return ($v >= 1 && $v <= 512) ? (string)$v : '';
+    }
+
+    /** Guarded folder name under uploads: one slug token, no traversal. */
+    public function sanitizeDlFolder($value) {
+        $v = trim((string)$value);
+        return preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/', $v) ? $v : '';
+    }
+
+    /** Stored-file retention: 5..1440 minutes. */
+    public function sanitizeDlRetention($value) {
+        $v = (int)$value;
+        return ($v >= 5 && $v <= 1440) ? (string)$v : '';
+    }
+
+    /** Per-file size ceiling for host-stored downloads: 1..2048 MiB. */
+    public function sanitizeDlMaxSize($value) {
+        $v = (int)$value;
+        return ($v >= 1 && $v <= 2048) ? (string)$v : '';
+    }
+
+    /** Total host-side download quota: 16..4096 MiB. */
+    public function sanitizeDlQuota($value) {
+        $v = (int)$value;
+        return ($v >= 16 && $v <= 4096) ? (string)$v : '';
     }
 
     public function sanitizeDnsMode($value) {
@@ -1408,22 +1542,81 @@ class GLPE_Plugin {
                     </tr>
                 </table>
 
-                <h3 style="margin-top: 18px;">🖥️ مرورگر مجازی (رندر روی میزبان)</h3>
+                <h3 style="margin-top: 18px;">🖥️ مرورگر مجازی</h3>
+                <p style="font-size: 13px; line-height: 2; color: #334155; margin: 0;">
+                    تمام تنظیمات، کارت‌های وضعیت و ابزارهای خودآزمایی مرورگر مجازی (موتور و سرویس، نشست‌ها، کش زیرمنبع‌ها، دانلود فایل‌ها و دکمهٔ تست هاست)
+                    به صفحهٔ مجزای خودش منتقل شده‌اند:
+                    <a href="<?php echo esc_url(admin_url('admin.php?page=glpe-viewer-vb')); ?>" style="font-weight: bold;">مرورگر مجازی ← صفحهٔ تنظیمات مجزا</a>
+                </p>
+
+                <?php submit_button('ذخیره تغییرات'); ?>
+            </form>
+
+            <?php $this->renderVbPointerCard(); ?>
+
+            <?php $this->renderAccessCard(); ?>
+
+            <?php if (class_exists('GLPE_Diag_Api')) { GLPE_Diag_Api::renderCard(); } ?>
+
+            <?php GLPE_Hub_Admin::renderRelayPointer(); ?>
+        </div>
+        <?php
+    }
+
+    /**
+     * Compact pointer card on the main settings page toward the virtual
+     * browser's own settings page (v7.4.0 move).
+     */
+    private function renderVbPointerCard() {
+        $vbUrl = admin_url('admin.php?page=glpe-viewer-vb');
+        $engine = class_exists('GLPE_Vb_Sandbox') ? GLPE_Vb_Sandbox::engineChoice() : 'sandbox';
+        $label = $engine === 'service' ? 'سرویس رندر میزبان' : 'موتور جعبه‌ای (بدون نیاز به نرم‌افزار روی سرور)';
+        ?>
+        <div style="background: #fff; border: 1px solid #ccd0d4; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+            <h3 style="margin-top: 0;">🖥️ مرورگر مجازی</h3>
+            <p style="font-size: 13px; line-height: 2; color: #334155; margin: 0 0 12px;">
+                موتور فعال: <b><?php echo esc_html($label); ?></b> — موتور و سرویس، عمر و سقف نشست‌ها، تنظیمات کش زیرمنبع‌ها، تنظیمات دانلود فایل‌ها (تونل مستقیم/ذخیره روی هاست) و دکمهٔ تست هاست که مقادیر پیشنهادی را خودکار پر می‌کند، همگی در صفحهٔ مجزای مرورگر مجازی قرار دارند.
+            </p>
+            <a href="<?php echo esc_url($vbUrl); ?>" class="button button-primary">رفتن به صفحهٔ مرورگر مجازی</a>
+        </div>
+        <?php
+    }
+
+    /**
+     * The virtual browser's own settings page (v7.4.0): engine + service,
+     * session lifetime/concurrency, subresource-cache tuning, file-download
+     * delivery tuning, the host test that auto-fills recommended values,
+     * and the status cards that used to live on the main settings page.
+     */
+    public function renderAdminVbPage() {
+        $hostTest = isset($_GET['hosttest']) && $_GET['hosttest'] === '1';
+        $report = $hostTest ? get_transient('glpe_vb_hostrec') : false;
+        ?>
+        <div class="wrap" style="direction: rtl; text-align: right; max-width: 900px;">
+            <h1 style="font-size: 22px; font-weight: bold; margin-bottom: 20px;">
+                🖥️ مرورگر مجازی — تنظیمات و وضعیت
+            </h1>
+
+            <?php
+            $vbNotice = isset($_GET['cp_msg']) ? sanitize_key($_GET['cp_msg']) : '';
+            $vbNotices = [
+                'res-purged' => 'کش زیرمنبع‌ها پاک شد.',
+                'dl-purged'  => 'فایل‌های دریافت‌شدهٔ روی هاست پاک شدند.',
+            ];
+            if ($vbNotice !== '' && isset($vbNotices[$vbNotice])) {
+                echo '<div class="notice notice-success is-dismissible"><p>' . esc_html($vbNotices[$vbNotice]) . '</p></div>';
+            }
+            if ($hostTest && is_array($report)) {
+                $m = isset($report['measured']) ? $report['measured'] : [];
+                echo '<div class="notice notice-success is-dismissible"><p>تست هاست انجام شد — مقادیر پیشنهادی به‌صورت خودکار در فرم زیر پر شدند؛ برای اعمال، «ذخیره تغییرات» را بزنید.</p></div>';
+            }
+            ?>
+
+            <form method="post" action="<?php echo esc_url(admin_url('options.php')); ?>">
+                <?php settings_fields('glpe_group'); ?>
+
+                <h3 style="margin-top: 0;">موتور و سرویس رندر</h3>
                 <table class="form-table" role="presentation">
-                    <tr>
-                        <th scope="row">درگاه سرویس <code style="direction:ltr;">vb_port</code></th>
-                        <td>
-                            <input type="number" min="1024" max="65535" name="glpe_vb_port" value="<?php echo esc_attr(get_option('glpe_vb_port', '')); ?>" style="direction:ltr; width: 110px;" placeholder="3007" />
-                            <p style="font-size: 12px; color: #64748b; margin: 4px 0 0;">درگاهی که فرایند رندر میزبان روی آن گوش می‌دهد (خالی = ۳۰۰۷). این درگاه باید از بیرون قابل دسترس باشد.</p>
-                        </td>
-                    </tr>
-                    <tr>
-                        <th scope="row">نشانی سرویس <code style="direction:ltr;">vb_endpoint</code></th>
-                        <td>
-                            <input type="text" name="glpe_vb_endpoint" value="<?php echo esc_attr(get_option('glpe_vb_endpoint', '')); ?>" style="direction:ltr; width: 320px; max-width: 100%;" placeholder="خالی = خودکار" />
-                            <p style="font-size: 12px; color: #64748b; margin: 4px 0 0;">نشانی اتصال مرورگر کاربر به سرویس مجازی — خالی یعنی محاسبهٔ خودکار. فقط وقتی پر کنید که سرویس را پشت یک نشانی دیگری (مثل مسیر فرستنده یا نشانی اختصاصی) در دسترس گذاشته‌اید.</p>
-                        </td>
-                    </tr>
                     <tr>
                         <th scope="row">موتور مرورگر مجازی <code style="direction:ltr;">vb_engine</code></th>
                         <td>
@@ -1435,10 +1628,134 @@ class GLPE_Plugin {
                             <p style="font-size: 12px; color: #64748b; margin: 4px 0 0;">هر دو موتور تجربهٔ «مثل ریموت دسکتاپ» می‌دهند؛ تفاوت: موتور سرویس تصویر را صددرصد روی سرور می‌کشد، موتور جعبه‌ای صفحه را داخل جعبهٔ ایزولهٔ مرورگر کاربر نمایش می‌دهد و فقط تبادلات و ورودی‌ها را روی هاست پردازش می‌کند — موتوری که روی هاست رایگان بدون دسترسی سرور کار می‌کند.</p>
                         </td>
                     </tr>
+                    <tr>
+                        <th scope="row">درگاه سرویس <code style="direction:ltr;">vb_port</code></th>
+                        <td>
+                            <input type="number" min="1024" max="65535" name="glpe_vb_port" value="<?php echo esc_attr(get_option('glpe_vb_port', '')); ?>" style="direction:ltr; width: 110px;" placeholder="3007" />
+                            <p style="font-size: 12px; color: #64748b; margin: 4px 0 0;">درگاهی که فرایند رندر میزبان روی آن گوش می‌دهد (خالی = ۳۰۰۷). این درگاه باید از بیرون قابل دسترس باشد.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">نشانی سرویس <code style="direction:ltr;">vb_endpoint</code></th>
+                        <td>
+                            <input type="text" name="glpe_vb_endpoint" value="<?php echo esc_attr(get_option('glpe_vb_endpoint', '')); ?>" style="direction:ltr; width: 320px; max-width: 100%;" placeholder="خالی = خودکار" />
+                            <p style="font-size: 12px; color: #64748b; margin: 4px 0 0;">نشانی اتصال مرورگر کاربر به سرویس مجازی — خالی یعنی محاسبهٔ خودکار. فقط وقتی پر کنید که سرویس را پشت یک نشانی دیگری در دسترس گذاشته‌اید.</p>
+                        </td>
+                    </tr>
+                </table>
+
+                <h3 style="margin-top: 18px;">نشست‌های محیط مجازی</h3>
+                <table class="form-table" role="presentation">
+                    <tr>
+                        <th scope="row">اعتبار هر نشست <code style="direction:ltr;">vb_session_ttl</code></th>
+                        <td>
+                            <input type="number" min="5" max="240" name="glpe_vb_session_ttl" value="<?php echo esc_attr(get_option('glpe_vb_session_ttl', '')); ?>" style="direction:ltr; width: 110px;" placeholder="30" />
+                            <span style="font-size: 12px; color: #64748b;">دقیقه (۵ تا ۲۴۰)</span>
+                            <p style="font-size: 12px; color: #64748b; margin: 4px 0 0;">عمر هر محیط موازی موقت؛ نشستِ فعال با فعالیت خودش تمدید می‌شود و در نبود فعالیت، در همین زمان از پایگاه داده دور ریخته می‌شود (خالی = ۳۰).</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">حداکثر نشست‌های همزمان <code style="direction:ltr;">vb_max_sessions</code></th>
+                        <td>
+                            <input type="number" min="1" max="32" name="glpe_vb_max_sessions" value="<?php echo esc_attr(get_option('glpe_vb_max_sessions', '')); ?>" style="direction:ltr; width: 110px;" placeholder="6" />
+                            <span style="font-size: 12px; color: #64748b;">عدد (۱ تا ۳۲)</span>
+                            <p style="font-size: 12px; color: #64748b; margin: 4px 0 0;">سقف محیط‌های موازیِ همزمان روی این هاست — از این عدد به بعد درخواستِ «محیط جدید» با پیام «پُر» پاسخ می‌گیرد (خالی = ۶).</p>
+                        </td>
+                    </tr>
+                </table>
+
+                <h3 style="margin-top: 18px;">کش زیرمنبع‌ها</h3>
+                <table class="form-table" role="presentation">
+                    <tr>
+                        <th scope="row">وضعیت کش <code style="direction:ltr;">res_cache</code></th>
+                        <td>
+                            <label>
+                                <input type="hidden" name="glpe_res_cache" value="0">
+                                <input type="checkbox" name="glpe_res_cache" value="1" <?php checked(get_option('glpe_res_cache', '1'), '1'); ?> />
+                                فعال (پیشنهادی)
+                            </label>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">اعتبار پیش‌فرض هر مدخل <code style="direction:ltr;">res_ttl_def</code></th>
+                        <td>
+                            <input type="number" min="2" max="360" name="glpe_res_ttl_def" value="<?php echo esc_attr(get_option('glpe_res_ttl_def', '')); ?>" style="direction:ltr; width: 110px;" placeholder="15" />
+                            <span style="font-size: 12px; color: #64748b;">دقیقه (۲ تا ۳۶۰)</span>
+                            <p style="font-size: 12px; color: #64748b; margin: 4px 0 0;">اگر سایت مقصد مدت اعتبار خودش را اعلام نکرده باشد، مدخل با این عمر نگه داشته می‌شود؛ اعلام خود سایت مقصد همیشه ملاک است.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">سقف اعتبار مدخل‌ها <code style="direction:ltr;">res_ttl_max</code></th>
+                        <td>
+                            <input type="number" min="5" max="720" name="glpe_res_ttl_max" value="<?php echo esc_attr(get_option('glpe_res_ttl_max', '')); ?>" style="direction:ltr; width: 110px;" placeholder="360" />
+                            <span style="font-size: 12px; color: #64748b;">دقیقه (۵ تا ۷۲۰)</span>
+                            <p style="font-size: 12px; color: #64748b; margin: 4px 0 0;">حتی اگر سایت مقصد اعتبار بلندمدتی اعلام کند، عمر هر مدخل از این سقف فراتر نمی‌رود.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">سقف حجم هر مدخل <code style="direction:ltr;">res_entry_cap</code></th>
+                        <td>
+                            <input type="number" min="1" max="16" name="glpe_res_entry_cap" value="<?php echo esc_attr(get_option('glpe_res_entry_cap', '')); ?>" style="direction:ltr; width: 110px;" placeholder="3" />
+                            <span style="font-size: 12px; color: #64748b;">مگابایت (۱ تا ۱۶)</span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">سهمیهٔ کل کش <code style="direction:ltr;">res_quota</code></th>
+                        <td>
+                            <input type="number" min="16" max="1024" name="glpe_res_quota" value="<?php echo esc_attr(get_option('glpe_res_quota', '')); ?>" style="direction:ltr; width: 110px;" placeholder="64" />
+                            <span style="font-size: 12px; color: #64748b;">مگابایت (۱۶ تا ۱۰۲۴)</span>
+                            <p style="font-size: 12px; color: #64748b; margin: 4px 0 0;">با پُر شدن سهمیه، قدیمی‌ترین مدخل‌ها خودکار حذف می‌شوند.</p>
+                        </td>
+                    </tr>
+                </table>
+
+                <h3 style="margin-top: 18px;">دانلود فایل‌ها</h3>
+                <table class="form-table" role="presentation">
+                    <tr>
+                        <th scope="row">سقف تونل مستقیم <code style="direction:ltr;">dl_threshold</code></th>
+                        <td>
+                            <input type="number" min="1" max="512" name="glpe_dl_threshold" value="<?php echo esc_attr(get_option('glpe_dl_threshold', '')); ?>" style="direction:ltr; width: 110px;" placeholder="8" />
+                            <span style="font-size: 12px; color: #64748b;">مگابایت (۱ تا ۵۱۲)</span>
+                            <p style="font-size: 12px; color: #64748b; margin: 4px 0 0;">فایل‌های تا این حجم مستقیم و تونل‌شده به مرورگر خود کاربر می‌رسند (بدون ذخیره روی هاست)؛ فایل‌های بزرگ‌تر تکه‌تکه روی همین هاست دریافت و سپس به کاربر سرو می‌شوند.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">پوشهٔ ذخیره <code style="direction:ltr;">dl_folder</code></th>
+                        <td>
+                            <input type="text" name="glpe_dl_folder" value="<?php echo esc_attr(get_option('glpe_dl_folder', '')); ?>" style="direction:ltr; width: 220px; max-width: 100%;" placeholder="glpe-downloads" />
+                            <p style="font-size: 12px; color: #64748b; margin: 4px 0 0;">نام پوشهٔ نگهداری فایل‌های دریافت‌شده داخل uploads (محافظت‌شده با htaccess و سرو فقط از طریق توکن مبهم دروازه؛ خالی = نام پیش‌فرض).</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">مدت نگهداری <code style="direction:ltr;">dl_retention</code></th>
+                        <td>
+                            <input type="number" min="5" max="1440" name="glpe_dl_retention" value="<?php echo esc_attr(get_option('glpe_dl_retention', '')); ?>" style="direction:ltr; width: 110px;" placeholder="120" />
+                            <span style="font-size: 12px; color: #64748b;">دقیقه (۵ تا ۱۴۴۰)</span>
+                            <p style="font-size: 12px; color: #64748b; margin: 4px 0 0;">فایل‌های ذخیره‌شده بعد از این مدت، خودکار و تنبل (بدون کرون) از هاست حذف می‌شوند.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">حداکثر حجم هر فایل <code style="direction:ltr;">dl_maxsize</code></th>
+                        <td>
+                            <input type="number" min="1" max="2048" name="glpe_dl_maxsize" value="<?php echo esc_attr(get_option('glpe_dl_maxsize', '')); ?>" style="direction:ltr; width: 110px;" placeholder="256" />
+                            <span style="font-size: 12px; color: #64748b;">مگابایت (۱ تا ۲۰۴۸)</span>
+                            <p style="font-size: 12px; color: #64748b; margin: 4px 0 0;">فایل‌هایی که از این حجم بزرگ‌تر باشند، دریافتشان رد می‌شود.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">سهمیهٔ کل <code style="direction:ltr;">dl_quota</code></th>
+                        <td>
+                            <input type="number" min="16" max="4096" name="glpe_dl_quota" value="<?php echo esc_attr(get_option('glpe_dl_quota', '')); ?>" style="direction:ltr; width: 110px;" placeholder="512" />
+                            <span style="font-size: 12px; color: #64748b;">مگابایت (۱۶ تا ۴۰۹۶)</span>
+                            <p style="font-size: 12px; color: #64748b; margin: 4px 0 0;">مجموع حجم فایل‌های ذخیره‌شده؛ با پُر شدن، قدیمی‌ترین‌ها حذف می‌شوند.</p>
+                        </td>
+                    </tr>
                 </table>
 
                 <?php submit_button('ذخیره تغییرات'); ?>
             </form>
+
+            <?php $this->renderHostTestCard($report); ?>
 
             <?php if (class_exists('GLPE_VirtualBrowser')) { $this->renderVirtualBrowserCard(); } ?>
 
@@ -1446,13 +1763,178 @@ class GLPE_Plugin {
 
             <?php if (class_exists('GLPE_ResCache')) { $this->renderResCacheCard(); } ?>
 
-            <?php $this->renderAccessCard(); ?>
-
-            <?php if (class_exists('GLPE_Diag_Api')) { GLPE_Diag_Api::renderCard(); } ?>
-
-            <?php GLPE_Hub_Admin::renderRelayPointer(); ?>
+            <?php if (class_exists('GLPE_VbDl')) { $this->renderDownloadsCard(); } ?>
         </div>
         <?php
+        if (is_array($report) && !empty($report['rec'])) {
+            // Auto-fill the form's fields with the host test's recommended
+            // values (the admin reviews and saves them).
+            $fill = wp_json_encode($report['rec']);
+            echo '<script>(function(){try{var rec=' . $fill . ';var map={'
+                . "'glpe_dl_threshold':'dl_threshold','glpe_dl_retention':'dl_retention',"
+                . "'glpe_dl_maxsize':'dl_maxsize','glpe_dl_quota':'dl_quota',"
+                . "'glpe_res_ttl_def':'res_ttl_def','glpe_res_ttl_max':'res_ttl_max',"
+                . "'glpe_res_entry_cap':'res_entry_cap','glpe_res_quota':'res_quota',"
+                . "'glpe_vb_session_ttl':'vb_session_ttl','glpe_vb_max_sessions':'vb_max_sessions'"
+                . '};for(var k in map){if(rec[map[k]]!==undefined){var inp=document.querySelector(\'[name="\'+k+\'"]\');'
+                . 'if(inp){inp.value=rec[map[k]];inp.style.background="#fefce8";}}}}catch(e){}})();</script>';
+        }
+    }
+
+    /**
+     * Host test card (v7.4.0): the one-click probe that measures this
+     * host's real limits (execution window, memory, disk in uploads) and
+     * computes recommended values for every tunable above. The results
+     * land in a transient, the redirect carries hosttest=1, and the page
+     * auto-fills the form fields with the recommended numbers.
+     */
+    private function renderHostTestCard($report) {
+        $testUrl = wp_nonce_url(
+            admin_url('admin-post.php?action=glpe_vb_hosttest'),
+            'glpe_vb_hosttest'
+        );
+        ?>
+        <div style="background: #fff; border: 1px solid #ccd0d4; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+            <h3 style="margin-top: 0;">🧪 تست هاست</h3>
+            <p style="font-size: 13px; line-height: 2; color: #334155;">
+                تست، محدودیت‌های واقعی همین هاست (پنجرهٔ اجرا، حافظه، فضای خالی uploads و امکان نوشتن) را می‌سنجد و مقادیر پیشنهادی امن برای همهٔ تنظیمات همین صفحه را محاسبه و به‌صورت خودکار در فرم پر می‌کند — کافی است بعدش «ذخیره تغییرات» را بزنید.
+            </p>
+            <form method="post" action="<?php echo esc_url($testUrl); ?>" style="margin-top: 14px; display: inline;">
+                <?php wp_nonce_field('glpe_vb_hosttest'); ?>
+                <button type="submit" class="button button-primary">اجرای تست هاست و پر کردن مقادیر پیشنهادی</button>
+            </form>
+            <?php if (is_array($report) && !empty($report['measured'])): ?>
+            <table class="widefat striped" style="max-width: 760px; direction: ltr; text-align: left; margin-top: 14px;">
+                <tbody>
+                <tr><th style="width:220px;">PHP</th><td><?php echo esc_html(PHP_VERSION); ?></td></tr>
+                <tr><th>max execution window</th><td><?php echo esc_html(isset($report['measured']['exec']) ? $report['measured']['exec'] . ' s' : '—'); ?></td></tr>
+                <tr><th>memory limit</th><td><?php echo esc_html(isset($report['measured']['mem']) ? $report['measured']['mem'] . ' MiB' : '—'); ?></td></tr>
+                <tr><th>uploads free disk</th><td><?php echo esc_html(isset($report['measured']['disk']) ? $report['measured']['disk'] . ' MiB' : '—'); ?></td></tr>
+                <tr><th>uploads writable</th><td><?php echo !empty($report['measured']['writable']) ? 'yes' : 'no'; ?></td></tr>
+                </tbody>
+            </table>
+            <p style="font-size: 12px; color: #64748b; line-height: 1.9; margin-bottom: 0;">
+                مقادیر پیشنهادی محاسبه‌شده (پرشده در فرم بالا با پس‌زمینهٔ روشن): سقف تونل دانلود بر اساس پنجرهٔ اجرا، سقف‌ها و سهمیه‌ها بر اساس حافظه و فضای دیسک، و اعتبار مدخل‌ها بر اساس سازگاری هاست رایگان. اگر میزان مصرف هاست متفاوت است، مقادیر را دستی اصلاح کنید.
+            </p>
+            <?php endif; ?>
+        </div>
+        <?php
+    }
+
+    /**
+     * Downloads status card (v7.4.0): storage location, kept volume,
+     * retention and the one-click purge.
+     */
+    private function renderDownloadsCard() {
+        $stats = GLPE_VbDl::stats();
+        $purgeUrl = wp_nonce_url(
+            admin_url('admin-post.php?action=glpe_dl_purge'),
+            'glpe_dl_purge'
+        );
+        ?>
+        <div style="background: #fff; border: 1px solid #ccd0d4; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+            <h3 style="margin-top: 0;">📥 دانلود فایل‌ها</h3>
+            <p style="font-size: 13px; line-height: 2; color: #334155;">
+                فایل‌های کوچک (تا سقف تونل) مستقیم و تونل‌شده به مرورگر خود کاربر سرو می‌شوند؛ فایل‌های بزرگ تکه‌تکه در پوشهٔ محافظت‌شدهٔ زیر دریافت و پس از تکمیل، با نشانی مبهم و کوتاه‌عمر به کاربر سرو می‌شوند. هیچ فایلی بیرون از پنجرهٔ نگهداری روی هاست نمی‌ماند.
+            </p>
+            <table class="widefat striped" style="max-width: 760px; direction: ltr; text-align: left;">
+                <tbody>
+                <tr><th style="width:170px;">storage</th><td><code style="direction:ltr;"><?php echo esc_html($stats['dir']); ?></code> — guarded runtime folder</td></tr>
+                <tr><th>files</th><td><?php echo (int)$stats['files']; ?> (<?php echo number_format((float)$stats['bytes'] / 1048576, 1); ?> MB)</td></tr>
+                <tr><th>retention</th><td><?php echo (int)GLPE_VbDl::retention(); ?> min (lazy reaping, no cron)</td></tr>
+                </tbody>
+            </table>
+            <form method="post" action="<?php echo esc_url($purgeUrl); ?>" style="margin-top: 14px; display: inline;">
+                <?php wp_nonce_field('glpe_dl_purge'); ?>
+                <button type="submit" class="button" onclick="return confirm('همه فایل‌های دریافت‌شده روی هاست پاک شوند؟');">پاک‌سازی فایل‌های ذخیره‌شده</button>
+            </form>
+            <p style="font-size: 12px; color: #64748b; line-height: 1.9; margin-bottom: 0;">
+                نام فایل‌های ذخیره‌شده هش تصادفی است؛ پوشه با htaccess deny-all و index خالی محافظت می‌شود و سروِ فایل فقط از طریق توکن رمزگشایی‌شدهٔ دروازه انجام می‌گیرد.
+            </p>
+        </div>
+        <?php
+    }
+
+    /**
+     * Host test runner (admin_post_glpe_vb_hosttest): measures the real
+     * limits of THIS hosting and derives every recommended value for the
+     * virtual-browser settings page. Results land in a short-lived
+     * transient; the redirect carries hosttest=1 and the settings page
+     * auto-fills the form with the recommendations.
+     */
+    public function handleVbHostTest() {
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html__('Not permitted.', 'glpe-viewer'));
+        }
+        check_admin_referer('glpe_vb_hosttest');
+
+        // --- measured facts -------------------------------------------------
+        $execRaw = (string)@ini_get('max_execution_time');
+        $exec = (int)$execRaw;
+        if ($exec <= 0) {
+            $exec = 60; // 0/unlimited is never honest on shared hosting —
+                        // budget like a generous window instead.
+        }
+        $memRaw = (string)@ini_get('memory_limit');
+        $memMiB = 128;
+        if (preg_match('/^(-?\d+)([KMG]?)$/i', trim($memRaw), $mm)) {
+            $n = (int)$mm[1];
+            $mult = strtoupper($mm[2]) === 'M' ? 1 : (strtoupper($mm[2]) === 'G' ? 1024 : (strtoupper($mm[2]) === 'K' ? 0.0009765625 : 1));
+            $memMiB = $n < 0 ? 512 : max(16, (int)round($n * $mult));
+        }
+        $uploads = wp_upload_dir();
+        $base = isset($uploads['basedir']) ? (string)$uploads['basedir'] : '';
+        $diskMiB = 64;
+        if ($base !== '' && function_exists('disk_free_space')) {
+            $free = @disk_free_space($base);
+            if ($free !== false && $free > 0) {
+                $diskMiB = (int)floor($free / 1048576);
+            }
+        }
+        $writable = false;
+        if ($base !== '') {
+            $probe = $base . '/.glpe-hosttest-' . wp_generate_password(8, false, false);
+            $writable = @file_put_contents($probe, 'ok') !== false;
+            if ($writable) {
+                @unlink($probe);
+            }
+        }
+
+        // --- recommendations (clamped by the same limits the sanitizers
+        //     enforce — a recommendation can never be unsavable) ----------
+        $rec = [
+            // A direct tunnel must finish inside the execution window;
+            // assume a conservative transfer rate for free hosting.
+            'dl_threshold'  => max(2, min(64, (int)floor($exec * 0.5))),
+            // Host-side storage scales with the disk actually free (a
+            // quarter per file at most, a fifth for the whole quota).
+            'dl_maxsize'   => max(16, min(1024, (int)floor($diskMiB / 4))),
+            'dl_quota'     => max(32, min(2048, (int)floor($diskMiB / 5))),
+            'dl_retention' => 120,
+            // The subresource cache reacts to memory and disk.
+            'res_entry_cap' => $memMiB >= 128 ? 3 : ($memMiB >= 64 ? 2 : 1),
+            'res_quota'    => max(16, min(512, (int)floor($diskMiB / 10))),
+            'res_ttl_def'  => 15,
+            'res_ttl_max'  => 360,
+            'vb_session_ttl' => 30,
+            'vb_max_sessions' => 6,
+        ];
+
+        set_transient('glpe_vb_hostrec', [
+            'measured' => [
+                'exec'     => $exec,
+                'mem'      => $memMiB,
+                'disk'     => $diskMiB,
+                'writable' => $writable ? 1 : 0,
+            ],
+            'rec' => $rec,
+        ], 600);
+
+        wp_safe_redirect(add_query_arg(
+            ['page' => 'glpe-viewer-vb', 'hosttest' => '1'],
+            admin_url('admin.php')
+        ));
+        exit;
     }
 
     /**

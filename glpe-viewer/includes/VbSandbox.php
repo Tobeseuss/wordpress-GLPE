@@ -21,6 +21,13 @@
  *   - sessions live in transients with a TTL and a concurrency cap, so the
  *     temporary environments reap themselves.
  *
+ * v7.4.0 — the TTL, the concurrency cap and the event payload caps are
+ * admin-configurable (the dedicated «مرورگر مجازی» settings page), and
+ * the gesture whitelist grew right-click (contextmenu) and double-click
+ * shapes so text selection, clipboard and context-menu interaction ride
+ * the same host-first round trip. File downloads gained a dedicated
+ * module (includes/VbDl.php) with two delivery paths for shared hosting.
+ *
  * Zero external dependencies. PHP 7.2 - 8.4.
  */
 
@@ -28,15 +35,45 @@ class GLPE_Vb_Sandbox {
 
     const OPT_ENGINE = 'glpe_vb_engine';          // auto | service | sandbox
     const OPT_INDEX = 'glpe_vb_vbs_index';        // [token => expiry]
+    const OPT_TTL = 'glpe_vb_session_ttl';        // minutes (admin, v7.4.0)
+    const OPT_MAX = 'glpe_vb_max_sessions';       // concurrency (admin, v7.4.0)
     const PREFIX = 'glpe_vbs_';                   // transient keys
     const JAR_SUFFIX = '_vbs';                     // cookie-jar session key
     const TTL = 1800;                              // 30 minutes per session
-    const MAX_SESSIONS = 6;
+    const MAX_SESSIONS = 6;                        // default concurrency cap
     const EV_CAP = 40;                             // events per round trip
     const TEXT_CAP = 2000;
 
     /** @var array|null test store: [token => ['v' => value, 'exp' => ts]] */
     public static $storeShim = null;
+
+    // ------------------------------------------------------------------
+    // Admin-tunable values — hard clamps keep every free host safe; the
+    // settings page edits them and the host-test button can auto-fill them.
+    // ------------------------------------------------------------------
+
+    /** Session life in seconds (5..240 minutes, default 30). */
+    public static function ttl() {
+        $min = (int)apply_filters('glpe_vb_ttl_min', 5);
+        $max = (int)apply_filters('glpe_vb_ttl_max', 240);
+        if ($max < $min) {
+            $max = $min;
+        }
+        $m = function_exists('get_option') ? (int)get_option(self::OPT_TTL, 0) : 0;
+        if ($m < $min || $m > $max) {
+            $m = (int)round(self::TTL / 60);
+        }
+        return max(1, $m) * 60;
+    }
+
+    /** Concurrent sandbox sessions allowed (1..32, default 6). */
+    public static function maxSessions() {
+        $v = function_exists('get_option') ? (int)get_option(self::OPT_MAX, 0) : 0;
+        if ($v < 1 || $v > 32) {
+            $v = self::MAX_SESSIONS;
+        }
+        return (int)$v;
+    }
 
     // ------------------------------------------------------------------
     // Engine selection
@@ -213,14 +250,15 @@ class GLPE_Vb_Sandbox {
         $w = max(320, min(1920, (int)$w));
         $h = max(240, min(1200, (int)$h));
 
-        $cap = (int)apply_filters('glpe_vb_vbs_cap', self::MAX_SESSIONS);
+        $cap = self::maxSessions();
+        $ttl = self::ttl();
         $live = self::indexPrune();
         if (count($live) >= max(1, $cap)) {
             return ['e' => 'busy'];
         }
 
         $token = wp_generate_password(32, false, false);
-        $exp = time() + self::TTL;
+        $exp = time() + $ttl;
         $ok = self::storeSet($token, [
             'u'      => $url,
             'w'      => $w,
@@ -228,7 +266,7 @@ class GLPE_Vb_Sandbox {
             'created' => time(),
             'exp'    => $exp,
             'ev'     => 0,
-        ], self::TTL);
+        ], $ttl);
         if (!$ok) {
             return ['e' => 'store'];
         }
@@ -243,7 +281,7 @@ class GLPE_Vb_Sandbox {
             $_SESSION['_glpe_cookies' . self::JAR_SUFFIX] = [];
         }
 
-        return ['t' => $token, 'g' => self::gatewayUrl($url), 'ttl' => self::TTL];
+        return ['t' => $token, 'g' => self::gatewayUrl($url), 'ttl' => $ttl];
     }
 
     /** Reads a live session record (expired/unknown → false). */
@@ -263,6 +301,13 @@ class GLPE_Vb_Sandbox {
      * Whitelists, clamps and caps the visitor's gesture batch. Unknown
      * event shapes and unknown fields never survive the round trip; only
      * the canonical form below is echoed back to drive the sandbox.
+     *
+     * v7.4.0 additions: 'rc' (right-click / contextmenu) and 'db'
+     * (double-click) join the pointer family — the echo replays them as
+     * synthetic contextmenu/dblclick events and, when the site did not
+     * claim the gesture, the visitor's own surface menu opens. 'tx'
+     * carries a 'p' (paste) marker so the replay can hand the payload to
+     * the frame as a clipboard-style paste instead of plain typing.
      */
     public static function normalizeEvents($events, $w = 1920, $h = 1200) {
         if (!is_array($events)) {
@@ -288,6 +333,14 @@ class GLPE_Vb_Sandbox {
                         'y' => self::clamp((int)round((float)$ev['y']), 0, max(0, (int)$h - 1)),
                         'b' => $button];
                     break;
+                case 'rc':
+                case 'db':
+                    // Right-click and double-click carry position only — the
+                    // button is implicit in the shape itself.
+                    $out[] = ['t' => $type,
+                        'x' => self::clamp((int)round((float)$ev['x']), 0, max(0, (int)$w - 1)),
+                        'y' => self::clamp((int)round((float)$ev['y']), 0, max(0, (int)$h - 1))];
+                    break;
                 case 'wh':
                     $out[] = ['t' => 'wh',
                         'x' => self::clamp((int)round((float)$ev['x']), 0, max(0, (int)$w - 1)),
@@ -304,7 +357,9 @@ class GLPE_Vb_Sandbox {
                         'mods' => self::clamp((int)$ev['mods'], 0, 15)];
                     break;
                 case 'tx':
-                    $out[] = ['t' => 'tx', 'v' => substr((string)(isset($ev['v']) ? $ev['v'] : ''), 0, self::TEXT_CAP)];
+                    $out[] = ['t' => 'tx',
+                        'v' => substr((string)(isset($ev['v']) ? $ev['v'] : ''), 0, self::TEXT_CAP),
+                        'p' => empty($ev['p']) ? 0 : 1];
                     break;
             }
         }
@@ -325,8 +380,16 @@ class GLPE_Vb_Sandbox {
      * token ('p') decoded with the per-site codec; the reply itself wraps
      * its payload into an opaque token again — no readable gesture, typed
      * text or destination ever travels in the clear.
+     *
+     * The dispatcher hands over the engine it already built for this
+     * request so the download endpoints (v7.4.0) fetch upstream through
+     * the very same cookie jar, identity profile and relay pipeline as
+     * the sandbox display itself.
+     *
+     * @param string $mode endpoint name
+     * @param GLPE_Engine|null $engine gateway engine of this request
      */
-    public static function handleMode($mode) {
+    public static function handleMode($mode, $engine = null) {
         $raw = isset($_POST['p']) ? trim((string)wp_unslash($_POST['p'])) : '';
         $doc = [];
         if ($raw !== '') {
@@ -338,6 +401,22 @@ class GLPE_Vb_Sandbox {
         }
 
         switch ($mode) {
+            case 'vb_dlopen':
+                if (class_exists('GLPE_VbDl')) {
+                    GLPE_VbDl::handleDlOpen($doc, $engine);
+                } else {
+                    self::respond(['e' => 'off']);
+                }
+                break;
+
+            case 'vb_dlchunk':
+                if (class_exists('GLPE_VbDl')) {
+                    GLPE_VbDl::handleDlChunk($doc, $engine);
+                } else {
+                    self::respond(['e' => 'off']);
+                }
+                break;
+
             case 'vb_open':
                 $u = isset($doc['u']) ? (string)$doc['u'] : '';
                 $w = isset($doc['w']) ? (int)$doc['w'] : 1024;
@@ -361,9 +440,10 @@ class GLPE_Vb_Sandbox {
                 // The store write is throttled: a lively session renews its
                 // TTL the moment the remaining life drops below half, so a
                 // mouse stream never pays a database write per round trip.
-                if ((int)$s['exp'] - time() < (int)(self::TTL / 2)) {
-                    $s['exp'] = time() + self::TTL;
-                    self::storeSet($token, $s, self::TTL);
+                $ttl = self::ttl();
+                if ((int)$s['exp'] - time() < (int)($ttl / 2)) {
+                    $s['exp'] = time() + $ttl;
+                    self::storeSet($token, $s, $ttl);
                     $idx = self::index();
                     $idx[$token] = $s['exp'];
                     update_option(self::OPT_INDEX, $idx);
@@ -387,8 +467,9 @@ class GLPE_Vb_Sandbox {
                     break;
                 }
                 $s['u'] = $u;
-                $s['exp'] = time() + self::TTL;
-                self::storeSet($token, $s, self::TTL);
+                $ttl = self::ttl();
+                $s['exp'] = time() + $ttl;
+                self::storeSet($token, $s, $ttl);
                 $idx = self::index();
                 $idx[$token] = $s['exp'];
                 update_option(self::OPT_INDEX, $idx);
@@ -402,12 +483,13 @@ class GLPE_Vb_Sandbox {
                     self::respond(['e' => 'expired']);
                     break;
                 }
-                $s['exp'] = time() + self::TTL;
-                self::storeSet($token, $s, self::TTL);
+                $ttl = self::ttl();
+                $s['exp'] = time() + $ttl;
+                self::storeSet($token, $s, $ttl);
                 $idx = self::index();
                 $idx[$token] = $s['exp'];
                 update_option(self::OPT_INDEX, $idx);
-                self::respond(['ttl' => self::TTL]);
+                self::respond(['ttl' => $ttl]);
                 break;
 
             case 'vb_close':
@@ -435,8 +517,9 @@ class GLPE_Vb_Sandbox {
         return [
             'ep'  => add_query_arg(['_glpe' => '1'], home_url('/')),
             'k'   => GLPE_Codec::secret(),
-            'ttl' => self::TTL,
-            'cap' => (int)apply_filters('glpe_vb_vbs_cap', self::MAX_SESSIONS),
+            'ttl' => self::ttl(),
+            'cap' => self::maxSessions(),
+            'dl'  => class_exists('GLPE_VbDl') ? 1 : 0,
             'v'   => defined('GLPE_VERSION') ? GLPE_VERSION : '',
         ];
     }

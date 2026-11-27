@@ -41,9 +41,20 @@ $glpe_options = [
     'glpe_vb_port',
     'glpe_vb_endpoint',
     'glpe_vb_engine',
+    'glpe_vb_session_ttl',
+    'glpe_vb_max_sessions',
     'glpe_vb_vbs_index',
     'glpe_path_entry',
     'glpe_res_cache',
+    'glpe_res_ttl_def',
+    'glpe_res_ttl_max',
+    'glpe_res_entry_cap',
+    'glpe_res_quota',
+    'glpe_dl_threshold',
+    'glpe_dl_folder',
+    'glpe_dl_retention',
+    'glpe_dl_maxsize',
+    'glpe_dl_quota',
 ];
 
 // Virtual browser sandbox sessions: reap the live temporary environments
@@ -132,3 +143,30 @@ if (is_dir($glpe_res_dir)) {
     }
     @rmdir($glpe_res_dir);
 }
+
+// Host-side stored downloads (v7.4.0): the folder name itself was a setting,
+// so the stored value is read (before the option list is deleted) with the
+// shipped default as fallback.
+$glpe_dl_folder_opt = get_option('glpe_dl_folder', '');
+$glpe_dl_folder = (is_string($glpe_dl_folder_opt) && preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/', $glpe_dl_folder_opt))
+    ? $glpe_dl_folder_opt
+    : 'glpe-downloads';
+$glpe_dl_dir = wp_normalize_path(trailingslashit((string)wp_upload_dir()['basedir']) . $glpe_dl_folder);
+if (is_dir($glpe_dl_dir)) {
+    foreach ((array)scandir($glpe_dl_dir) as $glpe_dl_node) {
+        if ($glpe_dl_node === '.' || $glpe_dl_node === '..') {
+            continue;
+        }
+        $glpe_dl_path = $glpe_dl_dir . '/' . $glpe_dl_node;
+        if (is_file($glpe_dl_path)) {
+            @unlink($glpe_dl_path);
+        }
+    }
+    @rmdir($glpe_dl_dir);
+}
+
+// Host-test report and any pending download-session records: transient
+// leftovers expire by themselves, but taking them along is cheap and clean.
+delete_transient('glpe_vb_hostrec');
+// Download sessions keep no index option — their transients are TTL-bounded
+// and the stored files themselves are gone with the folder above.

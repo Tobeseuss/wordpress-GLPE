@@ -51,6 +51,50 @@
   var currentTargetUrl = cipherDecode(ctx.u) || window.location.href;
 
   // =====================================================================
+  // Download-shaped links (v7.4.0). Inside the virtual browser's sandbox
+  // the click is reported to the parent surface (which drives the host's
+  // two delivery paths); in the ordinary viewer a download link simply
+  // gains the tunnel flag so the gateway streams the file instead of
+  // buffering it as a page. Both decisions ride the SAME click capture.
+  // =====================================================================
+  var DL_EXT_RE = /\.(zip|rar|7z|gz|tgz|xz|bz2|exe|msi|dmg|apk|ipa|iso|deb|rpm|bin|tar|epub|mobi|jar)(\?|$)/i;
+  document.addEventListener('click', function (e) {
+    try {
+      if (e.defaultPrevented || e.button !== 0) return;
+      var node = e.target;
+      var a = node && node.closest ? node.closest('a[href]') : null;
+      if (!a) return;
+      var href = a.getAttribute('href') || '';
+      if (!href || href.charAt(0) === '#' || href.indexOf('javascript:') === 0 || href.indexOf('data:') === 0) return;
+      var m = href.match(/[?&]l=([A-Za-z0-9_-]+)/);
+      var dest = m ? cipherDecode(m[1]) : '';
+      if (!dest || !/^https?:/i.test(dest)) return;
+      var isDownload = a.hasAttribute('download') || DL_EXT_RE.test(dest);
+      if (!isDownload) return;
+      if (ctx.vs) {
+        // Sandbox surface: the environment's lockdown pins parent/top to
+        // self, so the signal rides a document event — the overlay (which
+        // shares this origin by design) listens on this very document and
+        // drives the host's download flow.
+        e.preventDefault();
+        e.stopPropagation();
+        try {
+          document.dispatchEvent(new CustomEvent('glpe-vb-dl', {
+            detail: { u: dest, download: a.hasAttribute('download') }
+          }));
+        } catch (err) {}
+        return;
+      }
+      // Ordinary viewer: navigate the tunnel entry so the gateway streams
+      // the bytes to the visitor's save dialog.
+      if (href.indexOf('_glpe=1') !== -1 && href.indexOf('dl=1') === -1) {
+        e.preventDefault();
+        window.location.href = href + '&dl=1';
+      }
+    } catch (err) {}
+  }, true);
+
+  // =====================================================================
   // Virtual-browser sandbox mode (ctx.vs): this page lives inside the
   // locked temporary environment of the sandbox engine. Before ANY
   // destination script boots, the environment gets (a) a host-consistent

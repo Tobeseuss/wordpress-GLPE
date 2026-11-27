@@ -1789,7 +1789,7 @@ check('start notices wired', strpos($mainSrc25, 'vb-started') !== false && strpo
 // historical 7.0.0 changelog entry stays below)
 check('main file still carries the 7.0.0 heritage marker', substr_count($mainSrc25, '7.0.0') >= 1);
 $readme25 = $readme24;
-check('readme stable tag follows the current release (7.3.0)', strpos($readme25, 'Stable tag: 7.3.0') !== false);
+check('readme stable tag follows the current release (7.4.0)', strpos($readme25, 'Stable tag: 7.4.0') !== false);
 check('readme carries the 7.0.0 changelog entry', strpos($readme25, '= 7.0.0 =') !== false && strpos($readme25, 'مرورگر مجازی') !== false);
 
 // 25i. everything the shipped zip needs stays scanner-clean
@@ -1969,8 +1969,8 @@ unset($_POST['p']);
 GLPE_Vb_Sandbox::$storeShim = null;
 
 // 26h. server-side source wiring
-check('dispatcher routes the sandbox endpoints', strpos($mainSrc26, 'vb_(open|in|nav|beat|close)') !== false && strpos($mainSrc26, 'GLPE_Vb_Sandbox::handleMode') !== false);
-check('vs joins the reserved gateway fields', strpos($mainSrc26, "'tp', 'vs', 'mode'") !== false);
+check('dispatcher routes the sandbox endpoints (incl. the v7.4.0 download family)', strpos($mainSrc26, 'vb_(open|in|nav|beat|close|dlopen|dlchunk)') !== false && strpos($mainSrc26, 'GLPE_Vb_Sandbox::handleMode') !== false);
+check('vs joins the reserved gateway fields (with the v7.4.0 dl/dlt pair)', strpos($mainSrc26, "'tp', 'vs', 'dl', 'dlt', 'mode'") !== false);
 check('sandbox engine constructed with its own jar', strpos($mainSrc26, 'GLPE_Vb_Sandbox::JAR_SUFFIX') !== false);
 check('vs requests lose the floating toolbar and gain the profile', strpos($mainSrc26, "\$options['showToolbar'] = false;") !== false && strpos($mainSrc26, "\$options['vsProfile'] = GLPE_Vb_Sandbox::profile()") !== false);
 check('sandbox launcher card renders with its own script', strpos($mainSrc26, 'glpe-vbs-open') !== false && strpos($mainSrc26, 'window.GLPE_VBS') !== false && strpos($mainSrc26, 'includes/vb-sandbox.js') !== false);
@@ -2004,7 +2004,7 @@ check('sandbox jar untouched by normal records', strpos($jarB->getCookieHeader('
 
 // 26k. the visitor-side sandbox surface script
 check('surface reads the server-injected GLPE_VBS config', strpos($vbsClient, 'window.GLPE_VBS') !== false);
-check('locked frame carries the sandbox attribute without popups', strpos($vbsClient, "setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms')") !== false);
+check('locked frame carries the sandbox attribute (no popups; downloads allowed since v7.4.0)', strpos($vbsClient, "setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-downloads')") !== false);
 check('gestures travel to the host through the five endpoints', strpos($vbsClient, "'vb_open'") !== false && strpos($vbsClient, "'vb_in'") !== false && strpos($vbsClient, "'vb_nav'") !== false && strpos($vbsClient, "'vb_beat'") !== false && strpos($vbsClient, "'vb_close'") !== false);
 check('requests carry one opaque p token', strpos($vbsClient, "body = 'p=' + encodeURIComponent(enc(JSON.stringify(docObj))") !== false);
 check('virtual cursor drawn, OS cursor hidden on the capture layer', strpos($vbsClient, 'positionCursor') !== false && strpos($vbsClient, 'cursor:none') !== false);
@@ -2035,7 +2035,7 @@ $uninstall26 = (string)file_get_contents($root . '/glpe-viewer/uninstall.php');
 check('uninstall reaps sandbox sessions and engine options', strpos($uninstall26, 'glpe_vb_engine') !== false && strpos($uninstall26, "delete_transient('glpe_vbs_'") !== false && strpos($uninstall26, 'glpe_vb_vbs_index') !== false && strpos($uninstall26, 'glpe_vb_key') !== false);
 check('main file version bumped to 7.1.0', substr_count($mainSrc26, '7.1.0') >= 2);
 $readme26 = (string)file_get_contents($root . '/glpe-viewer/readme.txt');
-check('readme stable tag is 7.3.0', strpos($readme26, 'Stable tag: 7.3.0') !== false);
+check('readme stable tag is 7.4.0', strpos($readme26, 'Stable tag: 7.4.0') !== false);
 check('readme carries the 7.1.0 changelog entry', strpos($readme26, '= 7.1.0 =') !== false && strpos($readme26, 'موتور جعبه‌ای') !== false);
 
 // 26n. everything the shipped zip needs stays scanner-clean
@@ -2223,15 +2223,292 @@ check('purge notice wired', strpos($mainSrc28, 'res-purged') !== false);
 // 28j. uninstall + version markers
 check('uninstall reaps the cache option and directory', strpos($uninstall28, "'glpe_res_cache'") !== false && strpos($uninstall28, 'glpe-res-cache') !== false);
 check('main file version bumped to 7.3.0', substr_count($mainSrc28, '7.3.0') >= 2);
-check('readme stable tag is 7.3.0', strpos($readme27, 'Stable tag: 7.3.0') !== false);
+check('readme stable tag is 7.4.0', strpos($readme27, 'Stable tag: 7.4.0') !== false);
 check('readme carries the 7.3.0 changelog entry', strpos($readme27, '= 7.3.0 =') !== false);
-check('README badge and feature bullet updated', strpos($readmeMd27, 'version-7.3.0-blue') !== false && strpos($readmeMd27, 'v7.3.0') !== false);
+check('README badge and feature bullet updated', strpos($readmeMd27, 'version-7.4.0-blue') !== false && strpos($readmeMd27, 'v7.4.0') !== false);
 
 // 28k. the new surface stays scanner-clean
 $ship28 = [$resSrc28, $mainSrc28, $engineSrc28, $uninstall28];
 $hits28 = 0;
 foreach ($ship28 as $src28) { if (preg_match('#' . $guardPattern . '#i', $src28)) { $hits28++; } }
 check('rescache surface carries no scanner-flagged strings', $hits28 === 0);
+
+echo "\n== 29. Virtual Browser v7.4.0 — interaction shapes and admin-tuned session values ==\n";
+
+// 29a. the gesture whitelist grew right-click and double-click shapes
+$ev29 = GLPE_Vb_Sandbox::normalizeEvents([
+    ['t' => 'rc', 'x' => 5000, 'y' => -7],
+    ['t' => 'db', 'x' => 10.4, 'y' => 20.6],
+    ['t' => 'zz', 'x' => 1, 'y' => 2],
+], 800, 600);
+$rc29 = null; $db29 = null;
+foreach ($ev29 as $e29) { if ($e29['t'] === 'rc') { $rc29 = $e29; } if ($e29['t'] === 'db') { $db29 = $e29; } }
+check('right-click shape survives with clamped coordinates', is_array($rc29) && $rc29['x'] === 799 && $rc29['y'] === 0);
+check('double-click shape survives with rounded coordinates', is_array($db29) && $db29['x'] === 10 && $db29['y'] === 21);
+check('unknown shapes never survive', count($ev29) === 2);
+
+// 29b. the paste marker rides the text shape
+$tx29 = GLPE_Vb_Sandbox::normalizeEvents([['t' => 'tx', 'v' => 'hello', 'p' => 1], ['t' => 'tx', 'v' => 'x']], 800, 600);
+check('paste-marked text keeps its marker', isset($tx29[0]['p']) && (int)$tx29[0]['p'] === 1);
+check('plain typing carries a zero marker', isset($tx29[1]['p']) && (int)$tx29[1]['p'] === 0);
+
+// 29c. session life and concurrency are option-tuned now
+update_option('glpe_vb_session_ttl', '7');
+update_option('glpe_vb_max_sessions', '2');
+check('session TTL follows the admin option', GLPE_Vb_Sandbox::ttl() === 420);
+check('session cap follows the admin option', GLPE_Vb_Sandbox::maxSessions() === 2);
+update_option('glpe_vb_session_ttl', '500');
+update_option('glpe_vb_max_sessions', '0');
+check('out-of-range TTL falls back to the 30-minute default', GLPE_Vb_Sandbox::ttl() === 1800);
+check('out-of-range cap falls back to six', GLPE_Vb_Sandbox::maxSessions() === 6);
+update_option('glpe_vb_session_ttl', '');
+update_option('glpe_vb_max_sessions', '');
+
+// 29d. the client config reflects the live values (VbDl must exist for the marker)
+require $root . '/glpe-viewer/includes/VbDl.php';
+$cfg29 = GLPE_Vb_Sandbox::clientConfig();
+check('client config carries the download marker', isset($cfg29['dl']) && (int)$cfg29['dl'] === 1);
+check('client config carries the effective TTL', (int)$cfg29['ttl'] === 1800);
+
+// 29e. the visitor-side surface ships the interaction machinery
+$vbsSrc29 = file_get_contents($root . '/glpe-viewer/includes/vb-sandbox.js');
+check('surface captures right-click for the host round trip', strpos($vbsSrc29, "push({ t: 'rc'") !== false);
+check('surface captures double-click for the host round trip', strpos($vbsSrc29, "push({ t: 'db'") !== false);
+check('selection emulation anchors through caretRangeFromPoint', strpos($vbsSrc29, 'caretRangeFromPoint') !== false && strpos($vbsSrc29, 'setBaseAndExtent') !== false);
+check('copy uses the visitor clipboard with a legacy fallback', strpos($vbsSrc29, 'navigator.clipboard.writeText') !== false && strpos($vbsSrc29, "execCommand('copy')") !== false);
+check('paste rides the host first and replays as a clipboard event', strpos($vbsSrc29, "push({ t: 'tx', v: String(t).slice(0, 2000), p: 1 })") !== false && strpos($vbsSrc29, "ClipboardEvent('paste'") !== false);
+check('the surface menu opens when the site did not claim the right-click', strpos($vbsSrc29, 'function showVbMenu') !== false && strpos($vbsSrc29, 'defaultPrevented') !== false);
+check('coordinates map through the live frame ratio', strpos($vbsSrc29, 'function mapPoint') !== false && strpos($vbsSrc29, 'innerWidth') !== false);
+check('select-all spans the frame document', strpos($vbsSrc29, 'selectAllChildren') !== false);
+
+// 29f. gate scan of the changed surface
+check('interaction surface stays scanner-clean', !preg_match('#' . $guardPattern . '#i', $vbsSrc29));
+
+echo "\n== 30. Virtual Browser v7.4.0 — dedicated settings page and host test ==\n";
+
+// 30a. the dedicated admin page exists and owns the moved cards
+check('dedicated submenu page is registered', strpos($mainSrc28, "'glpe-viewer-vb'") !== false && strpos($mainSrc28, 'renderAdminVbPage') !== false);
+check('the old inline VB settings block left the main settings page', strpos($mainSrc28, 'مرورگر مجازی (رندر روی میزبان)') === false);
+check('main settings page carries a pointer card to the new page', strpos($mainSrc28, 'renderVbPointerCard') !== false);
+
+// 30b. every new setting is registered with its sanitizer
+$settings30 = [
+    'glpe_vb_session_ttl' => 'sanitizeVbSessionTtl',
+    'glpe_vb_max_sessions' => 'sanitizeVbMaxSessions',
+    'glpe_res_ttl_def' => 'sanitizeResTtlDef',
+    'glpe_res_ttl_max' => 'sanitizeResTtlMax',
+    'glpe_res_entry_cap' => 'sanitizeResEntryCap',
+    'glpe_res_quota' => 'sanitizeResQuota',
+    'glpe_dl_threshold' => 'sanitizeDlMiB',
+    'glpe_dl_folder' => 'sanitizeDlFolder',
+    'glpe_dl_retention' => 'sanitizeDlRetention',
+    'glpe_dl_maxsize' => 'sanitizeDlMaxSize',
+    'glpe_dl_quota' => 'sanitizeDlQuota',
+];
+$reg30 = 0;
+foreach ($settings30 as $opt30 => $san30) {
+    if (strpos($mainSrc28, "'$opt30'") !== false && strpos($mainSrc28, $san30) !== false) { $reg30++; }
+}
+check('all eleven v7.4.0 settings registered with clamped sanitizers', $reg30 === 11);
+
+// 30c. the hard clamps the sanitizers enforce
+check('session TTL clamp is 5..240 minutes', strpos($mainSrc28, 'return ($v >= 5 && $v <= 240) ? (string)$v : \'\';') !== false);
+check('folder names are one slug token only', strpos($mainSrc28, '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') !== false);
+
+// 30d. host test — action, measurement, auto-fill
+check('host test action is registered', strpos($mainSrc28, 'admin_post_glpe_vb_hosttest') !== false && strpos($mainSrc28, 'handleVbHostTest') !== false);
+check('host test measures the execution window, memory and disk', strpos($mainSrc28, 'max_execution_time') !== false && strpos($mainSrc28, 'memory_limit') !== false && strpos($mainSrc28, 'disk_free_space') !== false);
+check('tunnel recommendation scales with the execution window', strpos($mainSrc28, 'floor($exec * 0.5)') !== false);
+check('storage recommendations scale with the free disk', strpos($mainSrc28, 'floor($diskMiB / 4)') !== false && strpos($mainSrc28, 'floor($diskMiB / 5)') !== false);
+check('report lands in a transient and the redirect carries hosttest=1', strpos($mainSrc28, 'glpe_vb_hostrec') !== false && strpos($mainSrc28, "'hosttest' => '1'") !== false);
+check('the page auto-fills the recommended values into the form', strpos($mainSrc28, "var inp=document.query") !== false && strpos($mainSrc28, 'inp.value=rec[map[k]]') !== false);
+check('host test report card renders the measured facts', strpos($mainSrc28, 'renderHostTestCard') !== false);
+
+// 30e. tunable subresource cache honors its options
+update_option('glpe_res_ttl_def', '20');
+update_option('glpe_res_ttl_max', '30');
+update_option('glpe_res_entry_cap', '2');
+update_option('glpe_res_quota', '32');
+check('cache TTL default follows the option', GLPE_ResCache::ttlDef() === 1200);
+check('cache TTL ceiling follows the option', GLPE_ResCache::ttlMax() === 1800);
+check('cache entry cap follows the option', GLPE_ResCache::entryMax() === 2097152);
+check('cache quota follows the option', GLPE_ResCache::quota() === 33554432);
+update_option('glpe_res_ttl_def', '999');
+update_option('glpe_res_ttl_max', '1');
+update_option('glpe_res_entry_cap', '99');
+update_option('glpe_res_quota', '1');
+check('out-of-range cache values fall back to the shipped defaults', GLPE_ResCache::ttlDef() === 900 && GLPE_ResCache::ttlMax() === 21600 && GLPE_ResCache::entryMax() === 3145728 && GLPE_ResCache::quota() === 67108864);
+update_option('glpe_res_ttl_def', '');
+update_option('glpe_res_ttl_max', '');
+update_option('glpe_res_entry_cap', '');
+update_option('glpe_res_quota', '');
+
+echo "\n== 31. Virtual Browser v7.4.0 — file downloads (tunnel + host store) ==\n";
+
+// 31a. settings clamps
+update_option('glpe_dl_threshold', '9');
+update_option('glpe_dl_retention', '30');
+check('download threshold follows the option', GLPE_VbDl::threshold() === 9);
+check('retention follows the option', GLPE_VbDl::retention() === 30);
+check('folder falls back to the shipped default on junk', GLPE_VbDl::folder() === 'glpe-downloads');
+update_option('glpe_dl_threshold', '0');
+update_option('glpe_dl_retention', '0');
+check('out-of-range download values fall back', GLPE_VbDl::threshold() === 8 && GLPE_VbDl::retention() === 120);
+update_option('glpe_dl_threshold', '');
+update_option('glpe_dl_retention', '');
+
+// 31b. guarded storage directory
+$dlDir31 = sys_get_temp_dir() . '/glpe-vbdl-' . uniqid();
+GLPE_VbDl::$testDir = $dlDir31;
+check('storage directory is created on demand', GLPE_VbDl::dir() === $dlDir31 && is_dir($dlDir31));
+check('deny-all htaccess guards the folder', strpos((string)@file_get_contents($dlDir31 . '/.htaccess'), 'Require all denied') !== false);
+check('empty index keeps listings blind', (string)@file_get_contents($dlDir31 . '/index.html') === '');
+
+// 31c. filename derivation
+check('disposition filename* wins', GLPE_VbDl::filenameFrom('https://x.test/f', "attachment; filename*=UTF-8''my%20file.zip") === 'my file.zip');
+check('quoted disposition filename next', GLPE_VbDl::filenameFrom('https://x.test/f', 'attachment; filename="a.zip"') === 'a.zip');
+check('URL basename is the fallback', GLPE_VbDl::filenameFrom('https://x.test/files/report.tar.gz', '') === 'report.tar.gz');
+check('path separators never survive', strpos(GLPE_VbDl::filenameFrom('https://x.test/f', 'attachment; filename="../etc/passwd"'), '/') === false);
+check('bare URLs yield a generic name', GLPE_VbDl::filenameFrom('https://x.test/', '') === 'download.bin');
+
+// 31d. open decision — small file tunnels, big ranged file stores
+$probe31 = function ($headers31, $url31 = 'https://dl.test/pack.zip') {
+    GLPE_VbDl::$fetchStub = function ($u, $m, $r) use ($headers31) {
+        return ['status' => 200, 'contentType' => 'application/zip', 'body' => '',
+            'finalUrl' => $u, 'headers' => $headers31, 'setCookie' => false];
+    };
+    $GLOBALS['__glpe_vbs_response'] = null;
+    GLPE_VbDl::handleDlOpen(['u' => $url31], null);
+    $raw31 = isset($GLOBALS['__glpe_vbs_response']['d']) ? $GLOBALS['__glpe_vbs_response']['d'] : '';
+    return json_decode(GLPE_Codec::decodeData($raw31), true);
+};
+GLPE_VbDl::$storeShim = [];
+$small31 = $probe31(['content-length' => 1048576, 'accept-ranges' => 'bytes']);
+check('a small file answers with the direct tunnel', is_array($small31) && $small31['mode'] === 'tunnel' && strpos($small31['g'], 'dl=1') !== false);
+$big31 = $probe31(['content-length' => 1048576 * 40, 'accept-ranges' => 'bytes', 'content-disposition' => 'attachment; filename="big.zip"']);
+check('a big ranged file answers with the host-side store', is_array($big31) && $big31['mode'] === 'store' && isset($big31['t'], $big31['size'], $big31['name']) && $big31['name'] === 'big.zip');
+$huge31 = $probe31(['content-length' => 1048576 * 999]);
+check('an over-ceiling file is refused outright', is_array($huge31) && $huge31['e'] === 'toolarge');
+$noranges31 = $probe31(['content-length' => 1048576 * 40]);
+check('a big file without range support still tunnels best-effort', is_array($noranges31) && $noranges31['mode'] === 'tunnel');
+
+// 31e. the chunked store walks ranges to completion
+if (is_array($big31) && !empty($big31['t'])) {
+    $tok31 = $big31['t'];
+    $off31 = 0;
+    $chunks31 = 0;
+    $done31 = false;
+    GLPE_VbDl::$fetchStub = function ($u, $m, $r) use (&$off31, &$chunks31) {
+        $chunks31++;
+        $body31 = str_repeat('Z', 4194304);
+        if ($off31 + strlen($body31) >= 41943040) { $body31 = str_repeat('Z', 41943040 - $off31); }
+        return ['status' => 206, 'contentType' => 'application/zip', 'body' => $body31,
+            'finalUrl' => $u, 'headers' => ['content-range' => 'bytes $off31-' . ($off31 + strlen($body31) - 1) . '/41943040'], 'setCookie' => false];
+    };
+    $last31 = [];
+    for ($i31 = 0; $i31 < 30; $i31++) {
+        $GLOBALS['__glpe_vbs_response'] = null;
+        GLPE_VbDl::handleDlChunk(['t' => $tok31], null);
+        $raw31 = isset($GLOBALS['__glpe_vbs_response']['d']) ? $GLOBALS['__glpe_vbs_response']['d'] : '';
+        $last31 = json_decode(GLPE_Codec::decodeData($raw31), true);
+        if (!is_array($last31)) break;
+        $off31 = isset($last31['got']) ? (int)$last31['got'] : $off31;
+        if (!empty($last31['done'])) { $done31 = true; break; }
+    }
+    check('chunk pulls advance until the file is complete', $done31 && $off31 === 41943040 && $chunks31 === 10);
+    $g31 = (is_array($last31) && isset($last31['g'])) ? (string)$last31['g'] : '';
+    check('completion answers with the opaque serving URL', $done31 && $g31 !== '' && strpos($g31, 'dlt=') !== false);
+    // the stored file on disk is complete and opaque
+    $bin31 = glob($dlDir31 . '/*.bin');
+    $binSize31 = $bin31 ? (int)@filesize($bin31[0]) : 0;
+    check('the stored artifact holds exactly the promised bytes', $binSize31 === 41943040);
+    check('stored names are opaque (never the destination filename)', $bin31 && !preg_match('/big\.zip$/', basename($bin31[0])) && preg_match('/^[a-z0-9]{8,32}\.bin$/', basename($bin31[0])) === 1);
+    // 31f. the serving token is short-lived and self-describing
+    $m31 = [];
+    preg_match('/[?&]dlt=([A-Za-z0-9_-]+)/', $g31, $m31);
+    $doc31 = json_decode(GLPE_Codec::decodeData(isset($m31[1]) ? $m31[1] : ''), true);
+    check('the serving token carries the file, name and expiry', is_array($doc31) && isset($doc31['f'], $doc31['n'], $doc31['exp']) && (int)$doc31['exp'] > time());
+    // 31g. an unknown session answers expired
+    $GLOBALS['__glpe_vbs_response'] = null;
+    GLPE_VbDl::handleDlChunk(['t' => 'unknownsession'], null);
+    $raw31 = isset($GLOBALS['__glpe_vbs_response']['d']) ? $GLOBALS['__glpe_vbs_response']['d'] : '';
+    $gone31 = json_decode(GLPE_Codec::decodeData($raw31), true);
+    check('an unknown download session answers expired', is_array($gone31) && $gone31['e'] === 'expired');
+}
+
+// 31h. retention reaping (lazy, no cron)
+@touch($dlDir31 . '/' . str_repeat('y', 24) . '.bin');
+@touch($dlDir31 . '/' . str_repeat('z', 24) . '.bin', time() - 100000);
+$before31 = count((array)glob($dlDir31 . '/*.bin'));
+GLPE_VbDl::cleanup();
+check('retention reaping drops only the aged file', count((array)glob($dlDir31 . '/*.bin')) === $before31 - 1);
+
+// 31i. the serve path (own process — serveStored exits)
+$serve31 = false;
+if (function_exists('shell_exec') && defined('PHP_BINARY')) {
+    $probe31code = 'error_reporting(0); define("ABSPATH", "/tmp/");'
+        . 'if (!function_exists("get_option")) { function get_option($n, $d = false) { return $d; } }'
+        . 'if (!function_exists("update_option")) { function update_option($n, $v) { return true; } }'
+        . 'if (!function_exists("get_transient")) { function get_transient($t) { return false; } }'
+        . 'if (!function_exists("set_transient")) { function set_transient($t, $v, $e = 0) { return true; } }'
+        . 'if (!function_exists("delete_transient")) { function delete_transient($t) { return true; } }'
+        . 'if (!function_exists("wp_generate_password")) { function wp_generate_password($l, $x = false, $y = false) { return str_repeat("q", (int)$l); } }'
+        . 'if (!function_exists("status_header")) { function status_header($c) { } }'
+        . 'if (!function_exists("nocache_headers")) { function nocache_headers() { } }'
+        . 'if (!function_exists("wp_send_json")) { function wp_send_json($p) { } }'
+        . 'if (!function_exists("wp_json_encode")) { function wp_json_encode($v) { return json_encode($v); } }'
+        . 'if (!function_exists("add_query_arg")) { function add_query_arg($a, $u) { return $u; } }'
+        . 'if (!function_exists("wp_upload_dir")) { function wp_upload_dir() { return array("basedir" => sys_get_temp_dir()); } }'
+        . 'require ' . var_export($root . '/glpe-viewer/includes/Codec.php', true) . ';'
+        . 'require ' . var_export($root . '/glpe-viewer/includes/VbDl.php', true) . ';'
+        . '$d = sys_get_temp_dir() . "/glpe-vbdl-serve-" . uniqid(); mkdir($d);'
+        . 'file_put_contents($d . "/abcdefgh.bin", "SERVED-BYTES");'
+        . 'GLPE_VbDl::$testDir = $d;'
+        . '$tok = GLPE_Codec::encode(json_encode(array("f" => "abcdefgh", "n" => "photo.zip", "ct" => "application/zip", "exp" => time() + 60)));'
+        . 'GLPE_VbDl::serveStored($tok);'
+        . 'echo "__NEVER__";';
+    $out31 = @shell_exec(escapeshellarg(PHP_BINARY) . ' -r ' . escapeshellarg($probe31code) . ' 2>&1');
+    $serve31 = is_string($out31) && strpos($out31, 'SERVED-BYTES') !== false && strpos($out31, '__NEVER__') === false;
+}
+check('the serve path streams the stored bytes and stops (own process)', $serve31);
+
+// 31j. dispatcher + client wiring
+check('dispatcher routes the download tunnel flag', strpos($mainSrc28, "['dl']) && \$_GET['dl'] === '1'") !== false && strpos($mainSrc28, 'streamMediaRequest($targetUrl, $customHeaders)') !== false);
+check('dispatcher serves stored files through the opaque token route', strpos($mainSrc28, 'GLPE_VbDl::serveStored(') !== false);
+check('download module include is guarded', strpos($mainSrc28, "includes/VbDl.php") !== false);
+check('download endpoints ride the sandbox endpoint family with the engine', strpos($mainSrc28, "GLPE_Vb_Sandbox::handleMode((string)\$_GET['mode'], \$engine)") !== false);
+$clientSrc31 = file_get_contents($root . '/glpe-viewer/includes/client.js');
+check('client signals sandbox download clicks through the document event channel', strpos($clientSrc31, "new CustomEvent('glpe-vb-dl'") !== false);
+check('client tunnels download-shaped links in the ordinary viewer', strpos($clientSrc31, "window.location.href = href + '&dl=1';") !== false);
+check('sandbox surface drives the download progress flow', strpos($vbsSrc29, 'function storeDownload') !== false && strpos($vbsSrc29, 'vb_dlchunk') !== false && strpos($vbsSrc29, 'saveViaAnchor') !== false && strpos($vbsSrc29, "addEventListener('glpe-vb-dl'") !== false);
+
+// 31k. admin + uninstall wiring
+check('download purge action registered', strpos($mainSrc28, 'admin_post_glpe_dl_purge') !== false);
+check('downloads status card renders', strpos($mainSrc28, 'renderDownloadsCard') !== false);
+check('uninstall reaps the five download options', strpos($uninstall28, "'glpe_dl_threshold'") !== false && strpos($uninstall28, "'glpe_dl_quota'") !== false);
+check('uninstall wipes the stored downloads folder', strpos($uninstall28, 'glpe-downloads') !== false);
+check('uninstall drops the host-test report transient', strpos($uninstall28, 'glpe_vb_hostrec') !== false);
+check('uninstall reaps the session and cache tuning options', strpos($uninstall28, "'glpe_vb_session_ttl'") !== false && strpos($uninstall28, "'glpe_res_ttl_def'") !== false);
+
+// 31l. version + release markers
+check('main file version bumped to 7.4.0', substr_count($mainSrc28, '7.4.0') >= 2);
+check('readme stable tag is 7.4.0', strpos($readme27, 'Stable tag: 7.4.0') !== false);
+check('readme carries the 7.4.0 changelog entry', strpos($readme27, '= 7.4.0 =') !== false);
+check('README carries the v7.4.0 feature bullets', substr_count($readmeMd27, 'v7.4.0') >= 3);
+
+// 31m. the new files stay scanner-clean
+$dlSrc31 = file_get_contents($root . '/glpe-viewer/includes/VbDl.php');
+$hits31 = 0;
+foreach ([$dlSrc31, $mainSrc28, $vbsSrc29, $clientSrc31, $uninstall28] as $src31) { if (preg_match('#' . $guardPattern . '#i', $src31)) { $hits31++; } }
+check('download surface carries no scanner-flagged strings', $hits31 === 0);
+
+// cleanup the probe stores
+GLPE_VbDl::$fetchStub = null;
+GLPE_VbDl::$storeShim = null;
+GLPE_VbDl::$testDir = null;
+foreach ((array)glob($dlDir31 . '/*') as $f31) { @unlink($f31); }
+@rmdir($dlDir31);
+
 
 echo "\n== RESULT: $pass passed, $fail failed ==\n";
 exit($fail > 0 ? 1 : 0);

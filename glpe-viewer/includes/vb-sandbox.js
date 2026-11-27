@@ -43,6 +43,13 @@
   var replayed = 0;
   var pixelMode = false, pixFails = 0;
   var imgCache = {};          // raster image data-URL cache by src
+  // v7.4.0 — interaction state: text-selection drag, the surface menu,
+  // the clipboard affordances and the download flow's progress card.
+  var dragSel = null;         // {node, off} anchor of an in-progress selection
+  var vbMenu = null;
+  var toastEl = null, toastTimer = null;
+  var dlBusy = false;
+  var DL_RE = /\.(zip|rar|7z|gz|tgz|xz|bz2|exe|msi|dmg|apk|ipa|iso|deb|rpm|bin|tar|epub|mobi|jar)(\?|$)/i;
 
   function txt(s) { return document.createTextNode(s); }
 
@@ -50,6 +57,24 @@
     var e = document.createElement(tag);
     if (style) e.setAttribute('style', style);
     return e;
+  }
+
+  // Floating status chip (viewer-level affordances: clipboard feedback,
+  // download progress notes) — never touches the sandboxed frame.
+  function toast(msg) {
+    if (!root) return;
+    if (!toastEl) {
+      toastEl = el('div', 'position:fixed;bottom:30px;left:50%;transform:translateX(-50%);' +
+        'background:rgba(15,23,42,0.96);color:#f8fafc;border:1px solid #334155;border-radius:12px;' +
+        'padding:10px 18px;font-size:12px;line-height:1.8;z-index:2147483647;direction:rtl;max-width:80%;text-align:center;');
+      root.appendChild(toastEl);
+    }
+    toastEl.textContent = msg;
+    toastEl.style.display = 'block';
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () {
+      if (toastEl) toastEl.style.display = 'none';
+    }, 2600);
   }
 
   // ---------------------------------------------------------------------------
@@ -93,8 +118,12 @@
 
   function post(mode, docObj, cb, failCb) {
     if (!ep) return;
+    // Download endpoints ride the sandbox identity: vs=1 hands the request
+    // the isolated jar, so a login made inside the virtual session carries
+    // over to its file downloads.
+    var vsMode = mode === 'vb_dlopen' || mode === 'vb_dlchunk';
     var body = 'p=' + encodeURIComponent(enc(JSON.stringify(docObj)));
-    fetch(ep + '&mode=' + mode, {
+    fetch(ep + '&mode=' + mode + (vsMode ? '&vs=1' : ''), {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: body,
@@ -159,9 +188,11 @@
     stage = el('div', S.stage);
     // The locked temporary environment: scripts and forms run, same-origin
     // access lets the surface replay gestures; popups and top navigation are
-    // forbidden by the sandbox attribute itself.
+    // forbidden by the sandbox attribute itself, while allow-downloads lets
+    // tunneled file responses (Content-Disposition) reach the visitor's own
+    // save dialog instead of dying silently inside the sandbox.
     frame = el('iframe', S.frame);
-    frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms');
+    frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-downloads');
     frame.setAttribute('aria-label', 'نمایشگر مجازی');
     frame.style.width = sessW + 'px';
     frame.style.height = sessH + 'px';
@@ -227,6 +258,11 @@
     if (beatTimer) { clearInterval(beatTimer); beatTimer = null; }
     if (pixelTimer) { clearInterval(pixelTimer); pixelTimer = null; }
     if (syncTimer) { clearInterval(syncTimer); syncTimer = null; }
+    hideVbMenu();
+    dragSel = null;
+    if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
+    toastEl = null;
+    dlBusy = false;
     if (sess && sess.t) {
       // Best-effort teardown: the session TTL reaps whatever misses this.
       try {
@@ -252,6 +288,8 @@
     lastX = lastY = -1;
     replayed = 0;
     imgCache = {};
+    dragSel = null;
+    dlBusy = false;
     buildOverlay();
     bindInput();
     var rect = stage.getBoundingClientRect();
@@ -350,6 +388,7 @@
     capture.addEventListener('pointerdown', function (e) {
       e.preventDefault();
       capture.focus();
+      hideVbMenu();
       try { capture.setPointerCapture(e.pointerId); } catch (err) {}
       var p = stagePoint(e);
       push({ t: 'dn', x: p.x, y: p.y, b: buttonName(e.button) });
@@ -360,7 +399,23 @@
       push({ t: 'up', x: p.x, y: p.y, b: buttonName(e.button) });
     });
 
-    capture.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+    // Right-click rides the host round trip like every other gesture (rc);
+    // the native menu of THIS browser cannot appear inside the locked
+    // surface — the echo replays a synthetic contextmenu for the site's own
+    // menu, and when the site does not claim it the surface's own menu opens.
+    capture.addEventListener('contextmenu', function (e) {
+      e.preventDefault();
+      if (e.button === 2 || e.pointerType === 'mouse') {
+        var p = stagePoint(e);
+        push({ t: 'rc', x: p.x, y: p.y });
+      }
+    });
+
+    capture.addEventListener('dblclick', function (e) {
+      e.preventDefault();
+      var p = stagePoint(e);
+      push({ t: 'db', x: p.x, y: p.y });
+    });
 
     capture.addEventListener('wheel', function (e) {
       e.preventDefault();
@@ -371,6 +426,15 @@
 
     capture.addEventListener('keydown', function (e) {
       e.preventDefault();
+      // Clipboard affordances use THIS document's real user activation (a
+      // synthetic echo cannot touch the visitor's clipboard): copying reads
+      // the rendered frame's selection, select-all spans it, and the keydown
+      // itself still rides the host round trip below like every gesture.
+      if (e.ctrlKey || e.metaKey) {
+        if (e.key === 'c' || e.key === 'C') { copySelectionToVisitor(); }
+        else if (e.key === 'a' || e.key === 'A') { selectAllInFrame(); }
+        else if (e.key === 'x' || e.key === 'X') { copySelectionToVisitor(true); }
+      }
       var printable = e.key && e.key.length === 1;
       push({ t: 'kd', key: e.key, code: e.code, vk: e.keyCode || 0, text: printable ? e.key : '', mods: modsBits(e) });
     });
@@ -383,7 +447,7 @@
     capture.addEventListener('paste', function (e) {
       e.preventDefault();
       var t = (e.clipboardData || window.clipboardData).getData('text');
-      if (t) push({ t: 'tx', v: String(t).slice(0, 2000) });
+      if (t) push({ t: 'tx', v: String(t).slice(0, 2000), p: 1 });
     });
   }
 
@@ -441,6 +505,26 @@
   // construction: nothing here ever touches the frame before the host said so).
   // ---------------------------------------------------------------------------
 
+  // The frame's internal viewport can differ from the sandbox's nominal
+  // size when fitFrame() scales the element — every frame-side hit test and
+  // synthetic event coordinate is mapped through the live ratio so selection
+  // and gestures land where the visitor actually pointed.
+  function frameScale() {
+    try {
+      var w = frameWin();
+      if (!w) return { sx: 1, sy: 1 };
+      return {
+        sx: (w.innerWidth || sessW) / sessW,
+        sy: (w.innerHeight || sessH) / sessH
+      };
+    } catch (e) { return { sx: 1, sy: 1 }; }
+  }
+
+  function mapPoint(x, y) {
+    var s = frameScale();
+    return { x: Math.round(x * s.sx), y: Math.round(y * s.sy) };
+  }
+
   function elAt(x, y) {
     var d = frameDoc();
     if (!d) return null;
@@ -475,38 +559,49 @@
 
   function applyEvent(ev) {
     if (!ev || !ev.t || !frame) return;
+    var fp = mapPoint(ev.x, ev.y);
     switch (ev.t) {
       case 'mm':
         lastX = ev.x; lastY = ev.y;
         positionCursor(ev.x, ev.y);
-        fireMouse(elAt(ev.x, ev.y), 'mousemove', ev.x, ev.y, 0, 0);
+        fireMouse(elAt(fp.x, fp.y), 'mousemove', fp.x, fp.y, 0, 0);
+        extendDragSelection(fp.x, fp.y);
         break;
       case 'dn': {
         lastX = ev.x; lastY = ev.y;
         positionCursor(ev.x, ev.y);
-        var target = elAt(ev.x, ev.y);
-        fireMouse(target, 'mousedown', ev.x, ev.y, buttonIndex(ev.b), 1);
+        var target = elAt(fp.x, fp.y);
+        fireMouse(target, 'mousedown', fp.x, fp.y, buttonIndex(ev.b), 1);
         // Synthetic gestures do not focus like real ones — editable surfaces
         // must gain the caret explicitly so the next keystrokes land there.
+        // A left press on anything ELSE anchors a text-selection drag.
         if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) {
           lastFocusEl = target;
+          dragSel = null;
           try { target.focus(); } catch (e) {}
+        } else if (target && target.isContentEditable) {
+          lastFocusEl = target;
+          dragSel = null;
+          try { target.focus(); } catch (e) {}
+        } else if (ev.b === 'left') {
+          startDragSelection(fp.x, fp.y);
         }
         break;
       }
       case 'up': {
-        fireMouse(elAt(ev.x, ev.y), 'mouseup', ev.x, ev.y, buttonIndex(ev.b), 0);
-        fireMouse(elAt(ev.x, ev.y), 'click', ev.x, ev.y, buttonIndex(ev.b), 0);
+        fireMouse(elAt(fp.x, fp.y), 'mouseup', fp.x, fp.y, buttonIndex(ev.b), 0);
+        fireMouse(elAt(fp.x, fp.y), 'click', fp.x, fp.y, buttonIndex(ev.b), 0);
+        dragSel = null;
         break;
       }
       case 'wh': {
-        var t = elAt(ev.x, ev.y);
+        var t = elAt(fp.x, fp.y);
         var w = frameWin();
         if (t && w) {
           try {
             t.dispatchEvent(new w.WheelEvent('wheel', {
               bubbles: true, cancelable: true, view: w,
-              clientX: ev.x, clientY: ev.y, deltaX: ev.dx, deltaY: ev.dy, deltaMode: 0
+              clientX: fp.x, clientY: fp.y, deltaX: ev.dx, deltaY: ev.dy, deltaMode: 0
             }));
           } catch (e) {}
           var sc = scrollableAt(t);
@@ -515,12 +610,47 @@
         }
         break;
       }
+      case 'rc': {
+        // Right-click: replay the synthetic contextmenu into the frame so
+        // the site's own menu logic runs; a site that did not claim the
+        // gesture (no preventDefault) gets the surface's own menu instead.
+        lastX = ev.x; lastY = ev.y;
+        positionCursor(ev.x, ev.y);
+        var rt = elAt(fp.x, fp.y);
+        var rw = frameWin();
+        var rce = null;
+        if (rt && rw) {
+          try {
+            rce = new rw.MouseEvent('contextmenu', {
+              bubbles: true, cancelable: true, composed: true, view: rw,
+              clientX: fp.x, clientY: fp.y, button: 2, buttons: 2
+            });
+            rt.dispatchEvent(rce);
+          } catch (e) {}
+        }
+        if (!rce || !rce.defaultPrevented) {
+          setTimeout(function () {
+            if (rce && rce.defaultPrevented) return;
+            showVbMenu(ev.x, ev.y);
+          }, 70);
+        }
+        break;
+      }
+      case 'db': {
+        // Double-click: replay the synthetic dblclick (site handlers — e.g.
+        // player fullscreen toggles — run) and select the word under the
+        // point, mirroring what a native double-click would highlight.
+        fireMouse(elAt(fp.x, fp.y), 'dblclick', fp.x, fp.y, 0, 0);
+        selectWordAt(fp.x, fp.y);
+        break;
+      }
       case 'kd':
       case 'ku':
         applyKey(ev);
         break;
       case 'tx':
-        insertText(String(ev.v || ''));
+        if (ev.p) { pasteIntoFrame(String(ev.v || '')); }
+        else { insertText(String(ev.v || '')); }
         break;
     }
   }
@@ -566,7 +696,8 @@
       });
       target.dispatchEvent(ke);
     } catch (e) {}
-    if (ev.t === 'kd' && ev.key && ev.key.length === 1) {
+    if (ev.t === 'kd' && ev.key && ev.key.length === 1 && !(bits & 2) && !(bits & 4)) {
+      // A character key with Ctrl/Cmd held is a shortcut, not typing.
       insertText(ev.key);
     } else if (ev.t === 'kd' && ev.key === 'Backspace') {
       backspace(target);
@@ -621,6 +752,373 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Text selection, clipboard and the surface menu (v7.4.0).
+  //
+  // Synthetic events never start native text selections, so the ECHO layer
+  // emulates what a real drag would have produced: a caret range anchors on
+  // the down, extends through the moves, and the frame's own Selection API
+  // renders the highlight (the destination's ::selection styling included).
+  // Copy/select-all/paste need THIS document's user activation to touch the
+  // visitor's real clipboard, so they run at the capture layer while the
+  // gesture itself still rides the host round trip first.
+  // ---------------------------------------------------------------------------
+
+  function caretRangeAt(x, y) {
+    var d = frameDoc();
+    if (!d) return null;
+    try {
+      if (typeof d.caretRangeFromPoint === 'function') return d.caretRangeFromPoint(x, y);
+      if (d.caretPositionFromPoint) {
+        var cp = d.caretPositionFromPoint(x, y);
+        if (cp) {
+          var r = d.createRange();
+          r.setStart(cp.offsetNode, cp.offset);
+          r.collapse(true);
+          return r;
+        }
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function frameSelection() {
+    try {
+      var w = frameWin();
+      if (w) return w.getSelection();
+    } catch (e) {}
+    return null;
+  }
+
+  function setSelection(anchorNode, anchorOff, node, off) {
+    var sel = frameSelection();
+    if (!sel) return;
+    try { sel.setBaseAndExtent(anchorNode, anchorOff, node, off); } catch (e) {}
+  }
+
+  // Some destinations switch text selection off entirely through CSS; the
+  // virtual surface's contract is that the visitor can always select, so a
+  // one-line override rides along once per document — the first selection
+  // gesture installs it.
+  function ensureSelectStyle() {
+    var d = frameDoc();
+    if (!d) return;
+    try {
+      if (d.getElementById('__glpe_vb_sel')) return;
+      var s = d.createElement('style');
+      s.id = '__glpe_vb_sel';
+      s.textContent = '*, *::before, *::after { -webkit-user-select: text !important; user-select: text !important; }';
+      (d.head || d.documentElement).appendChild(s);
+    } catch (e) {}
+  }
+
+  function startDragSelection(x, y) {
+    ensureSelectStyle();
+    var r = caretRangeAt(x, y);
+    if (r && r.startContainer) {
+      dragSel = { node: r.startContainer, off: r.startOffset };
+    } else {
+      dragSel = null;
+    }
+  }
+
+  function extendDragSelection(x, y) {
+    if (!dragSel) return;
+    var r = caretRangeAt(x, y);
+    if (!r || !r.startContainer) return;
+    setSelection(dragSel.node, dragSel.off, r.startContainer, r.startOffset);
+  }
+
+  function selectWordAt(x, y) {
+    ensureSelectStyle();
+    var r = caretRangeAt(x, y);
+    if (!r || !r.startContainer || r.startContainer.nodeType !== 3) return;
+    var node = r.startContainer;
+    try {
+      var text = node.data;
+      var off = r.startOffset;
+      var isWord = function (ch) {
+        return /[\w\u0600-\u06FF\u0400-\u04FF]/.test(ch);
+      };
+      var s = off, e = off;
+      while (s > 0 && isWord(text.charAt(s - 1))) s--;
+      while (e < text.length && isWord(text.charAt(e))) e++;
+      if (s === e) return;
+      setSelection(node, s, node, e);
+    } catch (err) {}
+  }
+
+  function selectAllInFrame() {
+    var d = frameDoc();
+    if (!d || !d.body) return;
+    ensureSelectStyle();
+    var sel = frameSelection();
+    if (sel && sel.selectAllChildren) {
+      try { sel.selectAllChildren(d.body); } catch (e) {}
+    }
+  }
+
+  function frameSelectionText() {
+    var sel = frameSelection();
+    if (!sel) return '';
+    try { return String(sel); } catch (e) { return ''; }
+  }
+
+  function copySelectionToVisitor(cut) {
+    var t = frameSelectionText();
+    if (!t) {
+      toast('متنی برای کپی انتخاب نشده است');
+      return;
+    }
+    var done = function () { toast(cut ? 'متن کپی شد (حذف انتخاب در دست سایت مقصد است)' : 'متن انتخاب‌شده کپی شد'); };
+    var legacy = function () {
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = t;
+        ta.setAttribute('style', 'position:fixed;top:-9999px;opacity:0;');
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        done();
+      } catch (e) {}
+    };
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(t).then(done, legacy);
+      } else {
+        legacy();
+      }
+    } catch (e) { legacy(); }
+  }
+
+  // Paste replay: hand the text to the frame as a clipboard-style paste so
+  // the destination's own paste handlers (editors, comment boxes) run on
+  // real data; a field that ignored the synthetic event gets a direct
+  // insertion one tick later.
+  function pasteIntoFrame(text) {
+    if (!text) return;
+    var w = frameWin();
+    var d = frameDoc();
+    if (!w || !d) { insertText(text); return; }
+    var target = d.activeElement;
+    if ((!target || target === d.body) && lastFocusEl && lastFocusEl.ownerDocument === d) {
+      target = lastFocusEl;
+    }
+    if (!target || (!/^(INPUT|TEXTAREA)$/.test(target.tagName) && !target.isContentEditable)) {
+      insertText(text);
+      return;
+    }
+    var before = (target.value !== undefined) ? target.value : (target.textContent || '');
+    var dispatched = false;
+    try {
+      var dt = new w.DataTransfer();
+      dt.setData('text/plain', text);
+      var pe = new w.ClipboardEvent('paste', {
+        bubbles: true, cancelable: true, clipboardData: dt
+      });
+      target.dispatchEvent(pe);
+      dispatched = true;
+    } catch (e) {}
+    setTimeout(function () {
+      try {
+        var cur = (target.value !== undefined) ? target.value : (target.textContent || '');
+        if (!dispatched || cur === before) insertText(text);
+      } catch (e) {}
+    }, 60);
+  }
+
+  // ---------------------------------------------------------------------------
+  // The surface's own context menu — what a remote desktop's client shows
+  // when the remote side has no menu of its own to display.
+  // ---------------------------------------------------------------------------
+
+  function hideVbMenu() {
+    if (vbMenu && vbMenu.parentNode) vbMenu.parentNode.removeChild(vbMenu);
+    vbMenu = null;
+  }
+
+  function vbMenuItem(menu, label, fn) {
+    var b = el('button', 'display:block;width:100%;text-align:right;background:none;border:0;color:#e2e8f0;' +
+      'font:12px/1 Tahoma,sans-serif;padding:9px 16px;cursor:pointer;direction:rtl;');
+    b.type = 'button';
+    b.textContent = label;
+    b.onclick = function (e) {
+      e.stopPropagation();
+      hideVbMenu();
+      try { fn(); } catch (err) {}
+    };
+    menu.appendChild(b);
+    return b;
+  }
+
+  function showVbMenu(sx, sy) {
+    hideVbMenu();
+    if (!root || !stage) return;
+    vbMenu = el('div', 'position:absolute;background:#0f172a;border:1px solid #334155;border-radius:12px;' +
+      'box-shadow:0 10px 30px rgba(0,0,0,0.55);padding:6px;min-width:190px;z-index:9;direction:rtl;');
+    vbMenu.id = '__glpe_vbs_menu';
+    vbMenuItem(vbMenu, 'عقب (back)', function () { try { frame.contentWindow.history.back(); } catch (e) {} });
+    vbMenuItem(vbMenu, 'جلو (forward)', function () { try { frame.contentWindow.history.forward(); } catch (e) {} });
+    vbMenuItem(vbMenu, 'بارگذاری دوباره', function () { if (sess && currentUrl) navTo(currentUrl); });
+    vbMenu.appendChild(el('div', 'height:1px;background:#334155;margin:6px 0;'));
+    vbMenuItem(vbMenu, 'انتخاب همه (Ctrl+A)', selectAllInFrame);
+    vbMenuItem(vbMenu, 'کپی (Ctrl+C)', function () { copySelectionToVisitor(); });
+    vbMenuItem(vbMenu, 'چسباندن (Ctrl+V)', function () {
+      try {
+        if (navigator.clipboard && navigator.clipboard.readText) {
+          navigator.clipboard.readText().then(function (t) {
+            if (t) push({ t: 'tx', v: String(t).slice(0, 2000), p: 1 });
+          }, function () {
+            toast('دسترسی به کلیپ‌بورد داده نشد — روی نمایشگر Ctrl+V را بزنید');
+          });
+        } else {
+          toast('این مرورگر اجازهٔ خواندن کلیپ‌بورد را نمی‌دهد — روی نمایشگر Ctrl+V را بزنید');
+        }
+      } catch (e) {}
+    });
+    vbMenu.appendChild(el('div', 'height:1px;background:#334155;margin:6px 0;'));
+    vbMenuItem(vbMenu, 'بستن مرورگر مجازی', closeSurface);
+    // Place the menu under the sandbox point, clamped inside the stage.
+    var r = frame.getBoundingClientRect();
+    var s = stage.getBoundingClientRect();
+    var px = (r.left - s.left) + (sx / sessW) * r.width + 8;
+    var py = (r.top - s.top) + (sy / sessH) * r.height + 6;
+    stage.appendChild(vbMenu);
+    try {
+      var mw = vbMenu.offsetWidth || 190;
+      var mh = vbMenu.offsetHeight || 200;
+      px = Math.max(8, Math.min(s.width - mw - 8, px));
+      py = Math.max(8, Math.min(s.height - mh - 8, py));
+    } catch (e) {}
+    vbMenu.style.left = px + 'px';
+    vbMenu.style.top = py + 'px';
+  }
+
+  // ---------------------------------------------------------------------------
+  // File downloads (v7.4.0). The sandbox frame's in-page helper (client.js)
+  // signals download-shaped link clicks through a document event — the locked
+  // environment pins parent/top to itself, so a document CustomEvent is the
+  // one channel the destination environment itself owns. THIS surface (same
+  // origin by design) listens on the frame document and asks the host for
+  // the delivery path: a direct tunnel URL the visitor's browser saves right
+  // away, or the host-side chunked store with a progress card here and a
+  // serving URL at the end.
+  // ---------------------------------------------------------------------------
+
+  function bindFrameDlChannel() {
+    var d = frameDoc();
+    if (!d) return;
+    try {
+      d.addEventListener('glpe-vb-dl', function (e) {
+        var u = e && e.detail && typeof e.detail.u === 'string' ? e.detail.u : '';
+        if (u !== '' && CFG.dl && sess && !closing) {
+          startDownload(u);
+        }
+      });
+    } catch (err) {}
+  }
+
+  function saveViaAnchor(url, name) {
+    try {
+      var a = document.createElement('a');
+      a.href = url;
+      if (name) a.download = name;
+      a.rel = 'noopener';
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(function () { if (a.parentNode) a.parentNode.removeChild(a); }, 1000);
+    } catch (e) {}
+  }
+
+  function startDownload(dest) {
+    if (dlBusy) { toast('یک دریافت دیگر در جریان است — کمی صبر کنید'); return; }
+    dlBusy = true;
+    setStatus('در حال بررسی فایل دانلودی روی میزبان…');
+    post('vb_dlopen', { u: dest }, function (d) {
+      dlBusy = false;
+      if (d.e === 'toolarge') { toast('حجم فایل از سقف مجاز تنظیمات بیشتر است'); return; }
+      if (d.e === 'status') { toast('مقصد پاسخ ' + (d.sc || 'خطا') + ' داد'); return; }
+      if (d.e === 'badurl') { toast('نشانی فایل نامعتبر است'); return; }
+      if (d.mode === 'tunnel' && d.g) {
+        saveViaAnchor(d.g, d.name || '');
+        setStatus('دانلود آغاز شد — تونل مستقیم به مرورگر شما');
+        toast('دانلود «' + (d.name || 'فایل') + '» آغاز شد');
+        return;
+      }
+      if (d.mode === 'store' && d.t) {
+        storeDownload(d);
+        return;
+      }
+      toast('دریافت فایل ممکن نشد');
+    }, function () {
+      dlBusy = false;
+      toast('ارتباط با میزبان برای دانلود برقرار نشد');
+    });
+  }
+
+  function storeDownload(d) {
+    var total = d.size || 0;
+    var got = 0;
+    var fails = 0;
+    var done = false;
+    var card = el('div', 'position:fixed;bottom:26px;left:50%;transform:translateX(-50%);background:rgba(15,23,42,0.97);' +
+      'border:1px solid #334155;border-radius:14px;padding:14px 18px;z-index:2147483647;direction:rtl;' +
+      'min-width:340px;max-width:90%;font-size:12px;color:#e2e8f0;line-height:1.9;');
+    var title = el('div'); title.style.fontWeight = 'bold';
+    title.textContent = '📥 دریافت «' + (d.name || 'فایل') + '» روی میزبان';
+    var sub = el('div'); sub.style.color = '#94a3b8';
+    sub.textContent = 'تکه‌تکه از سایت مقصد، داخل پوشهٔ محافظت‌شدهٔ هاست…';
+    var barWrap = el('div', 'height:8px;background:#1e293b;border-radius:9999px;overflow:hidden;margin:8px 0;');
+    var bar = el('div', 'height:100%;width:0%;background:linear-gradient(to left,#0284c7,#38bdf8);border-radius:9999px;');
+    var pct = el('div'); pct.dir = 'ltr'; pct.style.textAlign = 'center'; pct.style.color = '#94a3b8'; pct.textContent = '0%';
+    var cancel = el('button', 'height:28px;padding:0 10px;border-radius:8px;border:1px solid #7f1d1d;background:#450a0a;color:#fecaca;font-size:11px;cursor:pointer;margin-top:6px;');
+    cancel.type = 'button'; cancel.textContent = 'لغو';
+    barWrap.appendChild(bar);
+    card.appendChild(title); card.appendChild(sub); card.appendChild(barWrap); card.appendChild(pct); card.appendChild(cancel);
+    root.appendChild(card);
+    cancel.onclick = function () { done = true; if (card.parentNode) card.parentNode.removeChild(card); toast('دریافت لغو شد'); };
+    setStatus('دریافت فایل روی میزبان (تکه‌تکه)…');
+
+    (function step() {
+      if (done) return;
+      post('vb_dlchunk', { t: d.t }, function (r) {
+        if (done) return;
+        if (r.e === 'expired') { done = true; card.parentNode && card.parentNode.removeChild(card); toast('نشست دانلود منقضی شد'); return; }
+        if (r.e === 'net') {
+          fails++;
+          if (fails >= 5) { done = true; card.parentNode && card.parentNode.removeChild(card); toast('خطای شبکه در دریافت فایل'); return; }
+          setTimeout(step, 900);
+          return;
+        }
+        if (r.e) { done = true; card.parentNode && card.parentNode.removeChild(card); toast('دریافت فایل ناکام ماند (' + r.e + ')'); return; }
+        fails = 0;
+        got = r.got || got;
+        if (r.total) total = r.total;
+        var p = total ? Math.min(100, Math.round((got / total) * 100)) : 0;
+        bar.style.width = p + '%';
+        pct.textContent = (total ? (got / 1048576).toFixed(1) + ' / ' + (total / 1048576).toFixed(1) + ' MB — ' : '') + p + '%';
+        if (r.done && r.g) {
+          done = true;
+          bar.style.width = '100%';
+          title.textContent = '✅ «' + (r.name || d.name || 'فایل') + '» آماده است — در حال رسیدن به دستگاه شما';
+          pct.textContent = '100%';
+          saveViaAnchor(r.g, r.name || d.name || '');
+          setStatus('فایل روی هاست کامل شد — در حال سرو به دستگاه شما');
+          setTimeout(function () { if (card.parentNode) card.parentNode.removeChild(card); }, 4000);
+          return;
+        }
+        setTimeout(step, 120);
+      }, function () {
+        if (done) return;
+        fails++;
+        if (fails >= 5) { done = true; card.parentNode && card.parentNode.removeChild(card); toast('ارتباط با میزبان قطع شد'); return; }
+        setTimeout(step, 900);
+      });
+    })();
+  }
+
+  // ---------------------------------------------------------------------------
   // Navigation.
   // ---------------------------------------------------------------------------
 
@@ -636,7 +1134,12 @@
         currentUrl = v;
         urlInput.value = v;
         imgCache = {};
-        frame.src = d.g;
+        dragSel = null;
+        hideVbMenu();
+        // A typed address that IS a download (archive/executable/…):
+        // the tunnel flag makes the gateway stream it to the visitor's
+        // save dialog instead of buffering it as a page.
+        frame.src = DL_RE.test(v) ? (d.g + '&dl=1') : d.g;
         setStatus('در حال بارگذاری صفحه از طریق میزبان…');
       }, function () { setStatus('خطای ارتباط با میزبان'); });
     }
@@ -649,6 +1152,7 @@
       var dest = m ? dec(m[1]) : '';
       if (dest) urlInput.value = dest;
     } catch (e) {}
+    bindFrameDlChannel();
     setStatus('صفحه بارگذاری شد — ورودی‌های شما ابتدا به هاست می‌رود و بعد بازپخش می‌شود');
     capture.focus();
     if (pixelMode) rasterize();

@@ -38,6 +38,10 @@ if (!defined('ABSPATH')) {
 class GLPE_ResCache {
 
     const OPT_ENABLE = 'glpe_res_cache';
+    const OPT_TTL_DEF = 'glpe_res_ttl_def';  // minutes (admin, v7.4.0)
+    const OPT_TTL_MAX = 'glpe_res_ttl_max';  // minutes (admin, v7.4.0)
+    const OPT_ENTRY_CAP = 'glpe_res_entry_cap'; // MiB (admin, v7.4.0)
+    const OPT_QUOTA = 'glpe_res_quota';      // MiB (admin, v7.4.0)
     const DIR_NAME   = 'glpe-res-cache';
     /** Every stored file starts with these bytes — see the class doc. */
     const FILE_GUARD = "<?php exit; ?>\n";
@@ -49,6 +53,47 @@ class GLPE_ResCache {
 
     /** @var string|null test override for the storage directory. */
     public static $testDir = null;
+
+    // ------------------------------------------------------------------
+    // Admin-tunable values (v7.4.0) — hard clamps identical to the
+    // settings-page sanitizers, so a stored option is always safe.
+    // ------------------------------------------------------------------
+
+    /** Default entry TTL in seconds (2..360 minutes, default 15). */
+    public static function ttlDef() {
+        $m = function_exists('get_option') ? (int)get_option(self::OPT_TTL_DEF, 0) : 0;
+        if ($m < 2 || $m > 360) {
+            $m = (int)round(self::TTL_DEF / 60);
+        }
+        return $m * 60;
+    }
+
+    /** Entry TTL ceiling in seconds (5..720 minutes, default 360). */
+    public static function ttlMax() {
+        $m = function_exists('get_option') ? (int)get_option(self::OPT_TTL_MAX, 0) : 0;
+        if ($m < 5 || $m > 720) {
+            $m = (int)round(self::TTL_MAX / 60);
+        }
+        return $m * 60;
+    }
+
+    /** Per-entry byte cap (1..16 MiB, default 3). */
+    public static function entryMax() {
+        $m = function_exists('get_option') ? (int)get_option(self::OPT_ENTRY_CAP, 0) : 0;
+        if ($m < 1 || $m > 16) {
+            $m = (int)round(self::ENTRY_MAX / 1048576);
+        }
+        return $m * 1048576;
+    }
+
+    /** Total byte quota (16..1024 MiB, default 64). */
+    public static function quota() {
+        $m = function_exists('get_option') ? (int)get_option(self::OPT_QUOTA, 0) : 0;
+        if ($m < 16 || $m > 1024) {
+            $m = (int)round(self::QUOTA_DEF / 1048576);
+        }
+        return $m * 1048576;
+    }
 
     // ------------------------------------------------------------------
     // Lifecycle
@@ -243,11 +288,11 @@ class GLPE_ResCache {
         if (!preg_match('#^(text/css|text/javascript|application/javascript|application/x-javascript|application/manifest\+json|text/cache-manifest|application/vnd\.ms-fontobject|font/|image/)#i', $ct)) {
             return false;
         }
-        if (strlen($body) > self::ENTRY_MAX) {
+        if (strlen($body) > self::entryMax()) {
             return false;
         }
 
-        $ttl = self::TTL_DEF;
+        $ttl = self::ttlDef();
         $headers = isset($result['headers']) && is_array($result['headers']) ? $result['headers'] : [];
         $ccValues = [];
         foreach ($headers as $name => $value) {
@@ -262,7 +307,7 @@ class GLPE_ResCache {
         if ($cc !== '' && preg_match('#max-age=\s*([0-9]+)#', $cc, $mm)) {
             $ttl = (int)$mm[1];
         }
-        $ttl = max(self::TTL_MIN, min(self::TTL_MAX, $ttl));
+        $ttl = max(self::TTL_MIN, min(self::ttlMax(), $ttl));
 
         $meta = [
             'v'   => 1,
@@ -307,9 +352,9 @@ class GLPE_ResCache {
         if ($dir === '' || !is_dir($dir)) {
             return;
         }
-        $quota = (int)apply_filters('glpe_res_quota', self::QUOTA_DEF);
-        if ($quota < self::ENTRY_MAX) {
-            $quota = self::ENTRY_MAX;
+        $quota = self::quota();
+        if ($quota < self::entryMax()) {
+            $quota = self::entryMax();
         }
         $entries = [];
         $total = 0;
