@@ -3,7 +3,7 @@
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
  * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با کدگذاری کامل تبادلات، بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 6.5.0
+ * Version: 6.6.0
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '6.5.0');
+define('GLPE_VERSION', '6.6.0');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -499,11 +499,36 @@ class GLPE_Plugin {
             if (stripos($contentType, 'text/html') !== false) {
                 $body = $engine->rewriteHtml($body, $rewriteBase, $options);
 
+                // Region-restricted service: some destinations offer their
+                // service only to a set of countries and decide by the
+                // country of the relay exit — the hosting server behind the
+                // viewer (the visitor's own address never reaches the
+                // destination, every exchange rides the encrypted gateway).
+                // Surface that distinction clearly instead of letting a bare
+                // policy page look like a viewer defect. Packs that carry
+                // their own region layers ('region_handling') are skipped
+                // here so one page never stacks two notices.
+                $packHandlesRegion = is_array($sitePack) && !empty($sitePack['region_handling']);
+                if (!$packHandlesRegion && preg_match('#not supported in your country|unsupported country|not available in your (country|region)#i', $body)) {
+                    $notice = '<div id="glpe-region-note" style="position:fixed;bottom:0;left:0;right:0;z-index:2147483646;'
+                        . 'background:#78350f;color:#fde68a;font:12px/1.9 Tahoma,sans-serif;padding:10px 16px;text-align:center;'
+                        . 'direction:rtl;border-top:1px solid #f59e0b;">'
+                        . '⛔ این پیام از سوی خودِ وب‌سایت مقصد است، نه نقص نمایشگر: '
+                        . 'سرویس فقط به برخی کشورها ارائه می‌شود و تصمیم بر اساس کشورِ آی‌پیِ «خروجی رله» (میزبان نمایشگر) است — '
+                        . 'نه مکان شما؛ نشانی شما هرگز به مقصد نمی‌رسد. '
+                        . 'راه حل: میزبانی نمایشگر روی سروری در یکی از کشورهای پشتیبانی‌شدهٔ آن سایت.'
+                        . '</div>';
+                    if (stripos($body, '</body>') !== false) {
+                        $body = preg_replace('#</body>#i', $notice . '</body>', $body, 1);
+                    } else {
+                        $body .= $notice;
+                    }
+                }
                 // Destination-side anti-abuse walls (search captchas, CDN
                 // challenge pages) look like a dead viewer to visitors —
                 // "nothing happens". Show a clear notice that the block
                 // comes from the destination site, not from the viewer.
-                if (preg_match('#unusual traffic|/sorry/index|cf-chl|Just a moment|g-recaptcha|Attention Required#i', $body)) {
+                elseif (preg_match('#unusual traffic|/sorry/index|cf-chl|Just a moment|g-recaptcha|Attention Required#i', $body)) {
                     $notice = '<div style="position:fixed;bottom:0;left:0;right:0;z-index:2147483646;'
                         . 'background:#7f1d1d;color:#fecaca;font:12px Tahoma,sans-serif;padding:10px 16px;text-align:center;direction:rtl;">'
                         . '⚠️ این صفحه توسط وب‌سایت مقصد نمایش داده شده است (بررسی ضد سوءاستفاده درباره IP سرور — کپچا یا چالش مرورگر). '

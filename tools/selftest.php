@@ -1637,5 +1637,54 @@ GLPE_Diag_Api::$testDir = null;
 update_option('glpe_diag_enabled', '0');
 update_option('glpe_diag_key', '');
 
+// == 24. v6.6.0: region-restriction handling (destination policy on the relay exit) ==
+echo "\n== 24. Region restriction: pack layers + generic dispatcher banner ==\n";
+
+$duckPack24 = GLPE_SitePacks::forUrl('https://duck.ai/');
+check('duck pack exposes region_handling flag', is_array($duckPack24) && !empty($duckPack24['region_handling']));
+check('duck pack exposes doc_filter', is_array($duckPack24) && isset($duckPack24['doc_filter']) && is_callable($duckPack24['doc_filter']));
+check('duck pack client watcher present', is_array($duckPack24) && strpos((string)($duckPack24['pack_js'] ?? ''), 'MutationObserver') !== false);
+
+$df24 = $duckPack24['doc_filter'] ?? null;
+
+// 24a. clean documents pass through untouched
+$clean24 = '<html><body><p>ordinary page</p></body></html>';
+check('clean document untouched', is_string($df24) ? false : ($df24($clean24, 'https://duck.ai/', []) === $clean24));
+
+// 24b. bare restriction page → full replacement card
+$bare24 = '<!DOCTYPE html><html><head><title>Duck.ai</title></head><body>'
+    . '<p>Service Unavailable. Duck.ai is not supported in your country.</p></body></html>';
+$card24 = $df24($bare24, 'https://duck.ai/', []);
+check('bare page replaced by full card', strpos($card24, 'بازگشت به برگه نمایشگر') !== false);
+check('card explains the relay exit (not the visitor)', strpos($card24, 'خروجی رله') !== false && strpos($card24, 'نشانی و موقعیت مکانی شما هرگز به مقصد نمی‌رسد') !== false);
+check('card names the real remedy', strpos($card24, 'کشورهای پشتیبانی‌شده') !== false);
+check('card paraphrases, never re-triggers generic detectors', preg_match('#not supported in your country|unsupported country|not available in your (country|region)#i', $card24) !== 1);
+check('card keeps the destination back link', preg_match('#href="https://site.test/"#', $card24) === 1);
+
+// 24c. application shell with embedded message → fixed bar, content kept
+$shell24 = '<html><head><title>app</title></head><body><div id="app">' . str_repeat('<p>shell</p>', 300)
+    . '<p>This site is not available in your region.</p></div></body></html>';
+$bar24 = $df24($shell24, 'https://duck.ai/', []);
+check('shell kept when message embedded in markup', strpos($bar24, '<p>shell</p>') !== false);
+check('fixed explanation bar appended', strpos($bar24, 'id="glpe-region-note"') !== false && strpos($bar24, 'خروجی رله') !== false);
+
+// 24d. client watcher wiring (dedupe + reactive removal)
+$duckJs24 = (string)($duckPack24['pack_js'] ?? '');
+check('watcher matches the destination message', strpos($duckJs24, 'not supported in your country') !== false);
+check('watcher reuses the server bar id (no stacking)', strpos($duckJs24, 'getElementById("glpe-region-note")') !== false);
+check('watcher removes the bar when restriction clears', strpos($duckJs24, 'removeChild(noteEl)') !== false);
+
+// 24e. generic dispatcher banner for every other destination
+$mainSrc24 = (string)file_get_contents($root . '/glpe-viewer/glpe-viewer.php');
+check('dispatcher: region pattern present', strpos($mainSrc24, 'not supported in your country|unsupported country|not available in your (country|region)') !== false);
+check('dispatcher: amber banner explains relay exit', strpos($mainSrc24, 'خروجی رله') !== false && strpos($mainSrc24, 'glpe-region-note') !== false);
+check('dispatcher: packs with region layers skip the generic banner', strpos($mainSrc24, "region_handling") !== false && strpos($mainSrc24, '$packHandlesRegion') !== false);
+
+// 24f. release markers
+check('main file version bumped to 6.6.0', substr_count($mainSrc24, '6.6.0') >= 2);
+$readme24 = (string)file_get_contents($root . '/glpe-viewer/readme.txt');
+check('readme stable tag is 6.6.0', strpos($readme24, 'Stable tag: 6.6.0') !== false);
+check('readme carries the 6.6.0 changelog entry', strpos($readme24, '= 6.6.0 =') !== false && strpos($readme24, 'محدودیت منطقه‌ای') !== false);
+
 echo "\n== RESULT: $pass passed, $fail failed ==\n";
 exit($fail > 0 ? 1 : 0);
