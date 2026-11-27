@@ -1983,6 +1983,10 @@ check('cookie jar accepts a key suffix', strpos($cookiesSrc26, "'_glpe_cookies' 
 
 // 26i. engine behavior with the vs profile through rewriteHtml
 $eng26 = new GLPE_Engine('https://site.test/?_glpe=1', false, '_vbs');
+check('relative refs keep the base port (non-standard-port regression)',
+    $eng26->resolveRelativeUrl('/vb-sandbox-page2.html', 'http://127-0-0-1.nip.io:3005/vb-sandbox-test.html') === 'http://127-0-0-1.nip.io:3005/vb-sandbox-page2.html');
+check('portless bases stay untouched by the port fix',
+    $eng26->resolveRelativeUrl('/about/page', 'https://example.com/dir/index.html') === 'https://example.com/about/page');
 $html26 = '<html><head><title>t</title></head><body><a href="https://ex.test/page">go</a></body></html>';
 $rw26 = $eng26->rewriteHtml($html26, 'https://ex.test/', ['showToolbar' => false, 'vsProfile' => GLPE_Vb_Sandbox::profile()]);
 check('sandbox pages boot with the profile in their context', strpos($rw26, '"vs":1') !== false && strpos($rw26, 'Chrome') !== false && strpos($rw26, '131.0.0.0') !== false && strpos($rw26, '"tz":"UTC"') !== false);

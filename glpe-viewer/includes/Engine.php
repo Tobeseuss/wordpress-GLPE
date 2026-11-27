@@ -156,10 +156,17 @@ class GLPE_Engine {
         $path = isset($path) ? preg_replace('#/[^/]*$#', '', $path) : '';
         if ($rel[0] == '/') $path = '';
 
+        // The authority keeps its explicit port: parse_url splits the port
+        // out of $host, and a relative reference against a base on a
+        // non-standard port must not silently land on the default port.
+        $portStr = (isset($port) && (int)$port !== 80 && (int)$port !== 443)
+            ? ':' . (int)$port
+            : '';
+
         if ($rel[0] == '/') {
-            $abs = $host . $rel;
+            $abs = $host . $portStr . $rel;
         } else {
-            $abs = $host . $path . '/' . $rel;
+            $abs = $host . $portStr . $path . '/' . $rel;
         }
 
         // Dot-segment removal (RFC 3986 §5.2.4) — query/fragment parts are
@@ -179,7 +186,6 @@ class GLPE_Engine {
         for ($n = 1; $n > 0; $abs = preg_replace($re, '/', $abs, -1, $n)) {}
 
         $scheme = isset($scheme) ? $scheme : 'https';
-        $portStr = (isset($port) && $port != 80 && $port != 443) ? ':' . $port : '';
         return $scheme . '://' . $abs . $queryFrag;
     }
 

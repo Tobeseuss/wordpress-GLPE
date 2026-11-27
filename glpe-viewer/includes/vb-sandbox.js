@@ -424,6 +424,11 @@
       for (var i2 = 0; i2 < evs.length; i2++) applyEvent(evs[i2]);
       replayed += evs.length;
       if (evEl) evEl.textContent = replayed + ' ev';
+      // The sandbox can pull REAL focus into itself (a focused field would
+      // otherwise receive the visitor's next keystrokes directly — around
+      // the host round trip). The capture layer takes focus back after every
+      // batch so each gesture keeps riding the host first.
+      try { if (capture && capture.focus) capture.focus({ preventScroll: true }); } catch (e) { try { capture.focus(); } catch (e2) {} }
     }, function () {
       flushBusy = false;
       setStatus('خطای ارتباط با میزبان — تلاش مجدد…');
@@ -762,7 +767,10 @@
       var img = new Image();
       img.onload = function () {
         if (!pixelCtx) return;
-        pixelCtx.clearRect(0, 0, sessW, sessH);
+        // Pages rarely carry their own background declarations (the browser
+        // paints a default white sheet); the picture starts from one too.
+        pixelCtx.fillStyle = '#fff';
+        pixelCtx.fillRect(0, 0, sessW, sessH);
         pixelCtx.drawImage(img, 0, 0, sessW, sessH);
         drawCursorOnCanvas(pixelCtx);
         pixFails = 0;
