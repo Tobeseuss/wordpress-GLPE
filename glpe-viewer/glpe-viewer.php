@@ -3,7 +3,7 @@
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
  * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با کدگذاری کامل تبادلات، بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 6.6.0
+ * Version: 7.0.0
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '6.6.0');
+define('GLPE_VERSION', '7.0.0');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -84,6 +84,12 @@ require_once GLPE_DIR . 'includes/Hub.php';
 // malformed pack only removes the tuning, never the display path.
 if (file_exists(GLPE_DIR . 'includes/SitePacks.php')) {
     require_once GLPE_DIR . 'includes/SitePacks.php';
+}
+// Virtual browser (v7.0.0): whole-destination rendering inside a temporary
+// host-side environment, streamed to the visitor as picture frames only.
+// A missing file just removes the virtual mode, never the display path.
+if (file_exists(GLPE_DIR . 'includes/VirtualBrowser.php')) {
+    require_once GLPE_DIR . 'includes/VirtualBrowser.php';
 }
 // Remote-diagnostics API (v6.3.0): optional by design — a missing file only
 // removes the diag card + endpoint, never the site.
@@ -162,6 +168,11 @@ class GLPE_Plugin {
         add_action('admin_post_glpe_hub_fetch_apply', ['GLPE_Hub_Admin', 'handleFetchApply']);
         add_action('wp_ajax_glpe_hub_vitals', ['GLPE_Hub_Admin', 'ajaxVitals']);
         add_action('wp_ajax_glpe_hub_tune', ['GLPE_Hub_Admin', 'ajaxTune']);
+
+        // Virtual browser service control (v7.0.0).
+        if (class_exists('GLPE_VirtualBrowser')) {
+            add_action('admin_post_glpe_vb_start', ['GLPE_VirtualBrowser', 'handleStart']);
+        }
 
         // DNS hardening: every WP-HTTP request through the cURL transport gets
         // resolve pins staged by GLPE_Dns::planHop plus tuned connect budgets.
@@ -845,6 +856,44 @@ class GLPE_Plugin {
                 <?php endif; ?>
             </form>
 
+            <?php
+            // Virtual browser (v7.0.0): the destination renders entirely on
+            // this host inside a temporary isolated environment; the visitor
+            // steers a picture-only stream like a remote desktop.
+            if (class_exists('GLPE_VirtualBrowser')) {
+                GLPE_VirtualBrowser::syncKeyFile();
+                $vbReady = GLPE_VirtualBrowser::ensureService();
+            ?>
+            <div id="glpe-vb-launch" style="background: #141e33; border: 1px solid #1e293b; border-radius: 14px; padding: 14px; margin-top: 16px;">
+                <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px;">
+                    <span style="font-size: 20px; background: #1e293b; border-radius: 12px; padding: 4px 8px;">🖥️</span>
+                    <b style="color: #fff; font-size: 13px;">مرورگر مجازی</b>
+                    <span style="background: rgba(110,231,183,0.12); color: #6ee7b7; border: 1px solid #059669; padding: 3px 10px; border-radius: 9999px; font-size: 11px;">رندر کامل روی میزبان — مانند ریموت دسکتاپ</span>
+                    <span style="font-size: 11px; color: <?php echo $vbReady ? '#6ee7b7' : '#fbbf24'; ?>;">
+                        وضعیت: <?php echo $vbReady ? 'فعال' : 'در دسترس نیست'; ?>
+                    </span>
+                </div>
+                <p style="font-size: 11px; line-height: 1.9; color: #94a3b8; margin: 0 0 10px;">
+                    تمام وب‌سایت و محتوای مقصد فقط روی همین میزبان بارگذاری، اجرا و رندر می‌شود؛ به دستگاه شما تنها تصویر فریم‌ها می‌رسد و حرکت موس و کیبورد شما ابتدا به همین میزبان ارسال و در همان محیط مجازی بازپخش می‌شود. هیچ کد، محتوا یا کوکی‌ای از سایت مقصد وارد مرورگرِ شما نمی‌شود.
+                </p>
+                <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                    <input id="glpe-vb-url" type="text" dir="ltr" value="https://example.com" spellcheck="false"
+                           style="flex: 1; min-width: 220px; padding: 11px 14px; background: #1e293b; border: 1px solid #334155; border-radius: 12px; color: #fff; font-size: 12px; font-family: monospace; outline: none; text-align: left;">
+                    <button type="button" class="glpe-vb-open"
+                            style="padding: 11px 22px; background: linear-gradient(to left, #059669, #10b981); color: #fff; border: none; border-radius: 12px; font-size: 12px; font-weight: bold; cursor: pointer; font-family: inherit;">
+                        🖥️ شروع مرورگر مجازی
+                    </button>
+                </div>
+                <?php if (!$vbReady): ?>
+                <p style="font-size: 11px; color: #fbbf24; margin: 8px 0 0; line-height: 1.8;">
+                    سرویس مرورگر مجازی روی این میزبان در دسترس نیست (نیاز به زمان اجرای Bun و یک هستهٔ رندر نصب‌شده روی سرور دارد). از مدیر هاست بخواهید از بخش «مرورگر مجازی» در تنظیمات افزونه راه‌اندازی‌اش کند.
+                </p>
+                <?php endif; ?>
+            </div>
+            <script>window.GLPE_VB = <?php echo wp_json_encode(GLPE_VirtualBrowser::clientConfig()); ?>;</script>
+            <script src="<?php echo esc_url(GLPE_URL . 'includes/vb-client.js'); ?>?v=<?php echo esc_attr(GLPE_VERSION); ?>" defer></script>
+            <?php } ?>
+
             <div style="display: flex; justify-content: center; gap: 8px; margin-top: 14px; flex-wrap: wrap; align-items: center;">
                 <a href="<?php echo esc_url($sessionsUrl); ?>" style="font-size: 12px; color: #94a3b8; text-decoration: none; background: #1e293b; border: 1px solid #334155; padding: 8px 16px; border-radius: 10px;">
                     🍪 مدیریت نشست‌ها و کوکی‌های من (<?php echo (int)$cookieCount; ?>)
@@ -904,6 +953,18 @@ class GLPE_Plugin {
         register_setting('glpe_group', 'glpe_fetch_connect_timeout', ['sanitize_callback' => [$this, 'sanitizePositiveInt']]);
         register_setting('glpe_group', 'glpe_fetch_timeout', ['sanitize_callback' => [$this, 'sanitizePositiveInt']]);
         register_setting('glpe_group', 'glpe_fetch_retries', ['sanitize_callback' => [$this, 'sanitizeRetry']]);
+        register_setting('glpe_group', 'glpe_vb_port', ['sanitize_callback' => [$this, 'sanitizeVbPort']]);
+        register_setting('glpe_group', 'glpe_vb_endpoint', ['sanitize_callback' => [$this, 'sanitizeVbEndpoint']]);
+    }
+
+    public function sanitizeVbPort($value) {
+        $v = (int)$value;
+        return ($v >= 1024 && $v <= 65535) ? (string)$v : '';
+    }
+
+    public function sanitizeVbEndpoint($value) {
+        $v = str_replace(["\r", "\n", "\0"], '', trim((string)$value));
+        return $v;
     }
 
     public function sanitizeDnsMode($value) {
@@ -950,6 +1011,8 @@ class GLPE_Plugin {
                 'hub-nozip'      => 'ساخت ZIP روی این هاست در دسترس نیست؛ فایل‌های کلاینت را جداگانه دانلود کنید.',
                 'diag-gen'       => 'کلید تشخیص از راه دور ساخته شد — کلید کامل اتصال را کپی و به دستیار خود بدهید.',
                 'diag-off'       => 'رابط تشخیص از راه دور غیرفعال شد و فایل واگذاری آن حذف شد.',
+                'vb-started'     => 'سرویس مرورگر مجازی روی میزبان اجرا شد و به سلامت پاسخ می‌دهد.',
+                'vb-failed'      => 'اجرای سرویس مرورگر مجازی ممکن نشد — وضعیت دقیق در کارت «مرورگر مجازی» آمده است.',
             ];
             if ($cpNotice !== '' && isset($cpNotices[$cpNotice])) {
                 echo '<div class="notice notice-success is-dismissible"><p>' . esc_html($cpNotices[$cpNotice]) . '</p></div>';
@@ -1099,14 +1162,82 @@ class GLPE_Plugin {
                     </tr>
                 </table>
 
+                <h3 style="margin-top: 18px;">🖥️ مرورگر مجازی (رندر روی میزبان)</h3>
+                <table class="form-table" role="presentation">
+                    <tr>
+                        <th scope="row">درگاه سرویس <code style="direction:ltr;">vb_port</code></th>
+                        <td>
+                            <input type="number" min="1024" max="65535" name="glpe_vb_port" value="<?php echo esc_attr(get_option('glpe_vb_port', '')); ?>" style="direction:ltr; width: 110px;" placeholder="3007" />
+                            <p style="font-size: 12px; color: #64748b; margin: 4px 0 0;">درگاهی که فرایند رندر میزبان روی آن گوش می‌دهد (خالی = ۳۰۰۷). این درگاه باید از بیرون قابل دسترس باشد.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row">نشانی سرویس <code style="direction:ltr;">vb_endpoint</code></th>
+                        <td>
+                            <input type="text" name="glpe_vb_endpoint" value="<?php echo esc_attr(get_option('glpe_vb_endpoint', '')); ?>" style="direction:ltr; width: 320px; max-width: 100%;" placeholder="خالی = خودکار" />
+                            <p style="font-size: 12px; color: #64748b; margin: 4px 0 0;">نشانی اتصال مرورگر کاربر به سرویس مجازی — خالی یعنی محاسبهٔ خودکار. فقط وقتی پر کنید که سرویس را پشت یک نشانی دیگری (مثل مسیر فرستنده یا نشانی اختصاصی) در دسترس گذاشته‌اید.</p>
+                        </td>
+                    </tr>
+                </table>
+
                 <?php submit_button('ذخیره تغییرات'); ?>
             </form>
+
+            <?php if (class_exists('GLPE_VirtualBrowser')) { $this->renderVirtualBrowserCard(); } ?>
 
             <?php $this->renderAccessCard(); ?>
 
             <?php if (class_exists('GLPE_Diag_Api')) { GLPE_Diag_Api::renderCard(); } ?>
 
             <?php GLPE_Hub_Admin::renderRelayPointer(); ?>
+        </div>
+        <?php
+    }
+
+    /**
+     * Virtual browser card — runtime/renderer status and one-click start of
+     * the host-side rendering service (v7.0.0).
+     */
+    private function renderVirtualBrowserCard() {
+        $st = GLPE_VirtualBrowser::status();
+        $startUrl = wp_nonce_url(
+            admin_url('admin-post.php?action=glpe_vb_start'),
+            'glpe_vb_start'
+        );
+        $uploads = wp_upload_dir();
+        $logPath = isset($uploads['basedir']) && $uploads['basedir'] !== ''
+            ? rtrim($uploads['basedir'], '/\\') . '/glpe-vb.log'
+            : '';
+        $row = function ($label, $value, $ok) {
+            $color = $ok ? '#059669' : '#b45309';
+            echo '<tr><th style="width:170px;">' . esc_html($label) . '</th><td><span style="color:' . $color . '; font-weight:bold; direction:ltr;">' . esc_html($value !== '' ? $value : '—') . '</span></td></tr>';
+        };
+        ?>
+        <div style="background: #fff; border: 1px solid #ccd0d4; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+            <h3 style="margin-top: 0;">🖥️ مرورگر مجازی — رندر کامل روی میزبان</h3>
+            <p style="font-size: 13px; line-height: 2; color: #334155;">
+                در حالت مرورگر مجازی، کل وب‌سایت مقصد داخل یک محیط ایزولهٔ موقت روی همین سرور بارگذاری و اجرا می‌شود و به بازدیدکننده فقط تصویر فریم‌ها می‌رسد؛ حرکت موس و کیبورد او به همان محیط ارسال و در آن بازپخش می‌شود — تجربه‌ای مثل ریموت دسکتاپ. هیچ HTML/CSS/JS یا کوکی‌ای از مقصد به دستگاه کاربر نمی‌رسد.
+                این حالت به دو چیز روی سرور نیاز دارد: زمان اجرای <code>Bun</code> و یک باینری رندرکنندهٔ بدون رابط کاربری (Chromium). پس از تأمین این دو، دکمهٔ زیر سرویس را راه‌اندازی می‌کند و صفحهٔ نمایشگر به‌طور خودکار از آن استفاده می‌کند.
+            </p>
+            <table class="widefat striped" style="max-width: 760px; direction: ltr; text-align: left;">
+                <tbody>
+                <?php
+                $row('service', $st['running'] ? 'running : ' . (int)$st['port'] : 'stopped', $st['running']);
+                $row('bun runtime', $st['bun'], $st['bun'] !== '');
+                $row('renderer binary', $st['chrome'], $st['chrome'] !== '');
+                $row('client endpoint', $st['endpoint'], true);
+                $row('log file', $logPath, true);
+                ?>
+                </tbody>
+            </table>
+            <form method="post" action="<?php echo esc_url($startUrl); ?>" style="margin-top: 14px; display: inline;">
+                <?php wp_nonce_field('glpe_vb_start'); ?>
+                <button type="submit" class="button button-primary">اجرای سرویس / تازه‌سازی وضعیت</button>
+            </form>
+            <p style="font-size: 12px; color: #64748b; line-height: 1.9; margin-bottom: 0;">
+                نکته: درگاه سرویس و نشانی اتصال کاربران در فرم تنظیمات بالا قابل تغییر است. اگر هاست اجازهٔ اجرای فرایند پس‌زمینه نمی‌دهد، سرویس را به‌صورت دستی (داِیمن) اجرا کنید:
+                <code style="direction:ltr; display:inline-block;">GLPE_VB_PORT=3007 GLPE_VB_KEYFILE=&lt;uploads&gt;/glpe-vb-key.txt GLPE_VB_CHROME=&lt;chromium&gt; bun &lt;plugin&gt;/vb/vb-service.js</code>
+            </p>
         </div>
         <?php
     }

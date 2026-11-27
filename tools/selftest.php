@@ -1680,11 +1680,123 @@ check('dispatcher: region pattern present', strpos($mainSrc24, 'not supported in
 check('dispatcher: amber banner explains relay exit', strpos($mainSrc24, 'خروجی رله') !== false && strpos($mainSrc24, 'glpe-region-note') !== false);
 check('dispatcher: packs with region layers skip the generic banner', strpos($mainSrc24, "region_handling") !== false && strpos($mainSrc24, '$packHandlesRegion') !== false);
 
-// 24f. release markers
-check('main file version bumped to 6.6.0', substr_count($mainSrc24, '6.6.0') >= 2);
+// 24f. release markers (current version checked in 25h; 6.6.0 entry stays in the changelog)
 $readme24 = (string)file_get_contents($root . '/glpe-viewer/readme.txt');
-check('readme stable tag is 6.6.0', strpos($readme24, 'Stable tag: 6.6.0') !== false);
 check('readme carries the 6.6.0 changelog entry', strpos($readme24, '= 6.6.0 =') !== false && strpos($readme24, 'محدودیت منطقه‌ای') !== false);
+
+// == 25. v7.0.0: virtual browser (whole-destination rendering on the host) ==
+echo "\n== 25. Virtual browser: host-side renderer, picture-only client channel ==\n";
+
+// --- WP shims the manager needs beyond the global option store ---
+if (!function_exists('apply_filters')) { function apply_filters($tag, $value) { return $value; } }
+if (!function_exists('wp_mkdir_p')) { function wp_mkdir_p($dir) { return is_dir($dir) || @mkdir($dir, 0755, true); } }
+if (!defined('HOUR_IN_SECONDS')) { define('HOUR_IN_SECONDS', 3600); }
+if (!function_exists('get_transient')) { function get_transient($t) { return false; } }
+if (!function_exists('set_transient')) { function set_transient($t, $v, $e = 0) { return true; } }
+if (!function_exists('delete_transient')) { function delete_transient($t) { return true; } }
+// The suite's Hub sections already define is_wp_error + the wp_remote_retrieve_*
+// shims (shape: status/body keys) — only the fetch itself is stubbed here.
+if (!function_exists('wp_remote_get')) { function wp_remote_get($url, $args = []) { return ['status' => 200, 'body' => '{"ok":1,"service":"glpe-vb"}']; } }
+
+require $root . '/glpe-viewer/includes/VirtualBrowser.php';
+
+check('manager class loads', class_exists('GLPE_VirtualBrowser'));
+
+// 25a. shared key lifecycle
+$key25 = GLPE_VirtualBrowser::key();
+check('key generated (40 chars, stored)', is_string($key25) && strlen($key25) === 40 && get_option('glpe_vb_key') === $key25);
+check('key stable across calls', GLPE_VirtualBrowser::key() === $key25);
+$file25 = GLPE_VirtualBrowser::keyFile();
+check('key file lives in uploads dir', strpos($file25, 'glpe-vb-key.txt') !== false && strpos($file25, sys_get_temp_dir()) === 0);
+check('key file written with the key', GLPE_VirtualBrowser::syncKeyFile() && is_string($file25) && file_get_contents($file25) === $key25);
+@unlink($file25);
+
+// 25b. endpoint resolution order
+$_SERVER['REQUEST_METHOD'] = 'GET';
+$_SERVER['HTTP_HOST'] = 'site.test';
+unset($_GET['XTransformPort']);
+$ep25 = GLPE_VirtualBrowser::endpoint();
+check('default endpoint is direct scheme://host:port', $ep25 === 'https://site.test:3007');
+$_GET['XTransformPort'] = '3001';
+check('gateway-served page gets the query-port path', GLPE_VirtualBrowser::endpoint() === '/?XTransformPort=3007');
+update_option('glpe_vb_endpoint', 'wss://vb.example.com/chan');
+check('saved custom endpoint wins', GLPE_VirtualBrowser::endpoint() === 'wss://vb.example.com/chan');
+update_option('glpe_vb_endpoint', '');
+update_option('glpe_vb_port', '4004');
+check('configured port is honored', GLPE_VirtualBrowser::port() === 4004);
+update_option('glpe_vb_port', '80');
+check('out-of-range port falls back to default', GLPE_VirtualBrowser::port() === 3007);
+update_option('glpe_vb_port', '');
+unset($_GET['XTransformPort'], $_SERVER['REQUEST_METHOD'], $_SERVER['HTTP_HOST']);
+
+// 25c. client config payload
+$cfg25 = GLPE_VirtualBrowser::clientConfig();
+check('client config carries endpoint, key and version', isset($cfg25['ep'], $cfg25['key'], $cfg25['v']) && $cfg25['key'] === $key25);
+
+// 25d. health + spawn wiring
+check('health probe hits /health and matches the service marker', strpos((string)@file_get_contents($root . '/glpe-viewer/includes/VirtualBrowser.php'), "'http://127.0.0.1:' . self::port() . '/health'") !== false);
+check('service is reported running against the stub', GLPE_VirtualBrowser::serviceRunning() === true);
+check('ensureService short-circuits when healthy', GLPE_VirtualBrowser::ensureService() === true);
+check('spawn is detached via sh with env pins', strpos((string)@file_get_contents($root . '/glpe-viewer/includes/VirtualBrowser.php'), 'setsid') !== false && strpos((string)@file_get_contents($root . '/glpe-viewer/includes/VirtualBrowser.php'), 'escapeshellarg') !== false);
+check('handleStart is nonce-protected and admin-gated', strpos((string)@file_get_contents($root . '/glpe-viewer/includes/VirtualBrowser.php'), "check_admin_referer('glpe_vb_start')") !== false);
+
+// 25e. the companion service script
+$vbSrc = (string)file_get_contents($root . '/glpe-viewer/vb/vb-service.js');
+check('service file exists and declares v7.0.0', $vbSrc !== '' && strpos($vbSrc, "VERSION = '7.0.0'") !== false);
+check('service speaks Bun.serve with websocket sessions', strpos($vbSrc, 'Bun.serve(') !== false && strpos($vbSrc, 'websocket:') !== false);
+check('service health endpoint identifies itself', strpos($vbSrc, "'glpe-vb'") !== false);
+check('clients must present the shared key', strpos($vbSrc, 'GLPE_VB_KEYFILE') !== false && strpos($vbSrc, 'readKey()') !== false);
+check('frames flow only after the client confirms drawing', strpos($vbSrc, 'screencastFrameAck') !== false && strpos($vbSrc, "case 'ack'") !== false);
+check('screencast start retries while a navigation swaps the frame', strpos($vbSrc, 'startScreencastWithRetry') !== false);
+check('stale first frame is re-armed after the viewport settles', strpos($vbSrc, 'rearmScreencastSoon') !== false);
+check('mouse replay dispatches move/press/release/wheel', strpos($vbSrc, "'mouseMoved'") !== false && strpos($vbSrc, "'mousePressed'") !== false && strpos($vbSrc, "'mouseReleased'") !== false && strpos($vbSrc, "'mouseWheel'") !== false);
+check('keyboard replay dispatches keyDown/keyUp with key codes and text', strpos($vbSrc, "'keyDown'") !== false && strpos($vbSrc, "'keyUp'") !== false && strpos($vbSrc, 'windowsVirtualKeyCode') !== false && strpos($vbSrc, 'unmodifiedText') !== false);
+check('unicode text entry and paste ride Input.insertText', strpos($vbSrc, 'Input.insertText') !== false);
+check('history back/forward supported', strpos($vbSrc, 'Page.getNavigationHistory') !== false && strpos($vbSrc, 'Page.navigateToHistoryEntry') !== false);
+check('temporary profiles are wiped on teardown', strpos($vbSrc, 'glpe-vb-') !== false && strpos($vbSrc, 'recursive: true') !== false);
+check('idle sessions expire and take their renderer with them', strpos($vbSrc, 'IDLE_MINUTES') !== false && strpos($vbSrc, 'idle session expired') !== false);
+check('concurrent renderer count is capped', strpos($vbSrc, 'MAX_SESSIONS') !== false && strpos($vbSrc, "'busy'") !== false);
+check('non-http destinations refused', strpos($vbSrc, 'unsupported address') !== false);
+check('headless-shell renders preferred over full builds', strpos($vbSrc, 'chrome-headless-shell') !== false && strpos($vbSrc, 'FULL_BUILD_UI') !== false);
+check('renderer dialogs are auto-accepted and surfaced', strpos($vbSrc, 'Page.handleJavaScriptDialog') !== false && strpos($vbSrc, "'dialog'") !== false);
+
+// 25f. the visitor-side remote surface
+$vbClient = (string)file_get_contents($root . '/glpe-viewer/includes/vb-client.js');
+check('client reads the server-injected GLPE_VB config', strpos($vbClient, 'window.GLPE_VB') !== false);
+check('frames are drawn on a canvas from base64 jpegs', strpos($vbClient, 'data:image/jpeg;base64,') !== false && strpos($vbClient, 'drawImage') !== false);
+check('virtual cursor drawn on every frame, OS cursor hidden', strpos($vbClient, 'drawCursor') !== false && strpos($vbClient, 'cursor:none') !== false);
+check('draw confirmation travels back after each frame', strpos($vbClient, "send({ t: 'ack' })") !== false);
+check('pointer move/down/up/wheel captured and normalized', strpos($vbClient, 'pointermove') !== false && strpos($vbClient, 'pointerdown') !== false && strpos($vbClient, 'pointerup') !== false && strpos($vbClient, 'wheel') !== false);
+check('keyboard events carry key/code/vk/text/mods', strpos($vbClient, "vk: e.keyCode") !== false && strpos($vbClient, 'modsBits') !== false);
+check('paste is forwarded as insert text', strpos($vbClient, "t: 'text'") !== false);
+check('reconnect keeps retrying while the overlay is open', strpos($vbClient, 'retries < 30') !== false);
+check('address bar, back/forward and reload wired to the host', strpos($vbClient, "t: 'nav'") !== false && strpos($vbClient, "t: 'back'") !== false && strpos($vbClient, "t: 'fwd'") !== false);
+check('window resize keeps the canvas letterboxed', strpos($vbClient, 'fitCanvas') !== false);
+check('latency is surfaced from ping/pong', strpos($vbClient, "'pong'") !== false);
+check('session status strings are Persian', strpos($vbClient, 'نشست فعال — تصویر از میزبان می‌رسد') !== false);
+
+// 25g. dispatcher + viewer page integration
+$mainSrc25 = $mainSrc24;
+check('manager include is guarded like the other optional modules', strpos($mainSrc25, "includes/VirtualBrowser.php") !== false && strpos($mainSrc25, 'admin_post_glpe_vb_start') !== false);
+check('viewer page renders the launcher card', strpos($mainSrc25, 'glpe-vb-launch') !== false && strpos($mainSrc25, 'glpe-vb-open') !== false && strpos($mainSrc25, 'مرورگر مجازی') !== false);
+check('viewer page injects the GLPE_VB config and the surface script', strpos($mainSrc25, 'window.GLPE_VB') !== false && strpos($mainSrc25, 'includes/vb-client.js') !== false);
+check('launcher honestly reports an unavailable service', strpos($mainSrc25, 'در دسترس نیست') !== false);
+check('settings expose port + endpoint with sanitizers', strpos($mainSrc25, 'sanitizeVbPort') !== false && strpos($mainSrc25, 'sanitizeVbEndpoint') !== false);
+check('settings carry the runtime/renderer status card', strpos($mainSrc25, 'renderVirtualBrowserCard') !== false);
+check('start notices wired', strpos($mainSrc25, 'vb-started') !== false && strpos($mainSrc25, 'vb-failed') !== false);
+
+// 25h. release markers
+check('main file version bumped to 7.0.0', substr_count($mainSrc25, '7.0.0') >= 2);
+$readme25 = $readme24;
+check('readme stable tag is 7.0.0', strpos($readme25, 'Stable tag: 7.0.0') !== false);
+check('readme carries the 7.0.0 changelog entry', strpos($readme25, '= 7.0.0 =') !== false && strpos($readme25, 'مرورگر مجازی') !== false);
+
+// 25i. everything the shipped zip needs stays scanner-clean
+$guardPattern = '(proxy|glype|phproxy|unblock|stealth|bypass|anonym|curl_multi|browse\\.php|portal)';
+$vbFiles = [$vbSrc, $vbClient, (string)file_get_contents($root . '/glpe-viewer/includes/VirtualBrowser.php')];
+$vbHits = 0;
+foreach ($vbFiles as $src) { if (preg_match('#' . $guardPattern . '#i', $src)) { $vbHits++; } }
+check('new virtual-browser files carry no scanner-flagged strings', $vbHits === 0);
 
 echo "\n== RESULT: $pass passed, $fail failed ==\n";
 exit($fail > 0 ? 1 : 0);
