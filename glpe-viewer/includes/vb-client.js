@@ -6,6 +6,13 @@
  * mouse/keyboard gestures shipped to the host, a virtual cursor drawn where
  * the host's renderer sees the pointer. Nothing from the destination page
  * runs locally — the canvas is the entire experience.
+ *
+ * v7.5.0 — phone optimization: finger gestures are classified locally
+ *   (tap, long-press, drag-pan with fling, double tap) and each rides the
+ *   host renderer as the SAME mouse/keyboard messages the desktop sends;
+ *   a hidden typing field (⌨ toggle) opens the device keyboard and its
+ *   characters travel as text/key messages; touch targets grow to phone
+ *   size and a rotation asks the renderer for a new viewport.
  */
 (function () {
   if (window.__glpe_vb_ui__) return;
@@ -22,6 +29,17 @@
   var frames = 0, fpsTime = 0, pingTimer = null, reconnectTimer = null;
   var lastMoveSend = 0;
   var curImg = null;
+  // v7.5.0 — touch + on-screen keyboard state (mirrors the sandbox
+  // engine's surface so both engines feel like one feature on phones).
+  var TOUCH = (navigator.maxTouchPoints || 0) > 0 || ('ontouchstart' in window);
+  var kbdInput = null, kbdBtn = null, kbdPrev = '';
+  var tPtr = null;
+  var tSecond = 0;
+  var lastTap = null;
+  var lpTimer = null;
+  var panAccX = 0, panAccY = 0, panT = null;
+  var flingT = null;
+  var rsT = null;
 
   function txt(s) { return document.createTextNode(s); }
 
@@ -44,8 +62,91 @@
     stage: 'flex:1;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;background:#000;',
     pill: 'position:absolute;top:10px;right:12px;background:rgba(15,23,42,0.85);border:1px solid #334155;color:#94a3b8;border-radius:9999px;padding:4px 12px;font-size:11px;line-height:1.8;z-index:5;max-width:70%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;',
     foot: 'display:flex;align-items:center;gap:14px;padding:8px 14px;background:#1e293b;border-top:1px solid #334155;color:#94a3b8;font-size:11px;flex:none;flex-wrap:wrap;',
-    canvas: 'display:block;background:#000;outline:none;cursor:none;'
+    footCompact: 'display:flex;align-items:center;gap:10px;padding:5px 10px;background:#1e293b;border-top:1px solid #334155;color:#94a3b8;font-size:10px;flex:none;white-space:nowrap;overflow:hidden;',
+    canvas: 'display:block;background:#000;outline:none;cursor:none;touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;'
   };
+
+  // Phone-sized ergonomics: 44px touch targets and 16px text fields (a
+  // smaller font and iOS zooms the whole surface on focus).
+  if (TOUCH) {
+    S.btn = 'width:44px;height:44px;border-radius:12px;border:1px solid #334155;background:#0f172a;color:#f8fafc;font-size:16px;cursor:pointer;line-height:1;flex:none;';
+    S.btnClose = 'width:44px;height:44px;border-radius:12px;border:1px solid #7f1d1d;background:#450a0a;color:#fecaca;font-size:17px;cursor:pointer;line-height:1;flex:none;';
+    S.input = 'flex:1;min-width:140px;padding:10px 12px;background:#0f172a;border:1px solid #334155;border-radius:12px;color:#f8fafc;font-size:16px;font-family:monospace;outline:none;direction:ltr;text-align:left;';
+  }
+
+  // ---------------------------------------------------------------------------
+  // v7.5.0 — the on-screen keyboard relay field (same arrangement as the
+  // sandbox engine's, so both engines behave identically on phones): a
+  // hidden text field focused within a real user gesture (the ⌨ button —
+  // the only window a mobile OS allows the keyboard in) opens the device
+  // keyboard; printable text and IME words ride as text messages, other
+  // keys ride as key messages. 16px font so iOS never zooms on focus.
+  // ---------------------------------------------------------------------------
+
+  function buildKbdField() {
+    kbdInput = el('input', 'position:absolute;bottom:2px;right:2px;width:26px;height:26px;opacity:0.03;border:0;outline:none;background:transparent;color:transparent;caret-color:transparent;font-size:16px;line-height:1;padding:0;margin:0;z-index:3;direction:ltr;text-align:left;pointer-events:none;');
+    kbdInput.type = 'text';
+    kbdInput.id = '__glpe_vb_kbd';
+    kbdInput.setAttribute('autocapitalize', 'off');
+    kbdInput.setAttribute('autocorrect', 'off');
+    kbdInput.setAttribute('autocomplete', 'off');
+    kbdInput.setAttribute('spellcheck', 'false');
+    kbdInput.setAttribute('aria-label', 'تایپ در مرورگر مجازی');
+    kbdInput.addEventListener('keydown', function (e) {
+      var printable = e.key && e.key.length === 1;
+      if (!printable || e.ctrlKey || e.metaKey) {
+        e.preventDefault(); // the key rides the host; the field stays inert
+        send({ t: 'key', a: 'down', key: e.key, code: e.code, vk: e.keyCode || 0, text: '', mods: modsBits(e) });
+      }
+      // Printable characters without modifiers fall through to the input
+      // event — IME-safe — and ride as text below.
+    });
+    kbdInput.addEventListener('keyup', function (e) {
+      send({ t: 'key', a: 'up', key: e.key, code: e.code, vk: e.keyCode || 0, mods: modsBits(e) });
+    });
+    kbdInput.addEventListener('input', function () {
+      var v = kbdInput.value;
+      if (v.indexOf(kbdPrev) === 0 && v.length > kbdPrev.length) {
+        send({ t: 'text', v: v.slice(kbdPrev.length).slice(0, 400) });
+      } else if (kbdPrev.indexOf(v) === 0 && kbdPrev.length > v.length) {
+        var dels = Math.min(200, kbdPrev.length - v.length);
+        for (var i = 0; i < dels; i++) {
+          send({ t: 'key', a: 'down', key: 'Backspace', code: 'Backspace', vk: 8, mods: 0 });
+        }
+      } else if (v !== kbdPrev) {
+        var olds = Math.min(200, kbdPrev.length);
+        for (var j = 0; j < olds; j++) {
+          send({ t: 'key', a: 'down', key: 'Backspace', code: 'Backspace', vk: 8, mods: 0 });
+        }
+        if (v) send({ t: 'text', v: v.slice(0, 400) });
+      }
+      kbdPrev = v;
+      if (v.length > 3000) { kbdInput.value = ''; kbdPrev = ''; }
+    });
+    kbdInput.addEventListener('focus', syncKbdBtn);
+    kbdInput.addEventListener('blur', syncKbdBtn);
+  }
+
+  function syncKbdBtn() {
+    if (!kbdBtn) return;
+    var on = !!(kbdInput && document.activeElement === kbdInput);
+    kbdBtn.style.background = on ? '#047857' : '#0f172a';
+    kbdBtn.style.borderColor = on ? '#059669' : '#334155';
+  }
+
+  function armKeyboard() {
+    if (kbdInput && document.activeElement !== kbdInput) {
+      try { kbdInput.focus(); } catch (e) {}
+    }
+    syncKbdBtn();
+  }
+
+  function disarmKeyboard() {
+    if (kbdInput && document.activeElement === kbdInput) {
+      try { kbdInput.blur(); } catch (e) {}
+    }
+    syncKbdBtn();
+  }
 
   function buildOverlay() {
     root = el('div', S.root);
@@ -58,6 +159,9 @@
     var bFwd = el('button', S.btn); bFwd.type = 'button'; bFwd.title = 'Forward'; bFwd.textContent = '←'; bFwd.id = '__glpe_vb_fwd';
     var bReload = el('button', S.btn); bReload.type = 'button'; bReload.title = 'Reload'; bReload.textContent = '⟳';
     var bClose = el('button', S.btnClose); bClose.type = 'button'; bClose.title = 'Close'; bClose.textContent = '✕';
+    // On-screen keyboard toggle — the picture channel cannot hit-test the
+    // destination, so the button (plus a hint) is the honest affordance.
+    kbdBtn = el('button', S.btn); kbdBtn.type = 'button'; kbdBtn.id = '__glpe_vb_kbd_btn'; kbdBtn.title = 'کیبورد دستگاه (نمایش/پنهان)'; kbdBtn.textContent = '⌨';
     urlInput = el('input', S.input); urlInput.type = 'text'; urlInput.placeholder = 'نشانی سایت — مثال: example.com';
     urlInput.setAttribute('aria-label', 'نشانی سایت');
 
@@ -66,29 +170,41 @@
     bar.appendChild(bBack);
     bar.appendChild(bFwd);
     bar.appendChild(urlInput);
+    bar.appendChild(kbdBtn);
     root.appendChild(bar);
 
     var stage = el('div', S.stage);
     canvas = el('canvas', S.canvas);
     canvas.tabIndex = 0;
     stage.appendChild(canvas);
+    buildKbdField();
+    stage.appendChild(kbdInput);
     statusEl = el('div', S.pill);
     statusEl.id = '__glpe_vb_status';
     stage.appendChild(statusEl);
     root.appendChild(stage);
 
-    var foot = el('div', S.foot);
-    var state = el('span'); state.style.color = '#6ee7b7'; state.textContent = '🖥️ رندر کامل روی میزبان';
-    var note = el('span'); note.style.flex = '1'; note.textContent = 'هیچ کد یا محتوایی از سایت مقصد وارد این دستگاه نمی‌شود — فقط تصویر فریم‌ها می‌رسد و حرکت موس/کیبورد شما به همان محیط ارسال می‌شود.';
+    var foot = el('div', TOUCH ? S.footCompact : S.foot);
+    var state = el('span'); state.style.color = '#6ee7b7'; state.textContent = TOUCH ? '🖥️ رندر روی میزبان' : '🖥️ رندر کامل روی میزبان';
+    var note = el('span'); note.style.flex = '1'; note.textContent = TOUCH
+      ? 'برای تایپ، دکمهٔ ⌨ را بزنید'
+      : 'هیچ کد یا محتوایی از سایت مقصد وارد این دستگاه نمی‌شود — فقط تصویر فریم‌ها می‌رسد و حرکت موس/کیبورد شما به همان محیط ارسال می‌شود.';
     fpsEl = el('span'); fpsEl.dir = 'ltr'; fpsEl.textContent = '— fps';
     latencyEl = el('span'); latencyEl.dir = 'ltr'; latencyEl.textContent = '— ms';
-    foot.appendChild(state); foot.appendChild(note); foot.appendChild(latencyEl); foot.appendChild(fpsEl);
+    foot.appendChild(state); if (!TOUCH) foot.appendChild(note); foot.appendChild(latencyEl); foot.appendChild(fpsEl);
     root.appendChild(foot);
 
     bClose.onclick = closeOverlay;
     bReload.onclick = function () { if (ws && currentUrl) send({ t: 'nav', url: currentUrl }); };
     bBack.onclick = function () { send({ t: 'back' }); };
     bFwd.onclick = function () { send({ t: 'fwd' }); };
+    kbdBtn.onclick = function () {
+      if (kbdInput && document.activeElement === kbdInput) disarmKeyboard();
+      else armKeyboard();
+    };
+    // iOS page-pinch would zoom the whole document out from under the
+    // fixed surface — one guard keeps the virtual surface alone on screen.
+    root.addEventListener('gesturestart', function (e) { e.preventDefault(); });
     urlInput.addEventListener('keydown', function (e) {
       if (e.key === 'Enter') {
         e.preventDefault();
@@ -109,10 +225,17 @@
     closing = true;
     if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; }
+    if (flingT) { clearTimeout(flingT); flingT = null; }
+    if (rsT) { clearTimeout(rsT); rsT = null; }
+    if (panT) { clearTimeout(panT); panT = null; }
+    tPtr = null; tSecond = 0; lastTap = null;
+    panAccX = 0; panAccY = 0;
+    try { if (kbdInput && document.activeElement === kbdInput) kbdInput.blur(); } catch (e) {}
     try { if (ws) ws.close(); } catch (e) {}
     if (root && root.parentNode) root.parentNode.removeChild(root);
     document.body.style.overflow = '';
-    root = canvas = ctx = urlInput = ws = null;
+    root = canvas = ctx = urlInput = ws = kbdInput = kbdBtn = null;
   }
 
   function setStatus(t) { if (statusEl) statusEl.textContent = t; }
@@ -181,8 +304,10 @@
 
       case 'started':
         urlInput.value = msg.url && msg.url !== 'about:blank' ? msg.url : currentUrl;
-        setStatus('نشست فعال — تصویر از میزبان می‌رسد');
-        canvas.focus();
+        setStatus(TOUCH
+          ? 'نشست فعال — لمس = کلیک — نگه‌داشتن = منو — کشیدن = اسکرول — ⌨ = تایپ'
+          : 'نشست فعال — تصویر از میزبان می‌رسد');
+        if (!(kbdInput && document.activeElement === kbdInput)) canvas.focus();
         break;
 
       case 'frame':
@@ -280,7 +405,30 @@
     canvas.style.height = Math.floor(canvas.height * k) + 'px';
   }
 
-  window.addEventListener('resize', function () { if (root && canvas && canvas.width) fitCanvas(); });
+  window.addEventListener('resize', function () {
+    if (root && canvas && canvas.width) fitCanvas();
+    queueViewportSync();
+  });
+
+  // A significantly resized stage (rotation, fold) asks the host renderer
+  // for a matching viewport — the same 'size' message the desktop sends at
+  // start, now kept honest for the whole phone session.
+  function queueViewportSync() {
+    if (!root || closing) return;
+    if (rsT) clearTimeout(rsT);
+    rsT = setTimeout(function () {
+      rsT = null;
+      if (!root || closing || !canvas || !canvas.width) return;
+      var stage = root.childNodes[1];
+      if (!stage) return;
+      var r = stage.getBoundingClientRect();
+      var w = Math.max(240, Math.min(3840, Math.floor(r.width - 2)));
+      var h = Math.max(240, Math.min(2160, Math.floor(r.height - 2)));
+      if (Math.abs(w - canvas.width) > 140 || Math.abs(h - canvas.height) > 140) {
+        send({ t: 'size', w: w, h: h });
+      }
+    }, 350);
+  }
 
   // ---------------------------------------------------------------------------
   // Input capture → host replay.
@@ -300,6 +448,7 @@
 
   function bindInput() {
     canvas.addEventListener('pointermove', function (e) {
+      if (e.pointerType === 'touch') { touchMove(e); return; }
       var now = Date.now();
       if (now - lastMoveSend < 15) return;
       lastMoveSend = now;
@@ -312,7 +461,8 @@
       e.preventDefault();
       var p = canvasPoint(e);
       rememberPoint(p);
-      canvas.focus();
+      if (e.pointerType === 'touch') { touchStart(e, p); return; }
+      if (!(kbdInput && document.activeElement === kbdInput)) canvas.focus();
       try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
       send({ t: 'down', x: p.x, y: p.y, b: buttonName(e.button) });
     });
@@ -320,7 +470,12 @@
     canvas.addEventListener('pointerup', function (e) {
       var p = canvasPoint(e);
       rememberPoint(p);
+      if (e.pointerType === 'touch') { touchEnd(e, p); return; }
       send({ t: 'up', x: p.x, y: p.y, b: buttonName(e.button) });
+    });
+
+    canvas.addEventListener('pointercancel', function (e) {
+      if (e.pointerType === 'touch') touchCancel();
     });
 
     canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
@@ -360,6 +515,134 @@
     return 'left';
   }
 
+  // ---------------------------------------------------------------------------
+  // v7.5.0 — the touch classifier (mirrors the sandbox engine):
+  //   tap → down/up; double tap → 'dbl' (clickCount 2 in the renderer,
+  //   so dblclick fires natively); long-press → right-button press+release
+  //   (the renderer fires the site's own contextmenu); drag → wheel-style
+  //   pan with fling. A second finger voids the live gesture.
+  // ---------------------------------------------------------------------------
+
+  function clearLp() {
+    if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; }
+  }
+
+  function noteTap(p) {
+    var now = Date.now();
+    if (lastTap && now - lastTap.t < 330 && Math.abs(lastTap.x - p.x) < 48 && Math.abs(lastTap.y - p.y) < 48) {
+      send({ t: 'dbl', x: p.x, y: p.y });
+      lastTap = null;
+      return;
+    }
+    lastTap = { t: now, x: p.x, y: p.y };
+  }
+
+  function touchStart(e, p) {
+    if (tPtr) {
+      tSecond++;
+      cancelTouchGesture();
+      return;
+    }
+    tPtr = {
+      id: e.pointerId, x0: p.x, y0: p.y, x: p.x, y: p.y,
+      t0: Date.now(), lt: Date.now(), vx: 0, vy: 0,
+      mode: null, decided: false
+    };
+    clearLp();
+    lpTimer = setTimeout(function () {
+      if (!tPtr || tPtr.id !== e.pointerId || tPtr.mode === 'menu') return;
+      if (Math.abs(tPtr.x - tPtr.x0) < 12 && Math.abs(tPtr.y - tPtr.y0) < 12) {
+        tPtr.mode = 'menu';
+        try { if (navigator.vibrate) navigator.vibrate(28); } catch (e2) {}
+        send({ t: 'down', x: tPtr.x, y: tPtr.y, b: 'right' });
+        send({ t: 'up', x: tPtr.x, y: tPtr.y, b: 'right' });
+      }
+    }, 470);
+  }
+
+  function touchMove(e) {
+    if (!tPtr || tPtr.id !== e.pointerId) return;
+    var p = canvasPoint(e);
+    var fdx = p.x - tPtr.x, fdy = p.y - tPtr.y;
+    var now = Date.now();
+    if (fdx || fdy) {
+      var dt = Math.max(8, now - tPtr.lt);
+      tPtr.vx = fdx / dt; tPtr.vy = fdy / dt;
+    }
+    tPtr.lt = now;
+    tPtr.x = p.x; tPtr.y = p.y;
+    if (!tPtr.decided) {
+      if (Math.abs(p.x - tPtr.x0) < 12 && Math.abs(p.y - tPtr.y0) < 12) return;
+      tPtr.decided = true;
+      if (tPtr.mode === 'menu') tPtr.mode = 'menudrag';
+      else tPtr.mode = 'pan';
+    }
+    if (tPtr.mode === 'pan') {
+      // content follows the finger — negated deltas, batched 40ms
+      panAccX += fdx; panAccY += fdy;
+      if (!panT) {
+        panT = setTimeout(function () {
+          panT = null;
+          if (panAccX || panAccY) {
+            send({ t: 'wheel', x: tPtr ? tPtr.x : lastX, y: tPtr ? tPtr.y : lastY, dx: Math.round(-panAccX), dy: Math.round(-panAccY) });
+            panAccX = 0; panAccY = 0;
+          }
+        }, 40);
+      }
+    }
+  }
+
+  function touchEnd(e, p) {
+    if (tPtr && tPtr.id === e.pointerId) {
+      var g = tPtr;
+      tPtr = null;
+      clearLp();
+      if (g.mode === 'pan') {
+        if (panT) { clearTimeout(panT); panT = null; }
+        if (panAccX || panAccY) {
+          send({ t: 'wheel', x: p.x, y: p.y, dx: Math.round(-panAccX), dy: Math.round(-panAccY) });
+          panAccX = 0; panAccY = 0;
+        }
+        startFling(g);
+      } else if (!g.decided && g.mode !== 'menu' && g.mode !== 'menudrag') {
+        send({ t: 'down', x: p.x, y: p.y, b: 'left' });
+        send({ t: 'up', x: p.x, y: p.y, b: 'left' });
+        noteTap(p);
+      }
+      // 'menu'/'menudrag': the long-press already rode as right press/release
+    }
+    if (tSecond > 0) tSecond--;
+  }
+
+  function touchCancel() {
+    tPtr = null;
+    tSecond = 0;
+    panAccX = 0; panAccY = 0;
+    if (panT) { clearTimeout(panT); panT = null; }
+  }
+
+  function cancelTouchGesture() {
+    if (!tPtr) return;
+    tPtr = null;
+    clearLp();
+    panAccX = 0; panAccY = 0;
+  }
+
+  function startFling(g) {
+    var vx = g.vx || 0, vy = g.vy || 0; // px per ms, finger direction
+    if (Math.sqrt(vx * vx + vy * vy) < 0.22) return;
+    if (flingT) { clearTimeout(flingT); flingT = null; }
+    var stepFn = function () {
+      vx *= 0.84; vy *= 0.84;
+      var dx = Math.round(vx * 100), dy = Math.round(vy * 100);
+      if (!dx && !dy) { flingT = null; return; }
+      if (!root || closing) { flingT = null; return; }
+      send({ t: 'wheel', x: lastX, y: lastY, dx: Math.round(-Math.max(-80, Math.min(80, dx))), dy: Math.round(-Math.max(-80, Math.min(80, dy))) });
+      flingT = setTimeout(stepFn, 100);
+    };
+    flingT = setTimeout(stepFn, 100);
+  }
+
   function modsBits(e) {
     return (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
   }
@@ -374,6 +657,9 @@
     lastX = lastY = -1;
     frames = 0;
     fpsTime = Date.now();
+    tPtr = null; tSecond = 0; lastTap = null;
+    panAccX = 0; panAccY = 0;
+    kbdPrev = '';
     buildOverlay();
     bindInput();
     connect(url);

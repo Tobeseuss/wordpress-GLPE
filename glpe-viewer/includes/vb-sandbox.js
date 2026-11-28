@@ -17,7 +17,16 @@
  *   - "pixel" mode shows the sandbox as a plain picture on a canvas: the
  *     visitor then watches an image of the page, not the page itself;
  *   - closing the surface throws the whole temporary environment away
- *     (its session, its jar, its records).
+ *     (its session, its jar, its records);
+ *
+ * v7.5.0 — touch and on-screen keyboards (phone optimization): finger
+ *   gestures are classified LOCALLY (tap, long-press, drag-pan, fling,
+ *   double tap) and each is translated into the SAME host-first
+ *   vocabulary — nothing skips the host round trip. A hidden typing field
+ *   opens the device keyboard (16px font so iOS never zooms on focus) and
+ *   its characters ride the round trip like any other keystroke; touch
+ *   targets grow to phone size and a viewport-resize gesture keeps the
+ *   sandbox honest after rotation.
  */
 (function () {
   if (window.__glpe_vbs_ui__) return;
@@ -50,6 +59,19 @@
   var toastEl = null, toastTimer = null;
   var dlBusy = false;
   var DL_RE = /\.(zip|rar|7z|gz|tgz|xz|bz2|exe|msi|dmg|apk|ipa|iso|deb|rpm|bin|tar|epub|mobi|jar)(\?|$)/i;
+  // v7.5.0 — touch and on-screen keyboard state: the classifier, the
+  // hidden typing field's last-known value, the double-tap window, the
+  // long-press timer, the pan accumulator (one wheel gesture per host
+  // round trip) and the fling decay.
+  var TOUCH = (navigator.maxTouchPoints || 0) > 0 || ('ontouchstart' in window);
+  var kbdInput = null, kbdBtn = null, kbdPrev = '';
+  var tPtr = null;            // live single-touch tracker
+  var tSecond = 0;            // extra concurrent touch pointers (pinch etc.)
+  var lastTap = null;         // {t,x,y} — double-tap window
+  var lpTimer = null;         // long-press timer
+  var panAccX = 0, panAccY = 0;
+  var flingT = null;
+  var rsT = null;             // viewport-resize debounce
 
   function txt(s) { return document.createTextNode(s); }
 
@@ -156,11 +178,103 @@
     stage: 'flex:1;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;background:#000;',
     pill: 'position:absolute;top:10px;right:12px;background:rgba(15,23,42,0.85);border:1px solid #334155;color:#94a3b8;border-radius:9999px;padding:4px 12px;font-size:11px;line-height:1.8;z-index:6;max-width:70%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;',
     foot: 'display:flex;align-items:center;gap:14px;padding:8px 14px;background:#1e293b;border-top:1px solid #334155;color:#94a3b8;font-size:11px;flex:none;flex-wrap:wrap;',
+    footCompact: 'display:flex;align-items:center;gap:10px;padding:5px 10px;background:#1e293b;border-top:1px solid #334155;color:#94a3b8;font-size:10px;flex:none;white-space:nowrap;overflow:hidden;',
     frame: 'border:0;background:#fff;display:block;flex:none;',
     pixelCanvas: 'position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);border:0;background:#000;display:none;flex:none;',
-    capture: 'position:absolute;inset:0;z-index:4;background:transparent;cursor:none;outline:none;touch-action:none;',
+    capture: 'position:absolute;inset:0;z-index:4;background:transparent;cursor:none;outline:none;touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;',
     cursor: 'position:absolute;left:0;top:0;z-index:5;width:26px;height:26px;pointer-events:none;display:block;'
   };
+
+  // Phone-sized ergonomics: touch targets at 44px and text fields at 16px
+  // (a smaller font and iOS zooms the whole surface the moment the field
+  // gains focus).
+  if (TOUCH) {
+    S.btn = 'height:44px;min-width:44px;padding:0 12px;border-radius:12px;border:1px solid #334155;background:#0f172a;color:#f8fafc;font-size:16px;cursor:pointer;line-height:1;flex:none;font-family:inherit;';
+    S.btnClose = 'width:44px;height:44px;border-radius:12px;border:1px solid #7f1d1d;background:#450a0a;color:#fecaca;font-size:17px;cursor:pointer;line-height:1;flex:none;';
+    S.input = 'flex:1;min-width:140px;padding:10px 12px;background:#0f172a;border:1px solid #334155;border-radius:12px;color:#f8fafc;font-size:16px;font-family:monospace;outline:none;direction:ltr;text-align:left;';
+  }
+
+  // ---------------------------------------------------------------------------
+  // v7.5.0 — the on-screen keyboard relay field.
+  //
+  // A hidden text field lives inside the stage. Focusing it — always inside
+  // a real user gesture (a tap on an editable spot, or the ⌨ button: the
+  // ONLY window a mobile OS ever allows the soft keyboard to open) — brings
+  // the device keyboard up. Printable text and IME-composed words arrive
+  // as the field's own input events, are diffed against the last known
+  // value and ride the host round trip as typing; non-printable keys
+  // (Enter, Backspace, arrows…) ride as key events exactly like the desktop
+  // capture layer. The field renders nothing readable (transparent, 16px
+  // font so iOS never zooms on focus, pointer-events none).
+  // ---------------------------------------------------------------------------
+
+  function buildKbdField() {
+    kbdInput = el('input', 'position:absolute;bottom:2px;right:2px;width:26px;height:26px;opacity:0.03;border:0;outline:none;background:transparent;color:transparent;caret-color:transparent;font-size:16px;line-height:1;padding:0;margin:0;z-index:3;direction:ltr;text-align:left;pointer-events:none;');
+    kbdInput.type = 'text';
+    kbdInput.id = '__glpe_vbs_kbd';
+    kbdInput.setAttribute('autocapitalize', 'off');
+    kbdInput.setAttribute('autocorrect', 'off');
+    kbdInput.setAttribute('autocomplete', 'off');
+    kbdInput.setAttribute('spellcheck', 'false');
+    kbdInput.setAttribute('aria-label', 'تایپ در مرورگر مجازی');
+    kbdInput.addEventListener('keydown', function (e) {
+      var printable = e.key && e.key.length === 1;
+      if (!printable || e.ctrlKey || e.metaKey) {
+        e.preventDefault(); // the key rides the host; the field stays inert
+        push({ t: 'kd', key: e.key, code: e.code, vk: e.keyCode || 0, text: '', mods: modsBits(e) });
+      }
+      // Printable characters without modifiers fall through to the input
+      // event — IME-safe — and ride as typing text below.
+    });
+    kbdInput.addEventListener('keyup', function (e) {
+      push({ t: 'ku', key: e.key, code: e.code, vk: e.keyCode || 0, mods: modsBits(e) });
+    });
+    kbdInput.addEventListener('input', function () {
+      var v = kbdInput.value;
+      if (v.indexOf(kbdPrev) === 0 && v.length > kbdPrev.length) {
+        // appended text (single chars, IME words, OS-keyboard pastes)
+        push({ t: 'tx', v: v.slice(kbdPrev.length).slice(0, 400), p: 0 });
+      } else if (kbdPrev.indexOf(v) === 0 && kbdPrev.length > v.length) {
+        // deleted tail — one Backspace gesture per gone character
+        var dels = Math.min(200, kbdPrev.length - v.length);
+        for (var i = 0; i < dels; i++) {
+          push({ t: 'kd', key: 'Backspace', code: 'Backspace', vk: 8, text: '', mods: 0 });
+        }
+      } else if (v !== kbdPrev) {
+        // full replacement (IME resets, clipboard inserts)
+        var olds = Math.min(200, kbdPrev.length);
+        for (var j = 0; j < olds; j++) {
+          push({ t: 'kd', key: 'Backspace', code: 'Backspace', vk: 8, text: '', mods: 0 });
+        }
+        if (v) push({ t: 'tx', v: v.slice(0, 400), p: 0 });
+      }
+      kbdPrev = v;
+      if (v.length > 3000) { kbdInput.value = ''; kbdPrev = ''; }
+    });
+    kbdInput.addEventListener('focus', syncKbdBtn);
+    kbdInput.addEventListener('blur', syncKbdBtn);
+  }
+
+  function syncKbdBtn() {
+    if (!kbdBtn) return;
+    var on = !!(kbdInput && document.activeElement === kbdInput);
+    kbdBtn.style.background = on ? '#0369a1' : '#0f172a';
+    kbdBtn.style.borderColor = on ? '#0284c7' : '#334155';
+  }
+
+  function armKeyboard() {
+    if (kbdInput && document.activeElement !== kbdInput) {
+      try { kbdInput.focus(); } catch (e) {}
+    }
+    syncKbdBtn();
+  }
+
+  function disarmKeyboard() {
+    if (kbdInput && document.activeElement === kbdInput) {
+      try { kbdInput.blur(); } catch (e) {}
+    }
+    syncKbdBtn();
+  }
 
   function buildOverlay() {
     root = el('div', S.root);
@@ -174,6 +288,9 @@
     var bBack = el('button', S.btn); bBack.type = 'button'; bBack.title = 'پیشین'; bBack.textContent = '→'; bBack.id = '__glpe_vbs_back';
     var bFwd = el('button', S.btn); bFwd.type = 'button'; bFwd.title = 'بعدی'; bFwd.textContent = '←';
     modeBtn = el('button', S.btn); modeBtn.type = 'button'; modeBtn.title = 'تغییر حالت نمایش'; modeBtn.textContent = '🖼️ پیکسل';
+    // The on-screen keyboard toggle — the one affordance a phone needs
+    // that a desktop never does.
+    kbdBtn = el('button', S.btn); kbdBtn.type = 'button'; kbdBtn.id = '__glpe_vbs_kbd_btn'; kbdBtn.title = 'کیبورد دستگاه (نمایش/پنهان)'; kbdBtn.textContent = '⌨';
     urlInput = el('input', S.input); urlInput.type = 'text'; urlInput.placeholder = 'نشانی سایت — مثال: example.com';
     urlInput.setAttribute('aria-label', 'نشانی سایت');
 
@@ -183,6 +300,7 @@
     bar.appendChild(bFwd);
     bar.appendChild(urlInput);
     bar.appendChild(modeBtn);
+    bar.appendChild(kbdBtn);
     root.appendChild(bar);
 
     stage = el('div', S.stage);
@@ -207,6 +325,7 @@
     capture = el('div', S.capture);
     capture.tabIndex = 0;
     capture.id = '__glpe_vbs_capture';
+    buildKbdField();
 
     cursor = el('img', S.cursor);
     cursor.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(
@@ -217,6 +336,7 @@
 
     stage.appendChild(frame);
     stage.appendChild(pixelCanvas);
+    stage.appendChild(kbdInput);
     stage.appendChild(capture);
     stage.appendChild(cursor);
     statusEl = el('div', S.pill);
@@ -224,12 +344,14 @@
     stage.appendChild(statusEl);
     root.appendChild(stage);
 
-    var foot = el('div', S.foot);
-    var state = el('span'); state.style.color = '#38bdf8'; state.textContent = '🖥️ موتور جعبه‌ای — بدون نیاز به سرویس روی سرور';
-    var note = el('span'); note.style.flex = '1'; note.textContent = 'تمام تبادل‌های شبکه و ورودی‌های شما ابتدا به همین هاست ارسال و پس از پردازش همان‌جا در این نمایشگر بازپخش می‌شوند؛ صفحهٔ مقصد داخل جعبهٔ ایزولهٔ موقت نمایش می‌یابد و با بستن، دور ریخته می‌شود.';
+    var foot = el('div', TOUCH ? S.footCompact : S.foot);
+    var state = el('span'); state.style.color = '#38bdf8'; state.textContent = TOUCH ? '🖥️ جعبه‌ای' : '🖥️ موتور جعبه‌ای — بدون نیاز به سرویس روی سرور';
+    var note = el('span'); note.style.flex = '1'; note.textContent = TOUCH
+      ? 'ورودی‌ها ابتدا به میزبان می‌روند و بعد بازپخش می‌شوند'
+      : 'تمام تبادل‌های شبکه و ورودی‌های شما ابتدا به همین هاست ارسال و پس از پردازش همان‌جا در این نمایشگر بازپخش می‌شوند؛ صفحهٔ مقصد داخل جعبهٔ ایزولهٔ موقت نمایش می‌یابد و با بستن، دور ریخته می‌شود.';
     latEl = el('span'); latEl.dir = 'ltr'; latEl.textContent = '— ms';
     evEl = el('span'); evEl.dir = 'ltr'; evEl.textContent = '0 ev';
-    foot.appendChild(state); foot.appendChild(note); foot.appendChild(latEl); foot.appendChild(evEl);
+    foot.appendChild(state); if (!TOUCH) foot.appendChild(note); foot.appendChild(latEl); foot.appendChild(evEl);
     root.appendChild(foot);
 
     bClose.onclick = closeSurface;
@@ -237,6 +359,13 @@
     bBack.onclick = function () { try { frame.contentWindow.history.back(); } catch (e) {} };
     bFwd.onclick = function () { try { frame.contentWindow.history.forward(); } catch (e) {} };
     modeBtn.onclick = function () { pixelMode ? leavePixel() : enterPixel(); };
+    kbdBtn.onclick = function () {
+      if (kbdInput && document.activeElement === kbdInput) disarmKeyboard();
+      else armKeyboard();
+    };
+    // iOS page-pinch would zoom the whole document out from under the
+    // fixed surface — one guard keeps the virtual surface alone on screen.
+    root.addEventListener('gesturestart', function (e) { e.preventDefault(); });
     urlInput.addEventListener('keydown', function (e) {
       if (e.key === 'Enter') {
         e.preventDefault();
@@ -258,6 +387,12 @@
     if (beatTimer) { clearInterval(beatTimer); beatTimer = null; }
     if (pixelTimer) { clearInterval(pixelTimer); pixelTimer = null; }
     if (syncTimer) { clearInterval(syncTimer); syncTimer = null; }
+    if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; }
+    if (flingT) { clearTimeout(flingT); flingT = null; }
+    if (rsT) { clearTimeout(rsT); rsT = null; }
+    tPtr = null; tSecond = 0; lastTap = null;
+    panAccX = 0; panAccY = 0;
+    try { if (kbdInput && document.activeElement === kbdInput) kbdInput.blur(); } catch (e) {}
     hideVbMenu();
     dragSel = null;
     if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
@@ -274,7 +409,7 @@
     }
     if (root && root.parentNode) root.parentNode.removeChild(root);
     document.body.style.overflow = '';
-    root = stage = frame = capture = cursor = pixelCanvas = pixelCtx = urlInput = sess = null;
+    root = stage = frame = capture = cursor = pixelCanvas = pixelCtx = urlInput = kbdInput = kbdBtn = sess = null;
   }
 
   function setStatus(t) { if (statusEl) statusEl.textContent = t; }
@@ -290,6 +425,9 @@
     imgCache = {};
     dragSel = null;
     dlBusy = false;
+    tPtr = null; tSecond = 0; lastTap = null;
+    panAccX = 0; panAccY = 0;
+    kbdPrev = '';
     buildOverlay();
     bindInput();
     var rect = stage.getBoundingClientRect();
@@ -304,7 +442,9 @@
       frame.style.width = w + 'px';
       frame.style.height = h + 'px';
       frame.src = d.g;
-      setStatus('در حال بارگذاری صفحه از طریق میزبان…');
+      setStatus(TOUCH
+        ? 'لمس = کلیک — نگه‌داشتن انگشت = منو — کشیدن = اسکرول — لمس فیلد، کیبورد را باز می‌کند'
+        : 'در حال بارگذاری صفحه از طریق میزبان…');
       fitFrame();
       startTimers();
     }, function () {
@@ -382,21 +522,28 @@
   function bindInput() {
     capture.addEventListener('pointermove', function (e) {
       var p = stagePoint(e);
+      if (e.pointerType === 'touch') { touchMove(e, p); return; }
       push({ t: 'mm', x: p.x, y: p.y });
     });
 
     capture.addEventListener('pointerdown', function (e) {
       e.preventDefault();
-      capture.focus();
       hideVbMenu();
       try { capture.setPointerCapture(e.pointerId); } catch (err) {}
       var p = stagePoint(e);
+      if (e.pointerType === 'touch') { touchStart(e, p); return; }
+      capture.focus();
       push({ t: 'dn', x: p.x, y: p.y, b: buttonName(e.button) });
     });
 
     capture.addEventListener('pointerup', function (e) {
       var p = stagePoint(e);
+      if (e.pointerType === 'touch') { touchEnd(e, p); return; }
       push({ t: 'up', x: p.x, y: p.y, b: buttonName(e.button) });
+    });
+
+    capture.addEventListener('pointercancel', function (e) {
+      if (e.pointerType === 'touch') touchCancel();
     });
 
     // Right-click rides the host round trip like every other gesture (rc);
@@ -413,6 +560,9 @@
 
     capture.addEventListener('dblclick', function (e) {
       e.preventDefault();
+      // The touch classifier owns double taps — a native dblclick that
+      // trailed finger taps must never ride twice.
+      if (tPtr || tSecond || (lastTap && Date.now() - lastTap.t < 600)) return;
       var p = stagePoint(e);
       push({ t: 'db', x: p.x, y: p.y });
     });
@@ -457,11 +607,194 @@
     return 'left';
   }
 
+  // ---------------------------------------------------------------------------
+  // v7.5.0 — the touch classifier. Every finger gesture is recognized
+  // locally and translated into the SAME host-first vocabulary the desktop
+  // surface already uses:
+  //   tap          → press + release (the click rides the echo)
+  //   double tap   → press/release pair + dblclick
+  //   long-press   → context click (the surface menu / the site's own menu)
+  //   drag         → wheel-style pan (content follows the finger) + fling
+  //   on fields    → the press rides immediately (caret) and the keyboard
+  //                  opens within the user gesture
+  // A second finger cancels the live gesture (pinch carries no host
+  // vocabulary). Nothing here touches the sandbox directly — every push
+  // still waits for the host's echo before anything replays.
+  // ---------------------------------------------------------------------------
+
+  // An advisory same-origin probe (the established elAt path): did the
+  // finger begin over something editable? It only decides whether the
+  // keyboard should open and whether a press rides immediately.
+  function editableAt(px, py) {
+    try {
+      var s = frameScale();
+      var t = elAt(Math.round(px * s.sx), Math.round(py * s.sy));
+      return !!t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || !!t.isContentEditable);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function clearLp() {
+    if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; }
+  }
+
+  function noteTap(p) {
+    var now = Date.now();
+    if (lastTap && now - lastTap.t < 330 && Math.abs(lastTap.x - p.x) < 48 && Math.abs(lastTap.y - p.y) < 48) {
+      push({ t: 'db', x: p.x, y: p.y });
+      lastTap = null;
+      return;
+    }
+    lastTap = { t: now, x: p.x, y: p.y };
+  }
+
+  function touchStart(e, p) {
+    if (tPtr) {
+      // a second finger while one is tracked: void the gesture entirely
+      tSecond++;
+      cancelTouchGesture();
+      return;
+    }
+    var editable = editableAt(p.x, p.y);
+    tPtr = {
+      id: e.pointerId, x0: p.x, y0: p.y, x: p.x, y: p.y,
+      t0: Date.now(), lt: Date.now(), vx: 0, vy: 0,
+      mode: editable ? 'edit' : null, decided: false
+    };
+    lastX = p.x; lastY = p.y;
+    positionCursor(p.x, p.y);
+    if (editable) {
+      // The press rides the host right away (caret placement, focus) and
+      // the keyboard opens within THIS user gesture — the only window a
+      // mobile OS ever allows one in.
+      armKeyboard();
+      push({ t: 'dn', x: p.x, y: p.y, b: 'left' });
+    }
+    clearLp();
+    lpTimer = setTimeout(function () {
+      if (!tPtr || tPtr.id !== e.pointerId || tPtr.mode === 'menu') return;
+      if (Math.abs(tPtr.x - tPtr.x0) < 12 && Math.abs(tPtr.y - tPtr.y0) < 12) {
+        tPtr.mode = 'menu';
+        disarmKeyboard(); // the surface menu (copy/paste/select) takes over
+        try { if (navigator.vibrate) navigator.vibrate(28); } catch (e2) {}
+        push({ t: 'rc', x: tPtr.x, y: tPtr.y });
+      }
+    }, 470);
+  }
+
+  function touchMove(e, p) {
+    if (!tPtr || tPtr.id !== e.pointerId) return;
+    var fdx = p.x - tPtr.x, fdy = p.y - tPtr.y;
+    var now = Date.now();
+    if (fdx || fdy) {
+      var dt = Math.max(8, now - tPtr.lt);
+      tPtr.vx = fdx / dt; tPtr.vy = fdy / dt; // px per ms — feeds the fling
+    }
+    tPtr.lt = now;
+    tPtr.x = p.x; tPtr.y = p.y;
+    lastX = p.x; lastY = p.y;
+    positionCursor(p.x, p.y);
+    if (!tPtr.decided) {
+      if (Math.abs(p.x - tPtr.x0) < 12 && Math.abs(p.y - tPtr.y0) < 12) return;
+      tPtr.decided = true;
+      if (tPtr.mode === 'edit') tPtr.mode = 'editdrag';     // caret drag
+      else if (tPtr.mode === 'menu') tPtr.mode = 'menudrag'; // held after menu
+      else tPtr.mode = 'pan';
+    }
+    if (tPtr.mode === 'pan') {
+      // Content follows the finger: pan deltas accumulate and ride as ONE
+      // wheel gesture per host round trip (negated — finger up scrolls
+      // down, exactly like native touch).
+      panAccX += fdx; panAccY += fdy;
+    } else if (tPtr.mode === 'editdrag') {
+      push({ t: 'mm', x: p.x, y: p.y });
+    }
+  }
+
+  function touchEnd(e, p) {
+    if (tPtr && tPtr.id === e.pointerId) {
+      var g = tPtr;
+      tPtr = null;
+      clearLp();
+      if (g.mode === 'pan') {
+        pushPan();
+        startFling(g);
+      } else if (g.mode === 'edit' || g.mode === 'editdrag') {
+        push({ t: 'up', x: p.x, y: p.y, b: 'left' });
+        noteTap(p);
+      } else if (!g.decided && g.mode !== 'menu' && g.mode !== 'menudrag') {
+        // plain tap — press+release ride now (the echo replays the click)
+        push({ t: 'dn', x: p.x, y: p.y, b: 'left' });
+        push({ t: 'up', x: p.x, y: p.y, b: 'left' });
+        noteTap(p);
+      }
+      // 'menu'/'menudrag': the long-press already rode as a context click
+    }
+    if (tSecond > 0) tSecond--;
+  }
+
+  function touchCancel() {
+    if (tPtr) {
+      var g = tPtr;
+      tPtr = null;
+      clearLp();
+      if (g.mode === 'edit' || g.mode === 'editdrag') {
+        push({ t: 'up', x: g.x, y: g.y, b: 'left' });
+      }
+    }
+    tSecond = 0;
+    panAccX = 0; panAccY = 0;
+  }
+
+  // Multi-finger arrival voids the pending single-finger gesture: a press
+  // that already rode gets its release so the destination never sees a
+  // stuck button; pans simply stop.
+  function cancelTouchGesture() {
+    if (!tPtr) return;
+    var g = tPtr;
+    tPtr = null;
+    clearLp();
+    if (g.mode === 'edit' || g.mode === 'editdrag') {
+      push({ t: 'up', x: g.x, y: g.y, b: 'left' });
+    }
+    panAccX = 0; panAccY = 0;
+  }
+
+  // Fold the accumulated finger deltas into one wheel gesture on the
+  // pending queue — the flush timer carries it with everything else.
+  function pushPan() {
+    if (panAccX || panAccY) {
+      pending.push({ t: 'wh', x: lastX, y: lastY, dx: Math.round(-panAccX), dy: Math.round(-panAccY) });
+      panAccX = 0; panAccY = 0;
+    }
+  }
+
+  // Momentum: after a fast release, decayed finger-direction deltas keep
+  // feeding the pan accumulator for a few ticks — the flush timer keeps
+  // batching them into single wheel gestures.
+  function startFling(g) {
+    var vx = g.vx || 0, vy = g.vy || 0; // px per ms, finger direction
+    if (Math.sqrt(vx * vx + vy * vy) < 0.22) return;
+    if (flingT) { clearTimeout(flingT); flingT = null; }
+    var stepFn = function () {
+      vx *= 0.84; vy *= 0.84;
+      var dx = Math.round(vx * 100), dy = Math.round(vy * 100);
+      if (!dx && !dy) { flingT = null; return; }
+      if (!sess || closing) { flingT = null; return; }
+      panAccX += Math.max(-80, Math.min(80, dx));
+      panAccY += Math.max(-80, Math.min(80, dy));
+      flingT = setTimeout(stepFn, 100);
+    };
+    flingT = setTimeout(stepFn, 100);
+  }
+
   function flush() {
     if (!sess || closing) return;
     if (flushBusy) return; // one round trip at a time — ordering is the contract
     var batch = [];
     if (pendingMove) { batch.push(pendingMove); pendingMove = null; }
+    pushPan(); // a live touch pan (or fling) rides as one wheel gesture
     if (!batch.length && !pending.length) return;
     for (var i = 0; i < pending.length; i++) batch.push(pending[i]);
     pending = [];
@@ -491,8 +824,14 @@
       // The sandbox can pull REAL focus into itself (a focused field would
       // otherwise receive the visitor's next keystrokes directly — around
       // the host round trip). The capture layer takes focus back after every
-      // batch so each gesture keeps riding the host first.
-      try { if (capture && capture.focus) capture.focus({ preventScroll: true }); } catch (e) { try { capture.focus(); } catch (e2) {} }
+      // batch so each gesture keeps riding the host first — UNLESS the
+      // on-screen keyboard's relay field holds it: stealing focus back
+      // would close the device keyboard mid-typing.
+      try {
+        if (capture && capture.focus && !(kbdInput && document.activeElement === kbdInput)) {
+          capture.focus({ preventScroll: true });
+        }
+      } catch (e) { try { if (capture && !(kbdInput && document.activeElement === kbdInput)) capture.focus(); } catch (e2) {} }
     }, function () {
       flushBusy = false;
       setStatus('خطای ارتباط با میزبان — تلاش مجدد…');
@@ -575,14 +914,21 @@
         // Synthetic gestures do not focus like real ones — editable surfaces
         // must gain the caret explicitly so the next keystrokes land there.
         // A left press on anything ELSE anchors a text-selection drag.
+        // While the on-screen keyboard's relay field holds REAL focus, the
+        // frame field is tracked (lastFocusEl) WITHOUT stealing focus —
+        // stealing it back would fold the device keyboard mid-typing.
         if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) {
           lastFocusEl = target;
           dragSel = null;
-          try { target.focus(); } catch (e) {}
+          if (!(kbdInput && document.activeElement === kbdInput)) {
+            try { target.focus(); } catch (e) {}
+          }
         } else if (target && target.isContentEditable) {
           lastFocusEl = target;
           dragSel = null;
-          try { target.focus(); } catch (e) {}
+          if (!(kbdInput && document.activeElement === kbdInput)) {
+            try { target.focus(); } catch (e) {}
+          }
         } else if (ev.b === 'left') {
           startDragSelection(fp.x, fp.y);
         }
@@ -652,6 +998,25 @@
         if (ev.p) { pasteIntoFrame(String(ev.v || '')); }
         else { insertText(String(ev.v || '')); }
         break;
+      case 'rs': {
+        // Viewport resize (v7.5.0 — rotation, fold): the host journaled and
+        // clamped it; the live environment takes the new dimensions and
+        // the destination reflows natively inside the frame.
+        if (ev.w >= 320 && ev.h >= 240) {
+          sessW = ev.w; sessH = ev.h;
+          if (frame) {
+            frame.style.width = sessW + 'px';
+            frame.style.height = sessH + 'px';
+          }
+          if (pixelMode && pixelCanvas) {
+            pixelCanvas.width = sessW;
+            pixelCanvas.height = sessH;
+            rasterize();
+          }
+          fitFrame();
+        }
+        break;
+      }
     }
   }
 
@@ -1328,7 +1693,28 @@
     }
   }
 
-  window.addEventListener('resize', function () { if (root && frame) fitFrame(); });
+  window.addEventListener('resize', function () {
+    if (root && frame) fitFrame();
+    queueViewportSync();
+  });
+
+  // A significantly resized stage (rotation, fold) asks the host to adopt
+  // new sandbox dimensions — the gesture rides the round trip like any
+  // other, and the host's clamp bounds stay honest for every later event.
+  function queueViewportSync() {
+    if (!sess || closing || !stage) return;
+    if (rsT) clearTimeout(rsT);
+    rsT = setTimeout(function () {
+      rsT = null;
+      if (!sess || closing || !stage) return;
+      var r = stage.getBoundingClientRect();
+      var w = Math.max(320, Math.min(1920, Math.floor(r.width - 4)));
+      var h = Math.max(240, Math.min(1200, Math.floor(r.height - 4)));
+      if (Math.abs(w - sessW) > 140 || Math.abs(h - sessH) > 140) {
+        push({ t: 'rs', w: w, h: h });
+      }
+    }, 350);
+  }
 
   // ---------------------------------------------------------------------------
   // Launcher.

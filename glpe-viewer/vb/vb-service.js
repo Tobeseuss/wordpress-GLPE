@@ -444,6 +444,17 @@ class VBSession {
     if (this.cdp) this.cdp.send('Input.dispatchMouseEvent', ev).catch(() => {});
   }
 
+  dbl(params) {
+    // Double tap from the touch classifier (v7.5.0): clickCount 2 makes
+    // Chromium fire dblclick natively alongside the second press.
+    const x = clampInt(params.x, 0, 100000, 0);
+    const y = clampInt(params.y, 0, 100000, 0);
+    if (this.cdp) {
+      this.cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 2 }).catch(() => {});
+      this.cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 2 }).catch(() => {});
+    }
+  }
+
   key(params) {
     const ev = {
       type: params.a === 'up' ? 'keyUp' : 'keyDown',
@@ -546,6 +557,10 @@ async function handleClientMessage(ws, session, raw) {
     case 'up':
     case 'wheel':
       session.mouse({ a: msg.t, x: msg.x, y: msg.y, b: msg.b, dx: msg.dx, dy: msg.dy });
+      return;
+
+    case 'dbl':
+      session.dbl(msg);
       return;
 
     case 'key':

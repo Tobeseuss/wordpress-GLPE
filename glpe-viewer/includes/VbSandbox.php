@@ -29,6 +29,13 @@
  * module (includes/VbDl.php) with two delivery paths for shared hosting.
  *
  * Zero external dependencies. PHP 7.2 - 8.4.
+ *
+ * v7.5.0 — phone optimization: the gesture whitelist grew the
+ *   viewport-resize shape ('rs') so a rotation or fold adopts new sandbox
+ *   dimensions through the same host-first round trip, and the
+ *   visitor-side surface classifies touch gestures locally into the
+ *   existing vocabulary (tap, long-press, drag-pan with fling, double
+ *   tap) with an on-screen keyboard relay field — nothing skips the host.
  */
 
 class GLPE_Vb_Sandbox {
@@ -308,12 +315,23 @@ class GLPE_Vb_Sandbox {
      * claim the gesture, the visitor's own surface menu opens. 'tx'
      * carries a 'p' (paste) marker so the replay can hand the payload to
      * the frame as a clipboard-style paste instead of plain typing.
+     * v7.5.0 addition: 'rs' (viewport resize) — a phone rotation or fold
+     * asks the host to adopt new sandbox dimensions; the host clamps and
+     * journals them exactly like any other gesture, and the session's own
+     * clamp bounds follow so later gestures land in the geometry the
+     * visitor actually sees.
      */
     public static function normalizeEvents($events, $w = 1920, $h = 1200) {
         if (!is_array($events)) {
             return [];
         }
         $out = [];
+        // Clamping bounds walk the batch in order: an 'rs' event that
+        // survives the whitelist updates them for everything AFTER it in
+        // the same batch (a rotation that rides with the very first taps
+        // already clamps into the geometry it announced).
+        $cw = (int)$w;
+        $ch = (int)$h;
         foreach ($events as $ev) {
             if (!is_array($ev) || count($out) >= self::EV_CAP) {
                 continue;
@@ -322,15 +340,15 @@ class GLPE_Vb_Sandbox {
             switch ($type) {
                 case 'mm':
                     $out[] = ['t' => 'mm',
-                        'x' => self::clamp((int)round((float)$ev['x']), 0, max(0, (int)$w - 1)),
-                        'y' => self::clamp((int)round((float)$ev['y']), 0, max(0, (int)$h - 1))];
+                        'x' => self::clamp((int)round((float)$ev['x']), 0, max(0, $cw - 1)),
+                        'y' => self::clamp((int)round((float)$ev['y']), 0, max(0, $ch - 1))];
                     break;
                 case 'dn':
                 case 'up':
                     $button = (isset($ev['b']) && in_array($ev['b'], ['left', 'right', 'middle'], true)) ? $ev['b'] : 'left';
                     $out[] = ['t' => $type,
-                        'x' => self::clamp((int)round((float)$ev['x']), 0, max(0, (int)$w - 1)),
-                        'y' => self::clamp((int)round((float)$ev['y']), 0, max(0, (int)$h - 1)),
+                        'x' => self::clamp((int)round((float)$ev['x']), 0, max(0, $cw - 1)),
+                        'y' => self::clamp((int)round((float)$ev['y']), 0, max(0, $ch - 1)),
                         'b' => $button];
                     break;
                 case 'rc':
@@ -338,15 +356,26 @@ class GLPE_Vb_Sandbox {
                     // Right-click and double-click carry position only — the
                     // button is implicit in the shape itself.
                     $out[] = ['t' => $type,
-                        'x' => self::clamp((int)round((float)$ev['x']), 0, max(0, (int)$w - 1)),
-                        'y' => self::clamp((int)round((float)$ev['y']), 0, max(0, (int)$h - 1))];
+                        'x' => self::clamp((int)round((float)$ev['x']), 0, max(0, $cw - 1)),
+                        'y' => self::clamp((int)round((float)$ev['y']), 0, max(0, $ch - 1))];
                     break;
                 case 'wh':
                     $out[] = ['t' => 'wh',
-                        'x' => self::clamp((int)round((float)$ev['x']), 0, max(0, (int)$w - 1)),
-                        'y' => self::clamp((int)round((float)$ev['y']), 0, max(0, (int)$h - 1)),
+                        'x' => self::clamp((int)round((float)$ev['x']), 0, max(0, $cw - 1)),
+                        'y' => self::clamp((int)round((float)$ev['y']), 0, max(0, $ch - 1)),
                         'dx' => self::clamp((int)round((float)$ev['dx']), -5000, 5000),
                         'dy' => self::clamp((int)round((float)$ev['dy']), -5000, 5000)];
+                    break;
+                case 'rs':
+                    // Viewport resize (v7.5.0): rotation or fold on a
+                    // phone. The bounds mirror create() so one honest
+                    // geometry survives the round trip — and the same
+                    // batch's later gestures clamp into it already.
+                    $out[] = ['t' => 'rs',
+                        'w' => $nwRs = self::clamp((int)round((float)(isset($ev['w']) ? $ev['w'] : 0)), 320, 1920),
+                        'h' => self::clamp((int)round((float)(isset($ev['h']) ? $ev['h'] : 0)), 240, 1200)];
+                    $cw = (int)$nwRs;
+                    $ch = (int)$out[count($out) - 1]['h'];
                     break;
                 case 'kd':
                 case 'ku':
@@ -437,11 +466,23 @@ class GLPE_Vb_Sandbox {
                     $s['h']
                 );
                 $s['ev'] = (int)$s['ev'] + count($events);
+                // A viewport resize (v7.5.0 — rotation on a phone) adopts
+                // the new sandbox dimensions, so every later gesture clamps
+                // into the geometry the visitor actually sees.
+                $resized = false;
+                foreach ($events as $evRs) {
+                    if (is_array($evRs) && isset($evRs['t']) && $evRs['t'] === 'rs') {
+                        $s['w'] = (int)$evRs['w'];
+                        $s['h'] = (int)$evRs['h'];
+                        $resized = true;
+                    }
+                }
                 // The store write is throttled: a lively session renews its
                 // TTL the moment the remaining life drops below half, so a
-                // mouse stream never pays a database write per round trip.
+                // mouse stream never pays a database write per round trip —
+                // a resize always pays it (rare, and geometry must persist).
                 $ttl = self::ttl();
-                if ((int)$s['exp'] - time() < (int)($ttl / 2)) {
+                if ($resized || (int)$s['exp'] - time() < (int)($ttl / 2)) {
                     $s['exp'] = time() + $ttl;
                     self::storeSet($token, $s, $ttl);
                     $idx = self::index();

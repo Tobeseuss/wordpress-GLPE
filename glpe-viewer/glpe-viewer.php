@@ -3,7 +3,7 @@
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
  * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با کدگذاری کامل تبادلات، بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 7.4.0
+ * Version: 7.5.0
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '7.4.0');
+define('GLPE_VERSION', '7.5.0');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -103,6 +103,11 @@ if (file_exists(GLPE_DIR . 'includes/VbSandbox.php')) {
 if (file_exists(GLPE_DIR . 'includes/VbDl.php')) {
     require_once GLPE_DIR . 'includes/VbDl.php';
 }
+// v7.5.0 — phone optimization note: the visitor-side surfaces (vb-sandbox.js
+// and vb-client.js) classify touch gestures locally and translate them into
+// the same host-first vocabulary; VbSandbox.php grew the 'rs' (viewport
+// resize) gesture so rotations adopt new sandbox dimensions through the
+// round trip. No new server component: free hosting stays supported.
 // Remote-diagnostics API (v6.3.0): optional by design — a missing file only
 // removes the diag card + endpoint, never the site.
 if (file_exists(GLPE_DIR . 'includes/DiagApi.php')) {
@@ -1110,7 +1115,7 @@ class GLPE_Plugin {
                 </p>
                 <div style="display: flex; gap: 8px; flex-wrap: wrap;">
                     <input id="glpe-vb-url" type="text" dir="ltr" value="https://example.com" spellcheck="false"
-                           style="flex: 1; min-width: 220px; padding: 11px 14px; background: #1e293b; border: 1px solid #334155; border-radius: 12px; color: #fff; font-size: 12px; font-family: monospace; outline: none; text-align: left;">
+                           style="flex: 1; min-width: 220px; padding: 11px 14px; background: #1e293b; border: 1px solid #334155; border-radius: 12px; color: #fff; font-size: 16px; font-family: monospace; outline: none; text-align: left;">
                     <button type="button" class="glpe-vb-open"
                             style="padding: 11px 22px; background: linear-gradient(to left, #059669, #10b981); color: #fff; border: none; border-radius: 12px; font-size: 12px; font-weight: bold; cursor: pointer; font-family: inherit;">
                         🖥️ شروع مرورگر مجازی
@@ -1140,13 +1145,13 @@ class GLPE_Plugin {
                 </div>
                 <p style="font-size: 11px; line-height: 2; color: #94a3b8; margin: 0 0 10px;">
                     در این موتور، تمام درخواست‌ها و پاسخ‌های وب‌سایت مقصد فقط از همین میزبان شما عبور و پردازش می‌شوند (مقصد تنها IP همین هاست را می‌بیند و هرگز IP شما را)؛
-                    حرکت موس، اسکرول و کیبورد شما ابتدا رمزگذاری‌شده به همین هاست ارسال و پس از پردازش در همان‌جا، در «نمایشگر مجازی» بازپخش می‌شود؛
+                    حرکت موس، لمس، اسکرول و کیبورد شما ابتدا رمزگذاری‌شده به همین هاست ارسال و پس از پردازش در همان‌جا، در «نمایشگر مجازی» بازپخش می‌شود؛
                     صفحهٔ مقصد هم داخل یک جعبهٔ ایزولهٔ موقت نمایش می‌یابد — بدون دسترسی به صفحه یا کوکی‌های مرورگر شما — و با بستن، آن محیط و کوکی‌هایش به‌کلی دور ریخته می‌شود.
                     با دکمهٔ «پیکسل» تنها تصویر صفحه را می‌بینید. برای رندرِ کامل و صددرصد سمت سرور، موتور «سرویس رندر» در تنظیمات افزونه موجود است (نیازمند سروری با دسترسی کامل).
                 </p>
                 <div style="display: flex; gap: 8px; flex-wrap: wrap;">
                     <input id="glpe-vb-url" type="text" dir="ltr" value="https://example.com" spellcheck="false"
-                           style="flex: 1; min-width: 220px; padding: 11px 14px; background: #1e293b; border: 1px solid #334155; border-radius: 12px; color: #fff; font-size: 12px; font-family: monospace; outline: none; text-align: left;">
+                           style="flex: 1; min-width: 220px; padding: 11px 14px; background: #1e293b; border: 1px solid #334155; border-radius: 12px; color: #fff; font-size: 16px; font-family: monospace; outline: none; text-align: left;">
                     <button type="button" class="glpe-vbs-open"
                             style="padding: 11px 22px; background: linear-gradient(to left, #0284c7, #38bdf8); color: #fff; border: none; border-radius: 12px; font-size: 12px; font-weight: bold; cursor: pointer; font-family: inherit;">
                         🖥️ شروع مرورگر مجازی

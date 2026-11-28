@@ -1789,7 +1789,7 @@ check('start notices wired', strpos($mainSrc25, 'vb-started') !== false && strpo
 // historical 7.0.0 changelog entry stays below)
 check('main file still carries the 7.0.0 heritage marker', substr_count($mainSrc25, '7.0.0') >= 1);
 $readme25 = $readme24;
-check('readme stable tag follows the current release (7.4.0)', strpos($readme25, 'Stable tag: 7.4.0') !== false);
+check('readme stable tag follows the current release (7.5.0)', strpos($readme25, 'Stable tag: 7.5.0') !== false);
 check('readme carries the 7.0.0 changelog entry', strpos($readme25, '= 7.0.0 =') !== false && strpos($readme25, 'مرورگر مجازی') !== false);
 
 // 25i. everything the shipped zip needs stays scanner-clean
@@ -2035,7 +2035,7 @@ $uninstall26 = (string)file_get_contents($root . '/glpe-viewer/uninstall.php');
 check('uninstall reaps sandbox sessions and engine options', strpos($uninstall26, 'glpe_vb_engine') !== false && strpos($uninstall26, "delete_transient('glpe_vbs_'") !== false && strpos($uninstall26, 'glpe_vb_vbs_index') !== false && strpos($uninstall26, 'glpe_vb_key') !== false);
 check('main file version bumped to 7.1.0', substr_count($mainSrc26, '7.1.0') >= 2);
 $readme26 = (string)file_get_contents($root . '/glpe-viewer/readme.txt');
-check('readme stable tag is 7.4.0', strpos($readme26, 'Stable tag: 7.4.0') !== false);
+check('readme stable tag is 7.5.0', strpos($readme26, 'Stable tag: 7.5.0') !== false);
 check('readme carries the 7.1.0 changelog entry', strpos($readme26, '= 7.1.0 =') !== false && strpos($readme26, 'موتور جعبه‌ای') !== false);
 
 // 26n. everything the shipped zip needs stays scanner-clean
@@ -2223,7 +2223,7 @@ check('purge notice wired', strpos($mainSrc28, 'res-purged') !== false);
 // 28j. uninstall + version markers
 check('uninstall reaps the cache option and directory', strpos($uninstall28, "'glpe_res_cache'") !== false && strpos($uninstall28, 'glpe-res-cache') !== false);
 check('main file version bumped to 7.3.0', substr_count($mainSrc28, '7.3.0') >= 2);
-check('readme stable tag is 7.4.0', strpos($readme27, 'Stable tag: 7.4.0') !== false);
+check('readme stable tag is 7.5.0', strpos($readme27, 'Stable tag: 7.5.0') !== false);
 check('readme carries the 7.3.0 changelog entry', strpos($readme27, '= 7.3.0 =') !== false);
 check('README badge and feature bullet updated', strpos($readmeMd27, 'version-7.4.0-blue') !== false && strpos($readmeMd27, 'v7.4.0') !== false);
 
@@ -2492,7 +2492,7 @@ check('uninstall reaps the session and cache tuning options', strpos($uninstall2
 
 // 31l. version + release markers
 check('main file version bumped to 7.4.0', substr_count($mainSrc28, '7.4.0') >= 2);
-check('readme stable tag is 7.4.0', strpos($readme27, 'Stable tag: 7.4.0') !== false);
+check('readme stable tag is 7.5.0', strpos($readme27, 'Stable tag: 7.5.0') !== false);
 check('readme carries the 7.4.0 changelog entry', strpos($readme27, '= 7.4.0 =') !== false);
 check('README carries the v7.4.0 feature bullets', substr_count($readmeMd27, 'v7.4.0') >= 3);
 
@@ -2508,6 +2508,95 @@ GLPE_VbDl::$storeShim = null;
 GLPE_VbDl::$testDir = null;
 foreach ((array)glob($dlDir31 . '/*') as $f31) { @unlink($f31); }
 @rmdir($dlDir31);
+
+echo "\n== 32. Virtual Browser v7.5.0 — phone optimization (touch + on-screen keyboard) ==\n";
+
+// 32a. the resize gesture joins the whitelist with the create() bounds
+$rs32 = GLPE_Vb_Sandbox::normalizeEvents([
+    ['t' => 'rs', 'w' => 5000, 'h' => -40],
+    ['t' => 'rs'],
+    ['t' => 'zz', 'w' => 800, 'h' => 600],
+], 1024, 768);
+$rsA32 = null; $rsB32 = null;
+foreach ($rs32 as $e32) {
+    if ($e32['t'] === 'rs' && $rsA32 === null) { $rsA32 = $e32; }
+    elseif ($e32['t'] === 'rs') { $rsB32 = $e32; }
+}
+check('resize gesture survives with create()-mirrored clamps', is_array($rsA32) && $rsA32['w'] === 1920 && $rsA32['h'] === 240);
+check('a resize without dimensions clamps into the honest minimums', is_array($rsB32) && $rsB32['w'] === 320 && $rsB32['h'] === 240);
+check('unknown shapes still never survive', count($rs32) === 2);
+
+// 32b. a resize through vb_in adopts the session geometry — the host
+// genuinely processes it and persists it even outside the throttle window
+GLPE_Vb_Sandbox::$storeShim = [];
+$__glpe_options['glpe_vb_vbs_index'] = [];
+$_POST['p'] = GLPE_Codec::encode(wp_json_encode(['u' => 'rotary.test', 'w' => 1024, 'h' => 768]));
+GLPE_Vb_Sandbox::handleMode('vb_open');
+$d32 = json_decode(GLPE_Codec::decodeData($GLOBALS['__glpe_vbs_response']['d']), true);
+$tok32 = $d32['t'];
+check('rotation session opened for the resize round trip', is_array($d32) && isset($tok32) && GLPE_Vb_Sandbox::$storeShim[$tok32]['v']['w'] === 1024);
+$_POST['p'] = GLPE_Codec::encode(wp_json_encode(['t' => $tok32, 'ev' => [
+    ['t' => 'rs', 'w' => 900, 'h' => 420],
+    ['t' => 'mm', 'x' => 3000, 'y' => 2000],
+]]));
+GLPE_Vb_Sandbox::handleMode('vb_in');
+$d32 = json_decode(GLPE_Codec::decodeData($GLOBALS['__glpe_vbs_response']['d']), true);
+check('the echo carries the clamped resize back to the visitor', is_array($d32) && isset($d32['ev'][0]['t']) && $d32['ev'][0]['t'] === 'rs' && $d32['ev'][0]['w'] === 900 && $d32['ev'][0]['h'] === 420);
+check('the session geometry adopted the resize', GLPE_Vb_Sandbox::$storeShim[$tok32]['v']['w'] === 900 && GLPE_Vb_Sandbox::$storeShim[$tok32]['v']['h'] === 420);
+check('later gestures clamp into the ADOPTED geometry, not the stale one', $d32['ev'][1]['x'] === 899 && $d32['ev'][1]['y'] === 419);
+$_POST['p'] = GLPE_Codec::encode(wp_json_encode(['t' => $tok32]));
+GLPE_Vb_Sandbox::handleMode('vb_close');
+check('rotation session closed', !isset(GLPE_Vb_Sandbox::$storeShim[$tok32]));
+GLPE_Vb_Sandbox::$storeShim = null;
+
+// 32c. the sandbox surface ships the touch classifier + keyboard relay
+$vbsSrc32 = (string)file_get_contents($root . '/glpe-viewer/includes/vb-sandbox.js');
+check('touch gestures branch off the pointer pipeline', strpos($vbsSrc32, "e.pointerType === 'touch'") !== false && strpos($vbsSrc32, 'function touchStart') !== false);
+check('taps ride as press+release through the host', strpos($vbsSrc32, "push({ t: 'dn', x: p.x, y: p.y, b: 'left' })") !== false);
+check('long-press rides as the context-click gesture', strpos($vbsSrc32, "push({ t: 'rc', x: tPtr.x, y: tPtr.y })") !== false);
+check('double taps ride as the dblclick gesture', strpos($vbsSrc32, "push({ t: 'db', x: p.x, y: p.y })") !== false);
+check('pans fold into ONE wheel gesture per round trip, negated like native touch', strpos($vbsSrc32, 'pushPan') !== false && strpos($vbsSrc32, 'dx: Math.round(-panAccX), dy: Math.round(-panAccY)') !== false);
+check('released fast pans keep their momentum (fling)', strpos($vbsSrc32, 'function startFling') !== false);
+check('the on-screen keyboard relay field exists at 16px (no iOS zoom)', strpos($vbsSrc32, '__glpe_vbs_kbd') !== false && strpos($vbsSrc32, 'font-size:16px') !== false);
+check('arming the keyboard happens within the user gesture', strpos($vbsSrc32, 'armKeyboard()') !== false && strpos($vbsSrc32, 'kbdBtn') !== false);
+check('typing from the keyboard relay rides as host-first text', strpos($vbsSrc32, "push({ t: 'tx', v: v.slice(kbdPrev.length).slice(0, 400), p: 0 })") !== false);
+check('relay deletions ride as Backspace key gestures', strpos($vbsSrc32, "push({ t: 'kd', key: 'Backspace', code: 'Backspace', vk: 8, text: '', mods: 0 })") !== false);
+check('the focus reclaim never closes a live device keyboard', strpos($vbsSrc32, "!(kbdInput && document.activeElement === kbdInput)") !== false);
+check('touch targets grow to the 44px phone standard', strpos($vbsSrc32, 'height:44px;min-width:44px;') !== false);
+check('the resize gesture rides the host and reflows the live frame', strpos($vbsSrc32, 'queueViewportSync') !== false && strpos($vbsSrc32, "push({ t: 'rs', w: w, h: h })") !== false && strpos($vbsSrc32, "case 'rs':") !== false);
+check('a native dblclick trailing finger taps never rides twice', strpos($vbsSrc32, 'tPtr || tSecond || (lastTap && Date.now() - lastTap.t < 600)') !== false);
+check('the phone footer compacts to a single line', strpos($vbsSrc32, 'footCompact') !== false);
+check('the echo never steals focus from the armed keyboard relay', strpos($vbsSrc32, 'if (!(kbdInput && document.activeElement === kbdInput)) {') !== false);
+
+// 32d. the service surface carries the same phone layer
+$vbcSrc32 = (string)file_get_contents($root . '/glpe-viewer/includes/vb-client.js');
+check('service surface classifies touch gestures too', strpos($vbcSrc32, "e.pointerType === 'touch'") !== false && strpos($vbcSrc32, 'function touchStart') !== false);
+check('service long-press rides as right-button press+release', strpos($vbcSrc32, "send({ t: 'down', x: tPtr.x, y: tPtr.y, b: 'right' })") !== false);
+check('service double taps ride as the dbl message', strpos($vbcSrc32, "send({ t: 'dbl', x: p.x, y: p.y })") !== false);
+check('service pans ride as batched wheel messages', strpos($vbcSrc32, "send({ t: 'wheel'") !== false && strpos($vbcSrc32, 'panAccX') !== false);
+check('service keyboard relay opens via the kbd toggle and rides text messages', strpos($vbcSrc32, '__glpe_vb_kbd') !== false && strpos($vbcSrc32, "send({ t: 'text'") !== false && strpos($vbcSrc32, 'armKeyboard') !== false);
+check('service rotation asks the renderer for a matching viewport', strpos($vbcSrc32, "send({ t: 'size', w: w, h: h })") !== false);
+check('service touch targets grow to the 44px phone standard', strpos($vbcSrc32, 'width:44px;height:44px;') !== false);
+check('service phone footer compacts to a single line', strpos($vbcSrc32, 'footCompact') !== false);
+
+// 32e. the renderer service understands the dbl message
+$vbsvcSrc32 = (string)file_get_contents($root . '/glpe-viewer/vb/vb-service.js');
+check('renderer replays double taps with clickCount 2 (native dblclick)', strpos($vbsvcSrc32, "case 'dbl':") !== false && strpos($vbsvcSrc32, 'dbl(params)') !== false && strpos($vbsvcSrc32, 'clickCount: 2') !== false);
+
+// 32f. version + release markers
+$mainSrc32 = (string)file_get_contents($root . '/glpe-viewer/glpe-viewer.php');
+$readme32 = (string)file_get_contents($root . '/glpe-viewer/readme.txt');
+$readmeMd32 = (string)file_get_contents($root . '/README.md');
+check('main file version bumped to 7.5.0', substr_count($mainSrc32, '7.5.0') >= 2);
+check('readme stable tag is 7.5.0', strpos($readme32, 'Stable tag: 7.5.0') !== false);
+check('readme carries the 7.5.0 changelog entry', strpos($readme32, '= 7.5.0 =') !== false);
+check('README carries the v7.5.0 feature bullet', strpos($readmeMd32, 'v7.5.0') !== false);
+check('launcher URL fields sit at 16px so iOS never zooms', substr_count($mainSrc32, 'font-size: 16px; font-family: monospace') === 2);
+
+// 32g. the changed surfaces stay scanner-clean
+$hits32 = 0;
+foreach ([$vbsSrc32, $vbcSrc32, $vbsvcSrc32, $mainSrc32, (string)file_get_contents($root . '/glpe-viewer/includes/VbSandbox.php')] as $src32) { if (preg_match('#' . $guardPattern . '#i', $src32)) { $hits32++; } }
+check('phone-optimization surfaces carry no scanner-flagged strings', $hits32 === 0);
 
 
 echo "\n== RESULT: $pass passed, $fail failed ==\n";
