@@ -455,6 +455,49 @@ class VBSession {
     }
   }
 
+  // v7.6.0 — the long-press drag-select flow from the touch classifier.
+  // The visitor's finger cannot be hit-tested client-side (the picture is
+  // all it has), so the long-press asks THE RENDERER whether the point sits
+  // on ground text: a yes replays a held double-click press (Chromium
+  // word-selects AND keeps the button down — the finger drag then extends
+  // the selection, exactly a native phone), a no answers 'selno' and the
+  // client falls back to the classic right-click pair (the site's own
+  // contextmenu).
+  async selstart(params) {
+    const x = clampInt(params.x, 0, 100000, 0);
+    const y = clampInt(params.y, 0, 100000, 0);
+    if (!this.cdp) return;
+    let isText = false;
+    try {
+      const r = await this.cdp.send('Runtime.evaluate', {
+        expression: `(function(){try{var t=document.elementFromPoint(${x},${y});if(!t)return false;if(t.closest&&t.closest('a[href]'))return false;if(/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)||t.isContentEditable)return false;if(typeof document.caretRangeFromPoint!=='function')return false;var c=document.caretRangeFromPoint(${x},${y});if(!c||!c.startContainer||c.startContainer.nodeType!==3)return false;if(!t.contains(c.startContainer))return false;return String(c.startContainer.data||'').trim()!==''}catch(e){return false}})()`,
+        returnByValue: true,
+      });
+      isText = !!(r && r.result && r.result.value);
+    } catch (e) { /* page busy — treat as no-text */ }
+    if (!isText) {
+      this.safeSend({ t: 'selno', x, y });
+      return;
+    }
+    this.cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 2, buttons: 1 }).catch(() => {});
+  }
+
+  selmove(params) {
+    const x = clampInt(params.x, 0, 100000, 0);
+    const y = clampInt(params.y, 0, 100000, 0);
+    if (this.cdp) {
+      this.cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y, button: 'left', buttons: 1 }).catch(() => {});
+    }
+  }
+
+  selend(params) {
+    const x = clampInt(params.x, 0, 100000, 0);
+    const y = clampInt(params.y, 0, 100000, 0);
+    if (this.cdp) {
+      this.cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 2, buttons: 0 }).catch(() => {});
+    }
+  }
+
   key(params) {
     const ev = {
       type: params.a === 'up' ? 'keyUp' : 'keyDown',
@@ -561,6 +604,18 @@ async function handleClientMessage(ws, session, raw) {
 
     case 'dbl':
       session.dbl(msg);
+      return;
+
+    case 'selstart':
+      session.selstart(msg).catch(() => {});
+      return;
+
+    case 'selmove':
+      session.selmove(msg);
+      return;
+
+    case 'selend':
+      session.selend(msg);
       return;
 
     case 'key':

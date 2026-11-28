@@ -1789,7 +1789,7 @@ check('start notices wired', strpos($mainSrc25, 'vb-started') !== false && strpo
 // historical 7.0.0 changelog entry stays below)
 check('main file still carries the 7.0.0 heritage marker', substr_count($mainSrc25, '7.0.0') >= 1);
 $readme25 = $readme24;
-check('readme stable tag follows the current release (7.5.0)', strpos($readme25, 'Stable tag: 7.5.0') !== false);
+check('readme stable tag follows the current release (7.6.0)', strpos($readme25, 'Stable tag: 7.6.0') !== false);
 check('readme carries the 7.0.0 changelog entry', strpos($readme25, '= 7.0.0 =') !== false && strpos($readme25, 'مرورگر مجازی') !== false);
 
 // 25i. everything the shipped zip needs stays scanner-clean
@@ -2035,7 +2035,7 @@ $uninstall26 = (string)file_get_contents($root . '/glpe-viewer/uninstall.php');
 check('uninstall reaps sandbox sessions and engine options', strpos($uninstall26, 'glpe_vb_engine') !== false && strpos($uninstall26, "delete_transient('glpe_vbs_'") !== false && strpos($uninstall26, 'glpe_vb_vbs_index') !== false && strpos($uninstall26, 'glpe_vb_key') !== false);
 check('main file version bumped to 7.1.0', substr_count($mainSrc26, '7.1.0') >= 2);
 $readme26 = (string)file_get_contents($root . '/glpe-viewer/readme.txt');
-check('readme stable tag is 7.5.0', strpos($readme26, 'Stable tag: 7.5.0') !== false);
+check('readme stable tag is 7.6.0', strpos($readme26, 'Stable tag: 7.6.0') !== false);
 check('readme carries the 7.1.0 changelog entry', strpos($readme26, '= 7.1.0 =') !== false && strpos($readme26, 'موتور جعبه‌ای') !== false);
 
 // 26n. everything the shipped zip needs stays scanner-clean
@@ -2223,9 +2223,9 @@ check('purge notice wired', strpos($mainSrc28, 'res-purged') !== false);
 // 28j. uninstall + version markers
 check('uninstall reaps the cache option and directory', strpos($uninstall28, "'glpe_res_cache'") !== false && strpos($uninstall28, 'glpe-res-cache') !== false);
 check('main file version bumped to 7.3.0', substr_count($mainSrc28, '7.3.0') >= 2);
-check('readme stable tag is 7.5.0', strpos($readme27, 'Stable tag: 7.5.0') !== false);
+check('readme stable tag is 7.6.0', strpos($readme27, 'Stable tag: 7.6.0') !== false);
 check('readme carries the 7.3.0 changelog entry', strpos($readme27, '= 7.3.0 =') !== false);
-check('README badge and feature bullet updated', strpos($readmeMd27, 'version-7.4.0-blue') !== false && strpos($readmeMd27, 'v7.4.0') !== false);
+check('README badge and feature bullets updated', strpos($readmeMd27, 'version-7.6.0-blue') !== false && strpos($readmeMd27, 'v7.4.0') !== false);
 
 // 28k. the new surface stays scanner-clean
 $ship28 = [$resSrc28, $mainSrc28, $engineSrc28, $uninstall28];
@@ -2492,7 +2492,7 @@ check('uninstall reaps the session and cache tuning options', strpos($uninstall2
 
 // 31l. version + release markers
 check('main file version bumped to 7.4.0', substr_count($mainSrc28, '7.4.0') >= 2);
-check('readme stable tag is 7.5.0', strpos($readme27, 'Stable tag: 7.5.0') !== false);
+check('readme stable tag is 7.6.0', strpos($readme27, 'Stable tag: 7.6.0') !== false);
 check('readme carries the 7.4.0 changelog entry', strpos($readme27, '= 7.4.0 =') !== false);
 check('README carries the v7.4.0 feature bullets', substr_count($readmeMd27, 'v7.4.0') >= 3);
 
@@ -2571,7 +2571,7 @@ check('the echo never steals focus from the armed keyboard relay', strpos($vbsSr
 // 32d. the service surface carries the same phone layer
 $vbcSrc32 = (string)file_get_contents($root . '/glpe-viewer/includes/vb-client.js');
 check('service surface classifies touch gestures too', strpos($vbcSrc32, "e.pointerType === 'touch'") !== false && strpos($vbcSrc32, 'function touchStart') !== false);
-check('service long-press rides as right-button press+release', strpos($vbcSrc32, "send({ t: 'down', x: tPtr.x, y: tPtr.y, b: 'right' })") !== false);
+check('service long-press asks the renderer and rides the right-click pair on non-text (v7.6.0 shape)', strpos($vbcSrc32, "send({ t: 'selstart', x: tPtr.x, y: tPtr.y })") !== false && strpos($vbcSrc32, "send({ t: 'down', x: msg.x, y: msg.y, b: 'right' })") !== false);
 check('service double taps ride as the dbl message', strpos($vbcSrc32, "send({ t: 'dbl', x: p.x, y: p.y })") !== false);
 check('service pans ride as batched wheel messages', strpos($vbcSrc32, "send({ t: 'wheel'") !== false && strpos($vbcSrc32, 'panAccX') !== false);
 check('service keyboard relay opens via the kbd toggle and rides text messages', strpos($vbcSrc32, '__glpe_vb_kbd') !== false && strpos($vbcSrc32, "send({ t: 'text'") !== false && strpos($vbcSrc32, 'armKeyboard') !== false);
@@ -2587,8 +2587,8 @@ check('renderer replays double taps with clickCount 2 (native dblclick)', strpos
 $mainSrc32 = (string)file_get_contents($root . '/glpe-viewer/glpe-viewer.php');
 $readme32 = (string)file_get_contents($root . '/glpe-viewer/readme.txt');
 $readmeMd32 = (string)file_get_contents($root . '/README.md');
-check('main file version bumped to 7.5.0', substr_count($mainSrc32, '7.5.0') >= 2);
-check('readme stable tag is 7.5.0', strpos($readme32, 'Stable tag: 7.5.0') !== false);
+check('main file still records the phone-optimization heritage (7.5.0)', substr_count($mainSrc32, '7.5.0') >= 1);
+check('readme stable tag is 7.6.0', strpos($readme32, 'Stable tag: 7.6.0') !== false);
 check('readme carries the 7.5.0 changelog entry', strpos($readme32, '= 7.5.0 =') !== false);
 check('README carries the v7.5.0 feature bullet', strpos($readmeMd32, 'v7.5.0') !== false);
 check('launcher URL fields sit at 16px so iOS never zooms', substr_count($mainSrc32, 'font-size: 16px; font-family: monospace') === 2);
@@ -2598,6 +2598,71 @@ $hits32 = 0;
 foreach ([$vbsSrc32, $vbcSrc32, $vbsvcSrc32, $mainSrc32, (string)file_get_contents($root . '/glpe-viewer/includes/VbSandbox.php')] as $src32) { if (preg_match('#' . $guardPattern . '#i', $src32)) { $hits32++; } }
 check('phone-optimization surfaces carry no scanner-flagged strings', $hits32 === 0);
 
+
+echo "\n== 33. Virtual Browser v7.6.0 — phone polish (touch text selection, double-tap zoom, wide viewport profile) ==\n";
+
+// 33a. the zoom marker joins the double-click shape
+$z33 = GLPE_Vb_Sandbox::normalizeEvents([
+    ['t' => 'db', 'x' => 10, 'y' => 20, 'z' => 1],
+    ['t' => 'db', 'x' => 10, 'y' => 20],
+    ['t' => 'db', 'x' => 10, 'y' => 20, 'z' => '0'],
+    ['t' => 'rc', 'x' => 10, 'y' => 20, 'z' => 1],
+], 800, 600);
+check('zoom double taps keep their marker through the host', is_array($z33[0]) && isset($z33[0]['z']) && (int)$z33[0]['z'] === 1);
+check('plain double taps default the marker to zero', isset($z33[1]['z']) && (int)$z33[1]['z'] === 0);
+check('falsy markers ("0", 0, "") collapse to zero', isset($z33[2]['z']) && (int)$z33[2]['z'] === 0);
+check('right-clicks stay position-only (no marker noise)', is_array($z33[3]) && !isset($z33[3]['z']));
+
+// 33b. the sandbox surface — the drag-select flow and its ride
+$vbsSrc33 = (string)file_get_contents($root . '/glpe-viewer/includes/vb-sandbox.js');
+check('ground-text probe distinguishes text from links and editables', strpos($vbsSrc33, 'function textAt') !== false && strpos($vbsSrc33, "t.closest('a[href]')") !== false && strpos($vbsSrc33, 'caretRangeFromPoint') !== false);
+check('long-press on ground text rides press + double-click (the word-select)', strpos($vbsSrc33, "tPtr.mode = 'sel'") !== false && strpos($vbsSrc33, "push({ t: 'dn', x: tPtr.x, y: tPtr.y, b: 'left' });") !== false && strpos($vbsSrc33, "push({ t: 'db', x: tPtr.x, y: tPtr.y })") !== false);
+check('the selection drag rides as mouse moves', strpos($vbsSrc33, "tPtr.mode === 'seldrag'") !== false);
+check('the release opens the surface copy menu over the selection', strpos($vbsSrc33, "g.mode === 'sel' || g.mode === 'seldrag'") !== false && strpos($vbsSrc33, 'showVbMenu(p.x, p.y)') !== false);
+check('a word-select carries the selection edge for the drag to extend', strpos($vbsSrc33, 'dragSel = { node: node, off: e };') !== false);
+check('canceled or voided selections still release the press', substr_count($vbsSrc33, "g.mode === 'sel' || g.mode === 'seldrag'") === 3);
+check('a ground-text drag BEFORE the long-press timer still pans', strpos($vbsSrc33, "mode: editable ? 'edit' : (txt ? 'txt' : null)") !== false);
+
+// 33c. the sandbox surface — zoom + the wide viewport profile
+check('double taps on non-editable ground toggle the visual zoom', strpos($vbsSrc33, 'function toggleZoom') !== false && strpos($vbsSrc33, 'zoomZ = zoomZ > 1 ? 1 : 2;') !== false);
+check('the zoom ride carries the marker so the echo leaves the ground unselected', strpos($vbsSrc33, "push({ t: 'db', x: p.x, y: p.y, z: 1 })") !== false && strpos($vbsSrc33, 'if (!ev.z) selectWordAt(fp.x, fp.y);') !== false);
+check('the zoom anchors the transform at the tap point', strpos($vbsSrc33, 'function frameVisual') !== false && strpos($vbsSrc33, 'elm.style.transformOrigin') !== false);
+check('the wide detector gates on device-width viewport and real overflow', strpos($vbsSrc33, 'function detectViewportProfile') !== false && strpos($vbsSrc33, '/device-width/i.test(content)') !== false && strpos($vbsSrc33, 'scrollW > inner + 80') !== false);
+check('the adoption rides one more resize gesture through the host', strpos($vbsSrc33, "push({ t: 'rs', w: wideW, h: wideH })") !== false && strpos($vbsSrc33, 'vwAdopting') !== false);
+check('the adoption echo keeps the profile while a rotation resets it', strpos($vbsSrc33, 'if (vwAdopting) {') !== false && strpos($vbsSrc33, 'vwT = setTimeout(detectViewportProfile, 600);') !== false);
+check('the wide fitFrame branch holds the full session geometry', strpos($vbsSrc33, 'frameVisual(frame, sessW, sessH)') !== false);
+check('pixel-mode picture and input mapping share one visual transform', strpos($vbsSrc33, 'frameVisual(pixelCanvas, fw, fh);') !== false);
+check('a soft keyboard never rides as a rotation (height-only shrink)', strpos($vbsSrc33, 'rawH - lastStageH > 140') !== false && strpos($vbsSrc33, 'lastStageW') !== false);
+check('navigation and fresh loads drop stale zoom/profile state', substr_count($vbsSrc33, 'vwWide = false; vwAdopting = false;') >= 3);
+
+// 33d. the service surface + the renderer's selection vocabulary
+$vbcSrc33 = (string)file_get_contents($root . '/glpe-viewer/includes/vb-client.js');
+$vbsvcSrc33 = (string)file_get_contents($root . '/glpe-viewer/vb/vb-service.js');
+check('service double taps magnify the picture around the tap', strpos($vbcSrc33, 'function toggleZoom') !== false && strpos($vbcSrc33, 'function canvasVisual') !== false);
+check('a resized renderer viewport drops the stale magnification', strpos($vbcSrc33, 'resetZoom(); // the renderer moved to a new viewport') !== false);
+check('the selno answer falls back to the classic right-click pair', strpos($vbcSrc33, "case 'selno':") !== false && strpos($vbcSrc33, "send({ t: 'down', x: msg.x, y: msg.y, b: 'right' })") !== false);
+check('selection drags ride as selmove and end with selend', strpos($vbcSrc33, "send({ t: 'selmove', x: p.x, y: p.y })") !== false && strpos($vbcSrc33, "send({ t: 'selend', x: p.x, y: p.y })") !== false);
+check('a canceled service selection still releases the held press', substr_count($vbcSrc33, "send({ t: 'selend', x: tPtr.x, y: tPtr.y })") === 2);
+check('a service soft keyboard never rides as a rotation', strpos($vbcSrc33, 'rawH - lastStageH > 140') !== false);
+check('the renderer probes ground text through its own DOM', strpos($vbsvcSrc33, 'async selstart(params)') !== false && strpos($vbsvcSrc33, 'elementFromPoint') !== false);
+check('a text hit replays a HELD double-click press (word-select + drag)', strpos($vbsvcSrc33, "type: 'mousePressed', x, y, button: 'left', clickCount: 2, buttons: 1") !== false);
+check('selection moves extend with the button held', strpos($vbsvcSrc33, "type: 'mouseMoved', x, y, button: 'left', buttons: 1") !== false);
+check('the release ends the held press', strpos($vbsvcSrc33, "type: 'mouseReleased', x, y, button: 'left', clickCount: 2, buttons: 0") !== false);
+check('the renderer service wires the three selection messages', strpos($vbsvcSrc33, "case 'selstart':") !== false && strpos($vbsvcSrc33, "case 'selmove':") !== false && strpos($vbsvcSrc33, "case 'selend':") !== false);
+
+// 33e. version + release markers
+$mainSrc33 = (string)file_get_contents($root . '/glpe-viewer/glpe-viewer.php');
+$readme33 = (string)file_get_contents($root . '/glpe-viewer/readme.txt');
+$readmeMd33 = (string)file_get_contents($root . '/README.md');
+check('main file version bumped to 7.6.0', substr_count($mainSrc33, '7.6.0') >= 3);
+check('readme stable tag is 7.6.0', strpos($readme33, 'Stable tag: 7.6.0') !== false);
+check('readme carries the 7.6.0 changelog entry', strpos($readme33, '= 7.6.0 =') !== false);
+check('README carries the v7.6.0 feature bullet', strpos($readmeMd33, 'v7.6.0') !== false);
+
+// 33f. the changed surfaces stay scanner-clean
+$hits33 = 0;
+foreach ([$vbsSrc33, $vbcSrc33, $vbsvcSrc33, $mainSrc33, (string)file_get_contents($root . '/glpe-viewer/includes/VbSandbox.php')] as $src33) { if (preg_match('#' . $guardPattern . '#i', $src33)) { $hits33++; } }
+check('phone-polish surfaces carry no scanner-flagged strings', $hits33 === 0);
 
 echo "\n== RESULT: $pass passed, $fail failed ==\n";
 exit($fail > 0 ? 1 : 0);

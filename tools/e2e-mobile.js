@@ -1,5 +1,5 @@
 /**
- * E2E — v7.5.0 phone optimization of the virtual browser (sandbox engine).
+ * E2E — v7.6.0 phone polish of the virtual browser (sandbox engine).
  *
  * Runs a REAL iPhone-14 emulation (touch included) against the WP rig on
  * :3001 with the destination test site on :3005, and verifies the whole
@@ -7,18 +7,28 @@
  *   1. mobile layout (44px targets, 16px fields, kbd toggle, short note)
  *   2. tap          → press+release ride the host → destination click counter
  *   3. pan          → finger deltas fold into wheel gestures → page scrolls
- *   4. long-press   → context click rides the host → surface menu opens
- *   5. double tap   → dblclick rides → word selection in the frame
+ *   4. long-press   → context click rides the host (non-text ground) →
+ *                    the surface menu + the site's own contextmenu
+ *   5. double tap   → the viewport MAGNIFIES 2× around the tap (the zoom-
+ *                    flagged dblclick rides for the site's handlers; a
+ *                    second double tap restores) — v7.6.0
+ *   5b. long-press on ground TEXT → press + double-click ride (the word
+ *                    selects) → the finger drag extends the selection →
+ *                    the release opens the surface copy menu — v7.6.0
  *   6. keyboard     → tap on the field arms the relay → typing rides as
  *                    text through the host → the destination input updates
  *   7. rotation     → the resize gesture rides the host → frame adopts the
  *                    new geometry
+ *   7b. wide profile → a desktop-shaped destination (no device-width
+ *                    viewport, horizontal overflow) adopts the wide
+ *                    geometry through one more host ride — v7.6.0
  *   8. zero console/page errors through the whole run
  */
 const { chromium, devices } = require('playwright');
 
 const BASE = 'http://localhost:3001';
 const DEST = 'http://127.0.0.1.nip.io:3005/';
+const DEST_WIDE = 'http://127.0.0.1.nip.io:3005/wide.html';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;
@@ -104,8 +114,12 @@ function check(name, ok, detail) {
     return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
   });
   const wordBox = await frame.evaluate(() => {
-    const r = document.getElementById('p1').getBoundingClientRect();
+    const r = document.getElementById('bigsel').getBoundingClientRect();
     return { x: r.left + r.width / 3, y: r.top + r.height / 2 };
+  });
+  const groundBox = await frame.evaluate(() => {
+    const r = document.getElementById('ground').getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
   });
   // frame pixel → page pixel (frame is scaled to fit; ratio 1 on a phone)
   const toPage = (p) => ({
@@ -115,6 +129,7 @@ function check(name, ok, detail) {
   const counterPt = toPage(counterBox);
   const inputPt = toPage(inputBox);
   const wordPt = toPage(wordBox);
+  const groundPt = toPage(groundBox);
 
   async function touchTap(x, y) {
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
@@ -159,9 +174,16 @@ function check(name, ok, detail) {
   }
   await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   await sleep(3000);
+  // deterministic reset: the fling strength is nondeterministic — scroll the
+  // destination straight back to the top so every later fixed-coordinate
+  // gesture (menu/zoom/selection/field) lands where its box was captured.
+  await frame.evaluate(() => window.scrollTo(0, 0));
+  await sleep(600);
 
-  // --- 4. long-press → context click → the surface's own menu --------------
-  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: counterPt.x, y: counterPt.y }] });
+  // --- 4. long-press on non-text ground → context click → the menu ------
+  // (a text-bearing spot long-presses into a word SELECTION now — 5b —
+  // so the classic menu rides from a text-less zone)
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: groundPt.x, y: groundPt.y }] });
   await sleep(700); // longer than the 470ms classifier timer
   await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   await sleep(1500);
@@ -174,15 +196,57 @@ function check(name, ok, detail) {
   // the destination saw the synthetic contextmenu too (journal + replay)
   const ctxCount = await frame.evaluate(() => document.getElementById('ctxlog').textContent);
   check('destination received the replayed contextmenu', ctxCount.indexOf('context: 1') !== -1, ctxCount);
+  // dismiss the open menu deterministically — it floats ABOVE the capture
+  // layer where it sits and would eat later gestures at that spot.
+  await page.evaluate(() => { const m = document.getElementById('__glpe_vbs_menu'); if (m) m.remove(); });
+  await sleep(200);
 
-  // --- 5. double tap → dblclick rides → word selection ---------------------
+  // --- 5. double tap → the viewport magnifies 2× around the tap (v7.6.0) --
   await touchTap(wordPt.x, wordPt.y);
   await sleep(150); // inside the 330ms double-tap window
   await touchTap(wordPt.x, wordPt.y);
-  await sleep(2200);
-  const selText = await frame.evaluate(() => String(window.getSelection()));
-  check('double tap selects the word under the finger', selText.length > 0 && selText.length < 12,
-    JSON.stringify(selText));
+  await sleep(1400); // the zoom-flagged dblclick rides the host round trip
+  const zoomState = await page.evaluate(() => {
+    const f = document.querySelector('#__glpe_vbs_root iframe');
+    return { tr: getComputedStyle(f).transform, w: Math.round(f.getBoundingClientRect().width) };
+  });
+  check('double tap magnifies the sandbox viewport 2×', zoomState.tr === 'matrix(2, 0, 0, 2, 0, 0)',
+    'transform=' + zoomState.tr + ' rect=' + zoomState.w + 'px');
+  const zoomSel = await frame.evaluate(() => String(window.getSelection()));
+  check('a zoom-flagged double tap leaves the ground unselected', zoomSel === '', JSON.stringify(zoomSel));
+  // restore the viewport for the following tests (a second double tap)
+  await touchTap(wordPt.x, wordPt.y);
+  await sleep(150);
+  await touchTap(wordPt.x, wordPt.y);
+  await sleep(900);
+  const zoomBack = await page.evaluate(() => getComputedStyle(document.querySelector('#__glpe_vbs_root iframe')).transform);
+  check('a second double tap restores the unmagnified viewport', zoomBack === 'none', zoomBack);
+
+  // --- 5b. long-press on ground text → word-select rides, drag extends ------
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: wordPt.x, y: wordPt.y }] });
+  await sleep(700);  // the long-press fires: press + double-click ride
+  await sleep(2600); // ...and replay through the host (the word selects)
+  const wordSel = await frame.evaluate(() => String(window.getSelection()));
+  check('long-press on ground text selects the word under the finger', wordSel.length > 0 && wordSel.length < 12,
+    JSON.stringify(wordSel));
+  for (let i = 1; i <= 8; i++) {
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: wordPt.x + i * 22, y: wordPt.y }] });
+    await sleep(40);
+  }
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await sleep(3600); // the moves + the release ride and replay
+  const dragSel = await frame.evaluate(() => String(window.getSelection()));
+  check('the finger drag extends the selection across the words', dragSel.length > wordSel.length,
+    JSON.stringify(wordSel) + ' → ' + JSON.stringify(dragSel.slice(0, 44)));
+  const selMenu = await page.evaluate(() => {
+    const m = document.getElementById('__glpe_vbs_menu');
+    return { menu: !!m, txt: m ? m.textContent : '' };
+  });
+  check('the release opens the surface copy menu over the selection',
+    selMenu.menu && selMenu.txt.indexOf('کپی') !== -1, selMenu.txt.slice(0, 50));
+  if (selMenu.menu) {
+    await page.evaluate(() => { document.getElementById('__glpe_vbs_menu').remove(); });
+  }
 
   // --- 6. keyboard relay: tap the field, type, text rides the host --------
   await touchTap(inputPt.x, inputPt.y);
@@ -210,12 +274,44 @@ function check(name, ok, detail) {
   check('rotation adopts the new geometry through the host', frameAfterRotate.w !== frameWBefore,
     frameWBefore + ' → ' + frameAfterRotate.w + ' x ' + frameAfterRotate.h);
 
-  await page.screenshot({ path: '/home/z/my-project/wordpress-glpe/docs/vb-mobile-touch-v750.png' });
+  await page.screenshot({ path: '/home/z/my-project/wordpress-glpe/docs/vb-mobile-touch-v760.png' });
 
   // --- 8. close + errors ----------------------------------------------------
   await page.evaluate(() => { document.getElementById('__glpe_vbs_root').querySelector('button').click(); });
   await sleep(800);
   check('closing tears the overlay down', await page.evaluate(() => !document.getElementById('__glpe_vbs_root')));
+
+  // --- 7b. the wide viewport profile on a desktop-shaped destination -------
+  await page.setViewportSize({ width: 390, height: 844 }); // back to portrait
+  await sleep(700);
+  await page.fill('#glpe-vb-url', DEST_WIDE);
+  await page.click('.glpe-vbs-open');
+  await page.waitForSelector('#__glpe_vbs_root', { timeout: 20000 });
+  await page.waitForFunction(() => {
+    const s = document.getElementById('__glpe_vbs_status');
+    return s && (s.textContent.indexOf('بارگذاری شد') !== -1);
+  }, null, { timeout: 30000 });
+  await sleep(3500); // the detector (450ms) + the rs ride + the echo settle
+  const wideState = await page.evaluate(() => {
+    const f = document.querySelector('#__glpe_vbs_root iframe');
+    return {
+      styleW: parseInt(f.style.width, 10) || 0,
+      tr: getComputedStyle(f).transform,
+      rectW: Math.round(f.getBoundingClientRect().width)
+    };
+  });
+  const wideInner = await page.evaluate(() => {
+    try { return document.querySelector('#__glpe_vbs_root iframe').contentWindow.innerWidth; } catch (e) { return 0; }
+  });
+  check('the desktop-shaped destination adopts the wide session geometry', wideState.styleW >= 1000,
+    'style.width=' + wideState.styleW + 'px');
+  check('the wide frame shrinks visually to fit the phone stage',
+    wideState.tr !== 'none' && wideState.rectW <= 390, 'transform=' + wideState.tr + ' rect=' + wideState.rectW + 'px');
+  check('the destination lays out at the wide viewport (innerWidth)', wideInner >= 1000, 'innerWidth=' + wideInner);
+
+  await page.screenshot({ path: '/home/z/my-project/wordpress-glpe/docs/vb-wide-profile-v760.png' });
+  await page.evaluate(() => { document.getElementById('__glpe_vbs_root').querySelector('button').click(); });
+  await sleep(800);
 
   const realErrors = errors.filter((e) => e.indexOf('favicon') === -1);
   check('zero page errors through the whole phone run', realErrors.length === 0,

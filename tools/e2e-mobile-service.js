@@ -135,6 +135,33 @@ function check(name, ok, detail) {
     afterBs.some((s) => s.indexOf('"t":"key"') !== -1 && s.indexOf('Backspace') !== -1),
     JSON.stringify(afterBs.slice(0, 2)));
 
+  // --- long-press on ground TEXT + drag → the selection vocabulary (v7.6.0)
+  // (a held double-click press word-selects in the renderer; the finger
+  // drag extends it as selmove messages; the release ends it with selend).
+  // Runs BEFORE the pan — the big selection paragraph sits at ~72% of the
+  // PRISTINE viewport, and the pan's fling would move it nondeterministically.
+  const sel0 = (await sends()).length;
+  const textPt = px(canvasBox.w * 0.3, canvasBox.h * 0.72); // over the big selection paragraph
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: textPt.x, y: textPt.y }] });
+  await sleep(700); // the long-press fires: selstart rides, the probe answers
+  for (let i = 1; i <= 6; i++) {
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: textPt.x + i * 20, y: textPt.y }] });
+    await sleep(40);
+  }
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await sleep(1500);
+  const selMsgs = (await sends()).slice(sel0);
+  check('long-press on ground text rides selstart (no fallback pair)',
+    selMsgs.some((s) => s.indexOf('"t":"selstart"') !== -1) &&
+    !selMsgs.some((s) => s.indexOf('"b":"right"') !== -1),
+    JSON.stringify(selMsgs.slice(0, 1)));
+  check('the finger drag rides as selection moves',
+    selMsgs.filter((s) => s.indexOf('"t":"selmove"') !== -1).length >= 4,
+    JSON.stringify(selMsgs.filter((s) => s.indexOf('selmove') !== -1).slice(0, 2)));
+  check('the release ends the held selection press',
+    selMsgs.some((s) => s.indexOf('"t":"selend"') !== -1),
+    JSON.stringify(selMsgs.slice(-1)));
+
   // --- pan: wheel messages with negated finger deltas ----------------------
   const pan0 = (await sends()).length;
   const start = px(canvasBox.w / 2, canvasBox.h * 0.7);
@@ -151,18 +178,24 @@ function check(name, ok, detail) {
   check('finger pan rides the renderer as wheel messages (content follows the finger)',
     panMsgs.length >= 1 && negated, JSON.stringify(panMsgs.slice(0, 2)));
 
-  // --- long-press → right-button press+release -----------------------------
+  // --- long-press on an editable → the renderer probe says no text -------
+  // (v7.6.0: selstart rides first, the renderer probes, answers 'selno',
+  // and the classic right-button pair rides from the answer)
   const lp0 = (await sends()).length;
   await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: fieldPt.x, y: fieldPt.y }] });
   await sleep(700);
   await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-  await sleep(1200);
-  const lpMsgs = (await sends()).slice(lp0).filter((s) => s.indexOf('"t":"down"') !== -1 || s.indexOf('"t":"up"') !== -1);
-  check('long-press rides the renderer as right-button press+release',
-    lpMsgs.some((s) => s.indexOf('"b":"right"') !== -1),
+  await sleep(1500);
+  const lpMsgs = (await sends()).slice(lp0);
+  check('long-press asks the renderer about ground text (selstart)',
+    lpMsgs.some((s) => s.indexOf('"t":"selstart"') !== -1),
     JSON.stringify(lpMsgs.slice(0, 2)));
+  check('the non-text answer falls back to the right-button pair',
+    lpMsgs.some((s) => s.indexOf('"t":"down"') !== -1 && s.indexOf('"b":"right"') !== -1) &&
+    lpMsgs.some((s) => s.indexOf('"t":"up"') !== -1 && s.indexOf('"b":"right"') !== -1),
+    JSON.stringify(lpMsgs.slice(1, 4)));
 
-  // --- double tap → the dbl message (clickCount 2) --------------------------
+  // --- double tap → the dbl message + the picture magnifies 2× (v7.6.0) ---
   const dbl0 = (await sends()).length;
   await tap(fieldPt.x, fieldPt.y);
   await sleep(140);
@@ -171,6 +204,19 @@ function check(name, ok, detail) {
   const dblMsgs = (await sends()).slice(dbl0).filter((s) => s.indexOf('"t":"dbl"') !== -1);
   check('double tap rides the renderer as the dbl message (native dblclick)',
     dblMsgs.length === 1, JSON.stringify(dblMsgs));
+  const zState = await page.evaluate(() => {
+    const c = document.querySelector('#__glpe_vb_root canvas');
+    return c ? getComputedStyle(c).transform : 'no-canvas';
+  });
+  check('double tap magnifies the picture 2× around the tap',
+    zState === 'matrix(2, 0, 0, 2, 0, 0)', 'transform=' + zState);
+  // restore for the rotation test (a second double tap)
+  await tap(fieldPt.x, fieldPt.y);
+  await sleep(140);
+  await tap(fieldPt.x, fieldPt.y);
+  await sleep(900);
+  const zBack = await page.evaluate(() => getComputedStyle(document.querySelector('#__glpe_vb_root canvas')).transform);
+  check('a second double tap restores the unmagnified picture', zBack === 'none', zBack);
 
   // --- rotation → the size message ------------------------------------------
   const size0 = (await sends()).length;
@@ -182,7 +228,7 @@ function check(name, ok, detail) {
 
   // --- the picture actually reflects the typed text + scroll (VLM later) ----
   await sleep(1500);
-  await page.screenshot({ path: '/home/z/my-project/wordpress-glpe/docs/vb-mobile-service-v750.png' });
+  await page.screenshot({ path: '/home/z/my-project/wordpress-glpe/docs/vb-mobile-service-v760.png' });
 
   // --- close + errors -------------------------------------------------------
   await page.evaluate(() => { document.getElementById('__glpe_vb_root').querySelector('button').click(); });

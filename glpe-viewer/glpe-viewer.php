@@ -3,7 +3,7 @@
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
  * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با کدگذاری کامل تبادلات، بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 7.5.0
+ * Version: 7.6.0
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '7.5.0');
+define('GLPE_VERSION', '7.6.0');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -108,6 +108,14 @@ if (file_exists(GLPE_DIR . 'includes/VbDl.php')) {
 // the same host-first vocabulary; VbSandbox.php grew the 'rs' (viewport
 // resize) gesture so rotations adopt new sandbox dimensions through the
 // round trip. No new server component: free hosting stays supported.
+// v7.6.0 — phone polish note: long-press on ground text starts a word
+// selection that the finger drag extends (press + double-click ride the
+// host, moves ride as mouse moves); the double tap on non-editable ground
+// magnifies the viewport 2× (a 'z' marker rides with the 'db' event so the
+// echo leaves the ground unselected); desktop-shaped destinations adopt a
+// WIDE session geometry through one more 'rs' ride and shrink visually to
+// fit; and the soft keyboard's height-only shrink never rides as a
+// rotation. Still no new server component.
 // Remote-diagnostics API (v6.3.0): optional by design — a missing file only
 // removes the diag card + endpoint, never the site.
 if (file_exists(GLPE_DIR . 'includes/DiagApi.php')) {

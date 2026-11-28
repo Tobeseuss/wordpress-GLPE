@@ -320,6 +320,9 @@ class GLPE_Vb_Sandbox {
      * journals them exactly like any other gesture, and the session's own
      * clamp bounds follow so later gestures land in the geometry the
      * visitor actually sees.
+     * v7.6.0 addition: 'db' carries a 'z' marker when the double tap
+     * magnified the sandbox viewport (the echo replays the dblclick for
+     * the site's own handlers but leaves the ground unselected).
      */
     public static function normalizeEvents($events, $w = 1920, $h = 1200) {
         if (!is_array($events)) {
@@ -352,12 +355,21 @@ class GLPE_Vb_Sandbox {
                         'b' => $button];
                     break;
                 case 'rc':
-                case 'db':
-                    // Right-click and double-click carry position only — the
-                    // button is implicit in the shape itself.
-                    $out[] = ['t' => $type,
+                    // Right-click carries position only — the button is
+                    // implicit in the shape itself.
+                    $out[] = ['t' => 'rc',
                         'x' => self::clamp((int)round((float)$ev['x']), 0, max(0, $cw - 1)),
                         'y' => self::clamp((int)round((float)$ev['y']), 0, max(0, $ch - 1))];
+                    break;
+                case 'db':
+                    // Double-click: position plus the 'z' marker (v7.6.0)
+                    // when the double tap magnified the viewport — the echo
+                    // still replays the dblclick for the destination's own
+                    // handlers but leaves the word unselected.
+                    $out[] = ['t' => 'db',
+                        'x' => self::clamp((int)round((float)$ev['x']), 0, max(0, $cw - 1)),
+                        'y' => self::clamp((int)round((float)$ev['y']), 0, max(0, $ch - 1)),
+                        'z' => empty($ev['z']) ? 0 : 1];
                     break;
                 case 'wh':
                     $out[] = ['t' => 'wh',

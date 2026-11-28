@@ -13,6 +13,14 @@
  *   a hidden typing field (⌨ toggle) opens the device keyboard and its
  *   characters travel as text/key messages; touch targets grow to phone
  *   size and a rotation asks the renderer for a new viewport.
+ *
+ * v7.6.0 — phone polish: a double tap magnifies the picture around the
+ *   tap (the dblclick still rides so the renderer's own handlers run) and
+ *   a second double tap restores; a long-press asks the renderer whether
+ *   the finger sits on ground text (selstart/selmove/selend — a held
+ *   double-click press word-selects and the drag extends the selection,
+ *   with a 'selno' fallback to the classic right-click pair); and the
+ *   soft keyboard's height-only shrink never rides as a rotation.
  */
 (function () {
   if (window.__glpe_vb_ui__) return;
@@ -40,6 +48,13 @@
   var panAccX = 0, panAccY = 0, panT = null;
   var flingT = null;
   var rsT = null;
+  // v7.6.0 — the double-tap zoom state (the picture magnifies visually
+  // around the tap; canvasPoint reads the live rect so hit-testing stays
+  // exact under the transform) and the last-seen stage size (the soft
+  // keyboard shrinks the height only — that must never ride as a
+  // rotation).
+  var zoomZ = 1, zoomSx = -1, zoomSy = -1;
+  var lastStageW = 0, lastStageH = 0;
 
   function txt(s) { return document.createTextNode(s); }
 
@@ -231,6 +246,8 @@
     if (panT) { clearTimeout(panT); panT = null; }
     tPtr = null; tSecond = 0; lastTap = null;
     panAccX = 0; panAccY = 0;
+    zoomZ = 1; zoomSx = zoomSy = -1;
+    lastStageW = 0; lastStageH = 0;
     try { if (kbdInput && document.activeElement === kbdInput) kbdInput.blur(); } catch (e) {}
     try { if (ws) ws.close(); } catch (e) {}
     if (root && root.parentNode) root.parentNode.removeChild(root);
@@ -267,6 +284,7 @@
     ws.onopen = function () {
       retries = 0;
       var rect = stageSize();
+      lastStageW = rect.w; lastStageH = rect.h;
       send({ t: 'start', url: url, w: rect.w, h: rect.h });
       setStatus('راه‌اندازی محیط رندر روی میزبان…');
       if (pingTimer) clearInterval(pingTimer);
@@ -304,8 +322,9 @@
 
       case 'started':
         urlInput.value = msg.url && msg.url !== 'about:blank' ? msg.url : currentUrl;
+        resetZoom(); // a fresh renderer viewport drops any stale magnification
         setStatus(TOUCH
-          ? 'نشست فعال — لمس = کلیک — نگه‌داشتن = منو — کشیدن = اسکرول — ⌨ = تایپ'
+          ? 'نشست فعال — لمس = کلیک — نگه‌داشتن روی متن = انتخاب — کشیدن = اسکرول — ⌨ = تایپ'
           : 'نشست فعال — تصویر از میزبان می‌رسد');
         if (!(kbdInput && document.activeElement === kbdInput)) canvas.focus();
         break;
@@ -317,7 +336,20 @@
       case 'nav':
         currentUrl = msg.url || currentUrl;
         urlInput.value = currentUrl;
+        resetZoom(); // a new document drops the stale magnification
         setStatus('صفحه بارگذاری شد' + (msg.title ? ' — ' + msg.title.slice(0, 60) : ''));
+        break;
+
+      case 'selno':
+        // v7.6.0 — the renderer answered that the long-press point is NOT
+        // ground text: the classic right-click pair rides now (the site's
+        // own contextmenu path), and the live tracker becomes the menu
+        // ground so the release never rides a second gesture.
+        if (tPtr && tPtr.mode === 'sel') {
+          tPtr.mode = 'menu';
+        }
+        send({ t: 'down', x: msg.x, y: msg.y, b: 'right' });
+        send({ t: 'up', x: msg.x, y: msg.y, b: 'right' });
         break;
 
       case 'pong':
@@ -351,6 +383,7 @@
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
       canvas.height = h;
+      resetZoom(); // the renderer moved to a new viewport — magnification restarts
       fitCanvas();
     }
     var img = new Image();
@@ -403,6 +436,39 @@
     var k = Math.min(sw / canvas.width, sh / canvas.height);
     canvas.style.width = Math.floor(canvas.width * k) + 'px';
     canvas.style.height = Math.floor(canvas.height * k) + 'px';
+    canvasVisual();
+  }
+
+  // v7.6.0 — the double-tap zoom: the picture magnifies visually around
+  // the tap (a CSS transform on the canvas element — canvasPoint() reads
+  // the live rect, so hit-testing stays exact under it and pan deltas ride
+  // through the same rect, which keeps the content following the finger).
+  function canvasVisual() {
+    if (!canvas) return;
+    if (zoomZ > 1 && zoomSx >= 0 && canvas.width && canvas.height) {
+      var cssW = parseFloat(canvas.style.width) || canvas.width;
+      var cssH = parseFloat(canvas.style.height) || canvas.height;
+      canvas.style.transformOrigin = Math.round((zoomSx / canvas.width) * cssW) + 'px ' +
+        Math.round((zoomSy / canvas.height) * cssH) + 'px';
+      canvas.style.transform = 'scale(' + zoomZ + ')';
+    } else {
+      canvas.style.transform = '';
+      canvas.style.transformOrigin = '';
+    }
+  }
+
+  function resetZoom() {
+    zoomZ = 1; zoomSx = zoomSy = -1;
+    canvasVisual();
+  }
+
+  function toggleZoom(px, py) {
+    zoomZ = zoomZ > 1 ? 1 : 2;
+    zoomSx = px; zoomSy = py;
+    canvasVisual();
+    setStatus(zoomZ > 1
+      ? 'بزرگ‌نمایی ۲× — دوباره دوبار ضربه بزنید تا برداشته شود'
+      : 'بزرگ‌نمایی برداشته شد');
   }
 
   window.addEventListener('resize', function () {
@@ -413,6 +479,10 @@
   // A significantly resized stage (rotation, fold) asks the host renderer
   // for a matching viewport — the same 'size' message the desktop sends at
   // start, now kept honest for the whole phone session.
+  // v7.6.0 — the soft keyboard only SHRINKS the stage's height; that is
+  // not a geometry change worth a host ride (a collapsed viewport would
+  // fold the picture mid-typing). Only a WIDTH change (rotation) or a
+  // GROWN height (keyboard closed, fold opened) rides.
   function queueViewportSync() {
     if (!root || closing) return;
     if (rsT) clearTimeout(rsT);
@@ -422,11 +492,13 @@
       var stage = root.childNodes[1];
       if (!stage) return;
       var r = stage.getBoundingClientRect();
-      var w = Math.max(240, Math.min(3840, Math.floor(r.width - 2)));
-      var h = Math.max(240, Math.min(2160, Math.floor(r.height - 2)));
-      if (Math.abs(w - canvas.width) > 140 || Math.abs(h - canvas.height) > 140) {
+      var rawW = Math.floor(r.width - 2), rawH = Math.floor(r.height - 2);
+      if (Math.abs(rawW - lastStageW) > 140 || rawH - lastStageH > 140) {
+        var w = Math.max(240, Math.min(3840, rawW));
+        var h = Math.max(240, Math.min(2160, rawH));
         send({ t: 'size', w: w, h: h });
       }
+      lastStageW = rawW; lastStageH = rawH;
     }, 350);
   }
 
@@ -518,9 +590,13 @@
   // ---------------------------------------------------------------------------
   // v7.5.0 — the touch classifier (mirrors the sandbox engine):
   //   tap → down/up; double tap → 'dbl' (clickCount 2 in the renderer,
-  //   so dblclick fires natively); long-press → right-button press+release
-  //   (the renderer fires the site's own contextmenu); drag → wheel-style
-  //   pan with fling. A second finger voids the live gesture.
+  //   so dblclick fires natively) + the picture magnifies 2× around the
+  //   tap (v7.6.0); long-press → 'selstart' — the renderer probes ground
+  //   text and word-selects with a HELD press ('selmove' drags extend
+  //   the selection, 'selend' releases), or answers 'selno' and the
+  //   classic right-button pair rides (the site's own contextmenu);
+  //   drag → wheel-style pan with fling. A second finger voids the live
+  //   gesture.
   // ---------------------------------------------------------------------------
 
   function clearLp() {
@@ -530,6 +606,10 @@
   function noteTap(p) {
     var now = Date.now();
     if (lastTap && now - lastTap.t < 330 && Math.abs(lastTap.x - p.x) < 48 && Math.abs(lastTap.y - p.y) < 48) {
+      // v7.6.0 — the double tap magnifies the picture around the tap; the
+      // dblclick still rides so the renderer's own handlers run. A second
+      // double tap restores the unmagnified picture.
+      toggleZoom(p.x, p.y);
       send({ t: 'dbl', x: p.x, y: p.y });
       lastTap = null;
       return;
@@ -552,10 +632,15 @@
     lpTimer = setTimeout(function () {
       if (!tPtr || tPtr.id !== e.pointerId || tPtr.mode === 'menu') return;
       if (Math.abs(tPtr.x - tPtr.x0) < 12 && Math.abs(tPtr.y - tPtr.y0) < 12) {
-        tPtr.mode = 'menu';
+        // v7.6.0 — the long-press asks the renderer whether the finger
+        // sits on ground text ('selstart'): a held double-click press
+        // word-selects there and the finger drag extends it; a 'selno'
+        // answer rides the classic right-click pair instead (the site's
+        // own contextmenu — the picture channel cannot hit-test locally,
+        // so the renderer decides).
+        tPtr.mode = 'sel';
         try { if (navigator.vibrate) navigator.vibrate(28); } catch (e2) {}
-        send({ t: 'down', x: tPtr.x, y: tPtr.y, b: 'right' });
-        send({ t: 'up', x: tPtr.x, y: tPtr.y, b: 'right' });
+        send({ t: 'selstart', x: tPtr.x, y: tPtr.y });
       }
     }, 470);
   }
@@ -575,7 +660,14 @@
       if (Math.abs(p.x - tPtr.x0) < 12 && Math.abs(p.y - tPtr.y0) < 12) return;
       tPtr.decided = true;
       if (tPtr.mode === 'menu') tPtr.mode = 'menudrag';
+      else if (tPtr.mode === 'sel') tPtr.mode = 'seldrag';
       else tPtr.mode = 'pan';
+    }
+    if (tPtr.mode === 'seldrag') {
+      // the word-selection drag: every finger position rides as a selection
+      // move — the renderer extends the selection from the word's edge.
+      send({ t: 'selmove', x: p.x, y: p.y });
+      return;
     }
     if (tPtr.mode === 'pan') {
       // content follows the finger — negated deltas, batched 40ms
@@ -604,6 +696,11 @@
           panAccX = 0; panAccY = 0;
         }
         startFling(g);
+      } else if (g.mode === 'sel' || g.mode === 'seldrag') {
+        // the word-selection drag ends with the release; the selection
+        // stays highlighted in the picture (the copy affordance for the
+        // service engine rides a later round).
+        send({ t: 'selend', x: p.x, y: p.y });
       } else if (!g.decided && g.mode !== 'menu' && g.mode !== 'menudrag') {
         send({ t: 'down', x: p.x, y: p.y, b: 'left' });
         send({ t: 'up', x: p.x, y: p.y, b: 'left' });
@@ -615,6 +712,10 @@
   }
 
   function touchCancel() {
+    if (tPtr && (tPtr.mode === 'sel' || tPtr.mode === 'seldrag')) {
+      // a canceled selection still releases the renderer's held button.
+      send({ t: 'selend', x: tPtr.x, y: tPtr.y });
+    }
     tPtr = null;
     tSecond = 0;
     panAccX = 0; panAccY = 0;
@@ -623,6 +724,9 @@
 
   function cancelTouchGesture() {
     if (!tPtr) return;
+    if (tPtr.mode === 'sel' || tPtr.mode === 'seldrag') {
+      send({ t: 'selend', x: tPtr.x, y: tPtr.y });
+    }
     tPtr = null;
     clearLp();
     panAccX = 0; panAccY = 0;

@@ -27,6 +27,19 @@
  *   its characters ride the round trip like any other keystroke; touch
  *   targets grow to phone size and a viewport-resize gesture keeps the
  *   sandbox honest after rotation.
+ *
+ * v7.6.0 — phone polish: a long-press on ground text starts a native word
+ *   selection and the finger drag extends it (press + double-click ride
+ *   the host, moves ride as mouse moves — the release opens the surface's
+ *   copy menu); a double tap on non-editable ground magnifies the sandbox
+ *   viewport 2× around the tap (the dblclick still rides so the site's own
+ *   zoom handlers run) and a second double tap restores; a desktop-shaped
+ *   destination (no device-width viewport, horizontal overflow at the
+ *   phone width) gets the WIDE profile — the session adopts a wide
+ *   geometry through one more host ride and the frame shrinks visually to
+ *   fit, exactly what a native phone does with a fixed-width page. The
+ *   soft keyboard no longer masquerades as a rotation: only a width
+ *   change or a grown height rides the resize gesture.
  */
 (function () {
   if (window.__glpe_vbs_ui__) return;
@@ -72,6 +85,15 @@
   var panAccX = 0, panAccY = 0;
   var flingT = null;
   var rsT = null;             // viewport-resize debounce
+  // v7.6.0 — touch-polish state: the double-tap zoom (a visual 2×
+  // magnification of the sandbox viewport anchored at the tap), the wide
+  // viewport profile (desktop-shaped sites shrink-to-fit like a native
+  // phone does), its adoption bookkeeping, the debounced detector and the
+  // last-seen stage size (the soft keyboard shrinks the height only — that
+  // must never ride as a rotation).
+  var zoomZ = 1, zoomSx = -1, zoomSy = -1;
+  var vwWide = false, vwAdopting = false, vwT = null;
+  var lastStageW = 0, lastStageH = 0;
 
   function txt(s) { return document.createTextNode(s); }
 
@@ -390,8 +412,12 @@
     if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; }
     if (flingT) { clearTimeout(flingT); flingT = null; }
     if (rsT) { clearTimeout(rsT); rsT = null; }
+    if (vwT) { clearTimeout(vwT); vwT = null; }
     tPtr = null; tSecond = 0; lastTap = null;
     panAccX = 0; panAccY = 0;
+    zoomZ = 1; zoomSx = zoomSy = -1;
+    vwWide = false; vwAdopting = false;
+    lastStageW = 0; lastStageH = 0;
     try { if (kbdInput && document.activeElement === kbdInput) kbdInput.blur(); } catch (e) {}
     hideVbMenu();
     dragSel = null;
@@ -428,11 +454,16 @@
     tPtr = null; tSecond = 0; lastTap = null;
     panAccX = 0; panAccY = 0;
     kbdPrev = '';
+    zoomZ = 1; zoomSx = zoomSy = -1;
+    vwWide = false; vwAdopting = false;
+    if (vwT) { clearTimeout(vwT); vwT = null; }
     buildOverlay();
     bindInput();
     var rect = stage.getBoundingClientRect();
     var w = Math.max(320, Math.min(1920, Math.floor(rect.width - 4)));
     var h = Math.max(240, Math.min(1200, Math.floor(rect.height - 4)));
+    lastStageW = Math.floor(rect.width - 4);
+    lastStageH = Math.floor(rect.height - 4);
     post('vb_open', { u: url, w: w, h: h }, function (d) {
       if (d.e === 'busy') { setStatus('سقف نشست‌های همزمان روی میزبان پر است — کمی بعد دوباره'); return; }
       if (d.e || !d.t) { setStatus('خطا در ساختن محیط — دوباره تلاش کنید'); return; }
@@ -612,8 +643,14 @@
   // locally and translated into the SAME host-first vocabulary the desktop
   // surface already uses:
   //   tap          → press + release (the click rides the echo)
-  //   double tap   → press/release pair + dblclick
-  //   long-press   → context click (the surface menu / the site's own menu)
+  //   double tap   → press/release pair + dblclick (v7.6.0: on non-editable
+  //                  ground it also magnifies the viewport 2× — the site's
+  //                  own dblclick handlers still run)
+  //   long-press   → context click on links/menu ground (the surface menu /
+  //                  the site's own menu); on ground TEXT it starts a word
+  //                  selection instead (press + double-click ride, the
+  //                  finger drag extends it as moves, the release opens the
+  //                  surface's own copy menu) — v7.6.0
   //   drag         → wheel-style pan (content follows the finger) + fling
   //   on fields    → the press rides immediately (caret) and the keyboard
   //                  opens within the user gesture
@@ -635,6 +672,30 @@
     }
   }
 
+  // v7.6.0 — the ground-text probe for the drag-select gesture: the caret
+  // range must land in a non-blank text node that the hit element ITSELF
+  // owns (Chrome snaps carets to nearby text — an empty zone must not
+  // count as text), and the spot is neither an editable surface nor inside
+  // a link — exactly the ground where a native phone starts a word
+  // selection instead of the context menu.
+  function textAt(px, py) {
+    try {
+      var s = frameScale();
+      var fx = Math.round(px * s.sx), fy = Math.round(py * s.sy);
+      var d = frameDoc();
+      if (!d || typeof d.caretRangeFromPoint !== 'function') return false;
+      var t = elAt(fx, fy);
+      if (!t) return false;
+      if (t.closest && t.closest('a[href]')) return false; // links keep the menu
+      var r = d.caretRangeFromPoint(fx, fy);
+      if (!r || !r.startContainer || r.startContainer.nodeType !== 3) return false;
+      if (!t.contains(r.startContainer)) return false; // the caret snapped elsewhere — not this ground's text
+      return String(r.startContainer.data || '').trim() !== '';
+    } catch (e) {
+      return false;
+    }
+  }
+
   function clearLp() {
     if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; }
   }
@@ -642,7 +703,16 @@
   function noteTap(p) {
     var now = Date.now();
     if (lastTap && now - lastTap.t < 330 && Math.abs(lastTap.x - p.x) < 48 && Math.abs(lastTap.y - p.y) < 48) {
-      push({ t: 'db', x: p.x, y: p.y });
+      if (!editableAt(p.x, p.y)) {
+        // v7.6.0 — a double tap on non-editable ground magnifies the
+        // sandbox viewport around the tap (the dblclick still rides so the
+        // destination's own zoom handlers run); a second double tap
+        // restores the unmagnified viewport.
+        toggleZoom(p.x, p.y);
+        push({ t: 'db', x: p.x, y: p.y, z: 1 });
+      } else {
+        push({ t: 'db', x: p.x, y: p.y });
+      }
       lastTap = null;
       return;
     }
@@ -657,10 +727,11 @@
       return;
     }
     var editable = editableAt(p.x, p.y);
+    var txt = !editable && textAt(p.x, p.y);
     tPtr = {
       id: e.pointerId, x0: p.x, y0: p.y, x: p.x, y: p.y,
       t0: Date.now(), lt: Date.now(), vx: 0, vy: 0,
-      mode: editable ? 'edit' : null, decided: false
+      mode: editable ? 'edit' : (txt ? 'txt' : null), decided: false
     };
     lastX = p.x; lastY = p.y;
     positionCursor(p.x, p.y);
@@ -675,6 +746,19 @@
     lpTimer = setTimeout(function () {
       if (!tPtr || tPtr.id !== e.pointerId || tPtr.mode === 'menu') return;
       if (Math.abs(tPtr.x - tPtr.x0) < 12 && Math.abs(tPtr.y - tPtr.y0) < 12) {
+        if (tPtr.mode === 'txt') {
+          // v7.6.0 — ground text: the word under the finger selects. The
+          // press AND the double-click both ride the host (the echo anchors
+          // the drag and word-selects — and carries the selection's edge so
+          // a following finger drag extends it exactly like a native
+          // phone). The release opens the surface's own copy menu.
+          tPtr.mode = 'sel';
+          disarmKeyboard();
+          try { if (navigator.vibrate) navigator.vibrate(28); } catch (e2) {}
+          push({ t: 'dn', x: tPtr.x, y: tPtr.y, b: 'left' });
+          push({ t: 'db', x: tPtr.x, y: tPtr.y });
+          return;
+        }
         tPtr.mode = 'menu';
         disarmKeyboard(); // the surface menu (copy/paste/select) takes over
         try { if (navigator.vibrate) navigator.vibrate(28); } catch (e2) {}
@@ -700,14 +784,19 @@
       tPtr.decided = true;
       if (tPtr.mode === 'edit') tPtr.mode = 'editdrag';     // caret drag
       else if (tPtr.mode === 'menu') tPtr.mode = 'menudrag'; // held after menu
+      else if (tPtr.mode === 'sel') tPtr.mode = 'seldrag';   // held word-selection
       else tPtr.mode = 'pan';
+      // (a 'txt' ground that moves BEFORE the long-press timer pans —
+      // dragging over text scrolls first on a native phone too)
     }
     if (tPtr.mode === 'pan') {
       // Content follows the finger: pan deltas accumulate and ride as ONE
       // wheel gesture per host round trip (negated — finger up scrolls
       // down, exactly like native touch).
       panAccX += fdx; panAccY += fdy;
-    } else if (tPtr.mode === 'editdrag') {
+    } else if (tPtr.mode === 'editdrag' || tPtr.mode === 'seldrag') {
+      // caret drags and word-selection drags both ride as moves; the echo
+      // extends the selection from the anchor the press left behind.
       push({ t: 'mm', x: p.x, y: p.y });
     }
   }
@@ -723,6 +812,14 @@
       } else if (g.mode === 'edit' || g.mode === 'editdrag') {
         push({ t: 'up', x: p.x, y: p.y, b: 'left' });
         noteTap(p);
+      } else if (g.mode === 'sel' || g.mode === 'seldrag') {
+        // the word-selection drag ends with the release; the surface's own
+        // copy affordance opens over the selection — what a native phone
+        // shows there (the gesture itself already rode the host).
+        push({ t: 'up', x: p.x, y: p.y, b: 'left' });
+        setTimeout(function () {
+          if (sess && !closing && root) showVbMenu(p.x, p.y);
+        }, 140);
       } else if (!g.decided && g.mode !== 'menu' && g.mode !== 'menudrag') {
         // plain tap — press+release ride now (the echo replays the click)
         push({ t: 'dn', x: p.x, y: p.y, b: 'left' });
@@ -739,7 +836,7 @@
       var g = tPtr;
       tPtr = null;
       clearLp();
-      if (g.mode === 'edit' || g.mode === 'editdrag') {
+      if (g.mode === 'edit' || g.mode === 'editdrag' || g.mode === 'sel' || g.mode === 'seldrag') {
         push({ t: 'up', x: g.x, y: g.y, b: 'left' });
       }
     }
@@ -755,7 +852,7 @@
     var g = tPtr;
     tPtr = null;
     clearLp();
-    if (g.mode === 'edit' || g.mode === 'editdrag') {
+    if (g.mode === 'edit' || g.mode === 'editdrag' || g.mode === 'sel' || g.mode === 'seldrag') {
       push({ t: 'up', x: g.x, y: g.y, b: 'left' });
     }
     panAccX = 0; panAccY = 0;
@@ -986,8 +1083,10 @@
         // Double-click: replay the synthetic dblclick (site handlers — e.g.
         // player fullscreen toggles — run) and select the word under the
         // point, mirroring what a native double-click would highlight.
+        // v7.6.0 — a zoom-flagged double tap (z) magnified the viewport
+        // instead, so the ground stays unselected there.
         fireMouse(elAt(fp.x, fp.y), 'dblclick', fp.x, fp.y, 0, 0);
-        selectWordAt(fp.x, fp.y);
+        if (!ev.z) selectWordAt(fp.x, fp.y);
         break;
       }
       case 'kd':
@@ -1002,8 +1101,23 @@
         // Viewport resize (v7.5.0 — rotation, fold): the host journaled and
         // clamped it; the live environment takes the new dimensions and
         // the destination reflows natively inside the frame.
+        // v7.6.0 — a new geometry invalidates any live zoom; the wide
+        // profile survives only when this ride IS its own adoption (the
+        // detector pushed it), otherwise a rotation resets it and the
+        // detector re-runs after the reflow settles (a desktop-shaped site
+        // re-adopts the wide layout at the new size).
         if (ev.w >= 320 && ev.h >= 240) {
           sessW = ev.w; sessH = ev.h;
+          if (vwAdopting) {
+            vwAdopting = false; // keep vwWide — this ride IS the adoption
+          } else {
+            vwWide = false;
+            zoomZ = 1; zoomSx = zoomSy = -1;
+            if (frame) { frame.style.transform = ''; frame.style.transformOrigin = ''; }
+            if (pixelCanvas) { pixelCanvas.style.transform = ''; pixelCanvas.style.transformOrigin = ''; }
+            if (vwT) clearTimeout(vwT);
+            vwT = setTimeout(detectViewportProfile, 600);
+          }
           if (frame) {
             frame.style.width = sessW + 'px';
             frame.style.height = sessH + 'px';
@@ -1209,6 +1323,10 @@
       while (e < text.length && isWord(text.charAt(e))) e++;
       if (s === e) return;
       setSelection(node, s, node, e);
+      // v7.6.0 — a drag that follows this word-select EXTENDS from the
+      // word's edge: the touch long-press flow (long-press then drag) and
+      // the native desktop double-click-then-drag both land here.
+      dragSel = { node: node, off: e };
     } catch (err) {}
   }
 
@@ -1501,6 +1619,12 @@
         imgCache = {};
         dragSel = null;
         hideVbMenu();
+        // a fresh document drops stale zoom/profile state — the detector
+        // runs again after the load settles (onFrameLoad resets too).
+        zoomZ = 1; zoomSx = zoomSy = -1;
+        vwWide = false; vwAdopting = false;
+        if (frame) { frame.style.transform = ''; frame.style.transformOrigin = ''; }
+        if (pixelCanvas) { pixelCanvas.style.transform = ''; pixelCanvas.style.transformOrigin = ''; }
         // A typed address that IS a download (archive/executable/…):
         // the tunnel flag makes the gateway stream it to the visitor's
         // save dialog instead of buffering it as a page.
@@ -1521,6 +1645,13 @@
     setStatus('صفحه بارگذاری شد — ورودی‌های شما ابتدا به هاست می‌رود و بعد بازپخش می‌شود');
     capture.focus();
     if (pixelMode) rasterize();
+    // v7.6.0 — a fresh document drops stale zoom/profile state, and the
+    // wide-profile detector runs once its layout settles.
+    zoomZ = 1; zoomSx = zoomSy = -1;
+    vwWide = false; vwAdopting = false;
+    fitFrame();
+    if (vwT) clearTimeout(vwT);
+    vwT = setTimeout(detectViewportProfile, 450);
   }
 
   // ---------------------------------------------------------------------------
@@ -1684,13 +1815,100 @@
     var sw = stage.clientWidth - 2, sh = stage.clientHeight - 2;
     if (sw <= 0 || sh <= 0) return;
     var k = Math.min(sw / sessW, sh / sessH);
-    if (pixelMode) {
-      pixelCanvas.style.width = Math.floor(sessW * k) + 'px';
-      pixelCanvas.style.height = Math.floor(sessH * k) + 'px';
+    if (pixelMode && pixelCanvas) {
+      // the picture mirrors the frame's live layout size exactly and both
+      // carry the SAME visual transform — the bitmap the visitor watches
+      // and the input mapping's rect never drift apart.
+      var fw = frame.offsetWidth || sessW, fh = frame.offsetHeight || sessH;
+      pixelCanvas.style.width = fw + 'px';
+      pixelCanvas.style.height = fh + 'px';
+      frameVisual(pixelCanvas, fw, fh);
+      frameVisual(frame, fw, fh);
+    } else if (vwWide) {
+      // the wide profile: the element holds the FULL session geometry (the
+      // destination lays out desktop-shaped) and shrinks visually to fit.
+      frame.style.width = sessW + 'px';
+      frame.style.height = sessH + 'px';
+      frameVisual(frame, sessW, sessH);
     } else {
       frame.style.width = Math.floor(sessW * k) + 'px';
       frame.style.height = Math.floor(sessH * k) + 'px';
+      frameVisual(frame, Math.floor(sessW * k), Math.floor(sessH * k));
     }
+  }
+
+  // v7.6.0 — the visual transform stack. In the device profile the fitted
+  // element size IS the destination's layout viewport (the historical
+  // behavior); the zoom then magnifies the element around the tap. In the
+  // wide profile the element keeps the full session geometry and a fit
+  // scale shrinks it visually; the zoom composes on top. stagePoint() and
+  // positionCursor() read the element's live bounding rect, so hit-testing
+  // stays exact under every combination — and pan deltas ride through the
+  // same rect, so content follows the finger at any magnification.
+  function frameVisual(elm, cssW, cssH) {
+    var base = vwWide ? Math.min(
+      (stage.clientWidth - 2) / sessW, (stage.clientHeight - 2) / sessH
+    ) : 1;
+    var z = base * (zoomZ > 1 ? zoomZ : 1);
+    if (Math.abs(z - 1) < 0.004) {
+      elm.style.transform = '';
+      elm.style.transformOrigin = '';
+      return;
+    }
+    if (zoomZ > 1 && zoomSx >= 0) {
+      // magnify around the tap: the anchor rides in session space and is
+      // converted to the element's own (untransformed) coordinate system.
+      elm.style.transformOrigin = Math.round((zoomSx / sessW) * cssW) + 'px ' +
+        Math.round((zoomSy / sessH) * cssH) + 'px';
+    } else {
+      elm.style.transformOrigin = '50% 50%';
+    }
+    elm.style.transform = 'scale(' + z + ')';
+  }
+
+  function resetZoom() {
+    zoomZ = 1; zoomSx = zoomSy = -1;
+    if (frame || pixelCanvas) fitFrame();
+  }
+
+  function toggleZoom(px, py) {
+    zoomZ = zoomZ > 1 ? 1 : 2;
+    zoomSx = px; zoomSy = py;
+    fitFrame();
+    toast(zoomZ > 1
+      ? 'بزرگ‌نمایی ۲× — دوباره دوبار ضربه بزنید تا برداشته شود'
+      : 'بزرگ‌نمایی برداشته شد');
+  }
+
+  // v7.6.0 — the wide viewport profile: a destination that ships no
+  // device-width viewport and still overflows horizontally at the phone
+  // width is desktop-shaped; the session adopts a wide geometry (one more
+  // 'rs' ride through the host — the adoption echo keeps the profile) and
+  // the frame shrinks visually to fit, exactly what a native phone does
+  // with a fixed-width page. Responsive sites (device-width meta) and
+  // desktop stages stay untouched.
+  function detectViewportProfile() {
+    vwT = null;
+    if (!sess || closing || !frame || vwWide) return;
+    try {
+      var w = frameWin();
+      var d = frameDoc();
+      if (!w || !d || !d.documentElement) return;
+      var meta = d.querySelector ? d.querySelector('meta[name="viewport" i]') : null;
+      var content = meta ? String(meta.getAttribute('content') || '') : '';
+      if (/device-width/i.test(content)) return; // the site is responsive
+      var scrollW = Math.max(d.documentElement.scrollWidth, d.body ? d.body.scrollWidth : 0);
+      var inner = w.innerWidth || sessW;
+      if (inner < 900 && scrollW > inner + 80) {
+        var wideW = Math.max(640, Math.min(1280, scrollW));
+        var sr = stage.getBoundingClientRect();
+        var wideH = Math.round(wideW * (sr.height / Math.max(1, sr.width)));
+        vwAdopting = true;
+        vwWide = true;
+        push({ t: 'rs', w: wideW, h: wideH });
+        toast('چیدمان میز (بدون نمای واکنش‌گرا) شناسایی شد — نمای گسترده فعال شد');
+      }
+    } catch (e) {}
   }
 
   window.addEventListener('resize', function () {
@@ -1701,6 +1919,13 @@
   // A significantly resized stage (rotation, fold) asks the host to adopt
   // new sandbox dimensions — the gesture rides the round trip like any
   // other, and the host's clamp bounds stay honest for every later event.
+  // v7.6.0 — the soft keyboard only SHRINKS the stage's height (Android's
+  // window resize); that is not a rotation and must never ride — a
+  // collapsed session would fold the sandbox mid-typing. Only a WIDTH
+  // change (rotation) or a GROWN height (keyboard closed, fold opened)
+  // rides. The deltas compare against the last-seen STAGE size, so the
+  // wide profile (whose session is wider than the stage) never mistakes a
+  // keyboard for a rotation either.
   function queueViewportSync() {
     if (!sess || closing || !stage) return;
     if (rsT) clearTimeout(rsT);
@@ -1708,11 +1933,13 @@
       rsT = null;
       if (!sess || closing || !stage) return;
       var r = stage.getBoundingClientRect();
-      var w = Math.max(320, Math.min(1920, Math.floor(r.width - 4)));
-      var h = Math.max(240, Math.min(1200, Math.floor(r.height - 4)));
-      if (Math.abs(w - sessW) > 140 || Math.abs(h - sessH) > 140) {
+      var rawW = Math.floor(r.width - 4), rawH = Math.floor(r.height - 4);
+      var w = Math.max(320, Math.min(1920, rawW));
+      var h = Math.max(240, Math.min(1200, rawH));
+      if (Math.abs(rawW - lastStageW) > 140 || rawH - lastStageH > 140) {
         push({ t: 'rs', w: w, h: h });
       }
+      lastStageW = rawW; lastStageH = rawH;
     }, 350);
   }
 
