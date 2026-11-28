@@ -19,7 +19,11 @@
  *   a second double tap restores; a long-press asks the renderer whether
  *   the finger sits on ground text (selstart/selmove/selend — a held
  *   double-click press word-selects and the drag extends the selection,
- *   with a 'selno' fallback to the classic right-click pair); and the
+ *   with a 'selno' fallback to the classic right-click pair); the release
+ *   opens the surface's own copy/paste menu over the selection and desktop
+ *   Ctrl+C/X fetches the renderer's live selection into the visitor's own
+ *   clipboard (the 'copy' round-trip — the picture channel carries pixels
+ *   only, so the text must come back through the socket); and the
  *   soft keyboard's height-only shrink never rides as a rotation.
  */
 (function () {
@@ -55,6 +59,11 @@
   // rotation).
   var zoomZ = 1, zoomSx = -1, zoomSy = -1;
   var lastStageW = 0, lastStageH = 0;
+  // v7.6.0 — the selection copy affordance: a floating toast, the
+  // selection menu itself, and the pending 'copy' round-trip state.
+  var toastEl = null, toastTimer = null;
+  var selMenu = null;
+  var copyCb = null, copyT = null;
 
   function txt(s) { return document.createTextNode(s); }
 
@@ -75,7 +84,7 @@
     btnClose: 'width:34px;height:34px;border-radius:10px;border:1px solid #7f1d1d;background:#450a0a;color:#fecaca;font-size:15px;cursor:pointer;line-height:1;flex:none;',
     input: 'flex:1;min-width:220px;padding:9px 12px;background:#0f172a;border:1px solid #334155;border-radius:10px;color:#f8fafc;font-size:12px;font-family:monospace;outline:none;direction:ltr;text-align:left;',
     stage: 'flex:1;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;background:#000;',
-    pill: 'position:absolute;top:10px;right:12px;background:rgba(15,23,42,0.85);border:1px solid #334155;color:#94a3b8;border-radius:9999px;padding:4px 12px;font-size:11px;line-height:1.8;z-index:5;max-width:70%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;',
+    pill: 'position:absolute;top:10px;right:12px;background:rgba(15,23,42,0.85);border:1px solid #334155;color:#94a3b8;border-radius:9999px;padding:4px 12px;font-size:11px;line-height:1.8;z-index:5;max-width:70%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;',
     foot: 'display:flex;align-items:center;gap:14px;padding:8px 14px;background:#1e293b;border-top:1px solid #334155;color:#94a3b8;font-size:11px;flex:none;flex-wrap:wrap;',
     footCompact: 'display:flex;align-items:center;gap:10px;padding:5px 10px;background:#1e293b;border-top:1px solid #334155;color:#94a3b8;font-size:10px;flex:none;white-space:nowrap;overflow:hidden;',
     canvas: 'display:block;background:#000;outline:none;cursor:none;touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;'
@@ -244,6 +253,10 @@
     if (flingT) { clearTimeout(flingT); flingT = null; }
     if (rsT) { clearTimeout(rsT); rsT = null; }
     if (panT) { clearTimeout(panT); panT = null; }
+    if (copyT) { clearTimeout(copyT); copyT = null; }
+    if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
+    hideSelMenu();
+    copyCb = null;
     tPtr = null; tSecond = 0; lastTap = null;
     panAccX = 0; panAccY = 0;
     zoomZ = 1; zoomSx = zoomSy = -1;
@@ -253,9 +266,157 @@
     if (root && root.parentNode) root.parentNode.removeChild(root);
     document.body.style.overflow = '';
     root = canvas = ctx = urlInput = ws = kbdInput = kbdBtn = null;
+    toastEl = null;
   }
 
   function setStatus(t) { if (statusEl) statusEl.textContent = t; }
+
+  // ---------------------------------------------------------------------------
+  // v7.6.0 — Toast, the visitor's clipboard, and the selection copy menu.
+  //
+  // The picture channel carries pixels only — the renderer's clipboard
+  // lives (and stays) on the host — so copying asks the host for the LIVE
+  // selection's text ('copy' → 'copysel' on the same socket) and writes
+  // what arrives into the visitor's own device clipboard. What a remote
+  // desktop's client does, in one honest round.
+  // ---------------------------------------------------------------------------
+
+  function toast(msg) {
+    if (!root) return;
+    if (!toastEl) {
+      toastEl = el('div', 'position:fixed;bottom:30px;left:50%;transform:translateX(-50%);' +
+        'background:rgba(15,23,42,0.96);color:#f8fafc;border:1px solid #334155;border-radius:12px;' +
+        'padding:10px 18px;font-size:12px;line-height:1.8;z-index:2147483647;direction:rtl;max-width:80%;text-align:center;');
+      root.appendChild(toastEl);
+    }
+    toastEl.textContent = msg;
+    toastEl.style.display = 'block';
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () {
+      if (toastEl) toastEl.style.display = 'none';
+    }, 2600);
+  }
+
+  function writeVisitorClipboard(text, done) {
+    var ok = false;
+    var legacy = function () {
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('style', 'position:fixed;top:-9999px;opacity:0;');
+        document.body.appendChild(ta);
+        ta.select();
+        ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+      } catch (e) {}
+      done(!!ok);
+    };
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { done(true); }, legacy);
+        return;
+      }
+    } catch (e) {}
+    legacy();
+  }
+
+  // The copy round-trip. The shortcut rides the renderer as a genuine
+  // key pair first (the destination's own copy/cut handlers run on real
+  // events), then the live selection's text is asked for and lands in the
+  // visitor's own clipboard. A cut also deletes the selection THERE —
+  // exactly the split the sandbox engine documents (the removal belongs
+  // to the destination, the text to the visitor).
+  function copySelectionToVisitor(cut) {
+    if (closing || !ws || ws.readyState !== 1) return;
+    var k = cut ? 'x' : 'c', vk = cut ? 88 : 67;
+    send({ t: 'key', a: 'down', key: k, code: 'Key' + k.toUpperCase(), vk: vk, mods: 2, text: '' });
+    send({ t: 'key', a: 'up', key: k, code: 'Key' + k.toUpperCase(), vk: vk, mods: 2 });
+    copyCb = function (v) {
+      if (!v) { toast('متنی برای کپی انتخاب نشده است'); return; }
+      writeVisitorClipboard(v, function (ok) {
+        toast(ok
+          ? (cut ? 'متن کپی شد (حذف انتخاب در دست سایت مقصد است)' : 'متن انتخاب‌شده کپی شد')
+          : 'مرورگر اجازهٔ نوشتن کلیپ‌بورد را نداد — دوباره «کپی» را بزنید');
+      });
+    };
+    if (copyT) clearTimeout(copyT);
+    copyT = setTimeout(function () {
+      copyT = null;
+      if (copyCb) { copyCb = null; toast('پاسخ کپی از میزبان نرسید — دوباره تلاش کنید'); }
+    }, 5000);
+    send({ t: 'copy' });
+  }
+
+  // Paste replay: the visitor's clipboard text rides as a text message —
+  // the same channel the soft keyboard uses — and inserts into whatever
+  // field the renderer currently holds focused.
+  function pasteFromVisitor() {
+    try {
+      if (navigator.clipboard && navigator.clipboard.readText) {
+        navigator.clipboard.readText().then(function (t) {
+          if (t) send({ t: 'text', v: String(t).slice(0, 5000) });
+        }, function () {
+          toast('دسترسی به کلیپ‌بورد داده نشد — روی نمایشگر Ctrl+V را بزنید');
+        });
+      } else {
+        toast('این مرورگر اجازهٔ خواندن کلیپ‌بورد را نمی‌دهد — روی نمایشگر Ctrl+V را بزنید');
+      }
+    } catch (e) {}
+  }
+
+  function selectAllInRenderer() {
+    send({ t: 'key', a: 'down', key: 'a', code: 'KeyA', vk: 65, mods: 2, text: '' });
+    send({ t: 'key', a: 'up', key: 'a', code: 'KeyA', vk: 65, mods: 2 });
+  }
+
+  function hideSelMenu() {
+    if (selMenu && selMenu.parentNode) selMenu.parentNode.removeChild(selMenu);
+    selMenu = null;
+  }
+
+  function selMenuItem(menu, label, fn) {
+    var b = el('button', 'display:block;width:100%;text-align:right;background:none;border:0;color:#e2e8f0;' +
+      'font:12px/1 Tahoma,sans-serif;padding:' + (TOUCH ? 12 : 9) + 'px 16px;cursor:pointer;direction:rtl;');
+    b.type = 'button';
+    b.textContent = label;
+    b.onclick = function (e) {
+      e.stopPropagation();
+      hideSelMenu();
+      try { fn(); } catch (err) {}
+    };
+    menu.appendChild(b);
+    return b;
+  }
+
+  // The surface's own copy menu — what the release of a word-selection
+  // opens over the selection (the same affordance the sandbox engine
+  // shows). Canvas-space point → CSS point on the stage, clamped inside.
+  function showSelMenu(cx, cy) {
+    hideSelMenu();
+    if (!root || !canvas || !canvas.width) return;
+    var stage = root.childNodes[1];
+    if (!stage) return;
+    selMenu = el('div', 'position:absolute;background:#0f172a;border:1px solid #334155;border-radius:12px;' +
+      'box-shadow:0 10px 30px rgba(0,0,0,0.55);padding:6px;min-width:190px;z-index:9;direction:rtl;');
+    selMenu.id = '__glpe_vb_selmenu';
+    selMenu.setAttribute('role', 'menu');
+    selMenuItem(selMenu, 'کپی (Ctrl+C)', function () { copySelectionToVisitor(); });
+    selMenuItem(selMenu, 'چسباندن (Ctrl+V)', pasteFromVisitor);
+    selMenuItem(selMenu, 'انتخاب همه (Ctrl+A)', selectAllInRenderer);
+    var s = stage.getBoundingClientRect();
+    var c = canvas.getBoundingClientRect();
+    var px = (c.left - s.left) + (cx / canvas.width) * c.width + 8;
+    var py = (c.top - s.top) + (cy / canvas.height) * c.height + 6;
+    stage.appendChild(selMenu);
+    try {
+      var mw = selMenu.offsetWidth || 190;
+      var mh = selMenu.offsetHeight || 120;
+      px = Math.max(8, Math.min(s.width - mw - 8, px));
+      py = Math.max(8, Math.min(s.height - mh - 8, py));
+    } catch (e) {}
+    selMenu.style.left = Math.round(px) + 'px';
+    selMenu.style.top = Math.round(py) + 'px';
+  }
 
   // ---------------------------------------------------------------------------
   // Connection.
@@ -337,6 +498,7 @@
         currentUrl = msg.url || currentUrl;
         urlInput.value = currentUrl;
         resetZoom(); // a new document drops the stale magnification
+        hideSelMenu(); // a new document drops the stale selection's menu
         setStatus('صفحه بارگذاری شد' + (msg.title ? ' — ' + msg.title.slice(0, 60) : ''));
         break;
 
@@ -348,8 +510,20 @@
         if (tPtr && tPtr.mode === 'sel') {
           tPtr.mode = 'menu';
         }
+        hideSelMenu(); // a fresh gesture beats the old selection's menu
         send({ t: 'down', x: msg.x, y: msg.y, b: 'right' });
         send({ t: 'up', x: msg.x, y: msg.y, b: 'right' });
+        break;
+
+      case 'copysel':
+        // v7.6.0 — the renderer's answer to the pending copy round: the
+        // live selection's text (an empty string means nothing selected).
+        if (copyCb) {
+          var cb = copyCb;
+          copyCb = null;
+          if (copyT) { clearTimeout(copyT); copyT = null; }
+          cb(String(msg.v || ''));
+        }
         break;
 
       case 'pong':
@@ -533,6 +707,7 @@
       e.preventDefault();
       var p = canvasPoint(e);
       rememberPoint(p);
+      hideSelMenu(); // a press on the picture dismisses the selection menu
       if (e.pointerType === 'touch') { touchStart(e, p); return; }
       if (!(kbdInput && document.activeElement === kbdInput)) canvas.focus();
       try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
@@ -561,6 +736,14 @@
 
     canvas.addEventListener('keydown', function (e) {
       e.preventDefault();
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C' || e.key === 'x' || e.key === 'X')) {
+        // v7.6.0 — the copy/cut shortcut ALSO reaches the visitor's own
+        // clipboard: the key pair rides the renderer (its handlers see a
+        // genuine shortcut) and the live selection's text is fetched for
+        // this device through the copy round-trip.
+        copySelectionToVisitor(e.key === 'x' || e.key === 'X');
+        return;
+      }
       var printable = e.key && e.key.length === 1;
       send({
         t: 'key', a: 'down', key: e.key, code: e.code,
@@ -593,9 +776,10 @@
   //   so dblclick fires natively) + the picture magnifies 2× around the
   //   tap (v7.6.0); long-press → 'selstart' — the renderer probes ground
   //   text and word-selects with a HELD press ('selmove' drags extend
-  //   the selection, 'selend' releases), or answers 'selno' and the
-  //   classic right-button pair rides (the site's own contextmenu);
-  //   drag → wheel-style pan with fling. A second finger voids the live
+  //   the selection, 'selend' releases and the surface's own copy menu
+  //   opens over the selection), or answers 'selno' and the classic
+  //   right-button pair rides (the site's own contextmenu); drag →
+  //   wheel-style pan with fling. A second finger voids the live
   //   gesture.
   // ---------------------------------------------------------------------------
 
@@ -698,9 +882,14 @@
         startFling(g);
       } else if (g.mode === 'sel' || g.mode === 'seldrag') {
         // the word-selection drag ends with the release; the selection
-        // stays highlighted in the picture (the copy affordance for the
-        // service engine rides a later round).
+        // stays highlighted in the picture and the surface's own copy
+        // affordance opens over it — what a native phone shows there (the
+        // text itself lives on the host, so the menu's copy asks for it
+        // through the round-trip above).
         send({ t: 'selend', x: p.x, y: p.y });
+        setTimeout(function () {
+          if (root && !closing) showSelMenu(p.x, p.y);
+        }, 140);
       } else if (!g.decided && g.mode !== 'menu' && g.mode !== 'menudrag') {
         send({ t: 'down', x: p.x, y: p.y, b: 'left' });
         send({ t: 'up', x: p.x, y: p.y, b: 'left' });

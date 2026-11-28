@@ -162,6 +162,51 @@ function check(name, ok, detail) {
     selMsgs.some((s) => s.indexOf('"t":"selend"') !== -1),
     JSON.stringify(selMsgs.slice(-1)));
 
+  // --- v7.6.0 copy round-trip: the release opens the surface's own copy
+  // menu; «کپی» rides the Ctrl+C key pair + the 'copy' question to the
+  // host, the renderer answers 'copysel', and the LIVE selection's text
+  // lands in THIS device's real clipboard (the picture channel stays
+  // pixels-only — the text must come back through the socket). -----------
+  await page.waitForSelector('#__glpe_vb_selmenu', { timeout: 5000 }).catch(() => {});
+  check('selection release opens the surface copy menu over the selection',
+    await page.evaluate(() => !!document.getElementById('__glpe_vb_selmenu')));
+  await ctx.grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.evaluate(() => { try { navigator.clipboard.writeText(''); } catch (e) {} });
+  const cp0 = (await sends()).length;
+  await page.click('#__glpe_vb_selmenu button:first-child'); // «کپی (Ctrl+C)»
+  await sleep(1800);
+  const cpMsgs = (await sends()).slice(cp0);
+  check('«کپی» rides the Ctrl+C key pair to the renderer',
+    cpMsgs.some((s) => s.indexOf('"t":"key"') !== -1 && s.indexOf('"key":"c"') !== -1) &&
+    cpMsgs.some((s) => s.indexOf('"t":"key"') !== -1 && s.indexOf('"a":"up"') !== -1),
+    JSON.stringify(cpMsgs.filter((s) => s.indexOf('"t":"key"') !== -1).slice(0, 2)));
+  check('«کپی» rides the copy round to the host',
+    cpMsgs.some((s) => s.indexOf('"t":"copy"') !== -1),
+    JSON.stringify(cpMsgs.filter((s) => s.indexOf('"t":"copy"') !== -1)));
+  const clip = await page.evaluate(() => navigator.clipboard.readText().catch(() => ''));
+  const words = ['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta', 'theta', 'iota', 'kappa', 'lambda', 'mu', 'nu', 'xi', 'omicron'];
+  check("the renderer's live selection landed in this device's clipboard",
+    String(clip).length > 0 && words.some((w) => String(clip).indexOf(w) !== -1),
+    JSON.stringify(String(clip).slice(0, 60)));
+  check('the menu closed after the copy',
+    await page.evaluate(() => !document.getElementById('__glpe_vb_selmenu')));
+
+  // --- menu dismissal: a second selection cycle reopens it, and a plain
+  // tap on the picture (the canvas, not the menu) dismisses it without
+  // riding any extra gesture beyond the tap's own press/release --------
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: textPt.x, y: textPt.y }] });
+  await sleep(700);
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await sleep(900);
+  await page.waitForSelector('#__glpe_vb_selmenu', { timeout: 4000 }).catch(() => {});
+  check('a second selection release reopens the copy menu',
+    await page.evaluate(() => !!document.getElementById('__glpe_vb_selmenu')));
+  const topPt = px(canvasBox.w / 2, canvasBox.h * 0.05); // neutral ground far from the menu
+  await tap(topPt.x, topPt.y);
+  await sleep(500);
+  check('a tap on the picture dismisses the open copy menu',
+    await page.evaluate(() => !document.getElementById('__glpe_vb_selmenu')));
+
   // --- pan: wheel messages with negated finger deltas ----------------------
   const pan0 = (await sends()).length;
   const start = px(canvasBox.w / 2, canvasBox.h * 0.7);

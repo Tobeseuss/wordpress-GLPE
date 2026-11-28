@@ -498,6 +498,26 @@ class VBSession {
     }
   }
 
+  // v7.6.0 — the selection copy round. The picture channel carries no text,
+  // and the renderer's own clipboard lives (and stays) on the host, so the
+  // visitor's copy affordance asks HERE for the live selection's text: the
+  // renderer answers through the same socket, the visitor's surface writes
+  // what arrives into the visitor's own device clipboard. An empty answer
+  // is an answer too ("nothing is selected there right now").
+  async copy() {
+    let v = '';
+    if (this.cdp) {
+      try {
+        const r = await this.cdp.send('Runtime.evaluate', {
+          expression: '(function(){try{var s=document.getSelection();return s?String(s):""}catch(e){return ""}})()',
+          returnByValue: true,
+        });
+        v = String((r && r.result && r.result.value) || '');
+      } catch (e) { /* page busy — the empty answer rides */ }
+    }
+    this.safeSend({ t: 'copysel', v: v.slice(0, 100000) });
+  }
+
   key(params) {
     const ev = {
       type: params.a === 'up' ? 'keyUp' : 'keyDown',
@@ -616,6 +636,10 @@ async function handleClientMessage(ws, session, raw) {
 
     case 'selend':
       session.selend(msg);
+      return;
+
+    case 'copy':
+      session.copy().catch(() => {});
       return;
 
     case 'key':

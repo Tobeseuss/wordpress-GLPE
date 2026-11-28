@@ -1789,7 +1789,7 @@ check('start notices wired', strpos($mainSrc25, 'vb-started') !== false && strpo
 // historical 7.0.0 changelog entry stays below)
 check('main file still carries the 7.0.0 heritage marker', substr_count($mainSrc25, '7.0.0') >= 1);
 $readme25 = $readme24;
-check('readme stable tag follows the current release (7.6.0)', strpos($readme25, 'Stable tag: 7.6.0') !== false);
+check('readme stable tag follows the current release (7.6.1)', strpos($readme25, 'Stable tag: 7.6.1') !== false);
 check('readme carries the 7.0.0 changelog entry', strpos($readme25, '= 7.0.0 =') !== false && strpos($readme25, 'مرورگر مجازی') !== false);
 
 // 25i. everything the shipped zip needs stays scanner-clean
@@ -2035,7 +2035,7 @@ $uninstall26 = (string)file_get_contents($root . '/glpe-viewer/uninstall.php');
 check('uninstall reaps sandbox sessions and engine options', strpos($uninstall26, 'glpe_vb_engine') !== false && strpos($uninstall26, "delete_transient('glpe_vbs_'") !== false && strpos($uninstall26, 'glpe_vb_vbs_index') !== false && strpos($uninstall26, 'glpe_vb_key') !== false);
 check('main file version bumped to 7.1.0', substr_count($mainSrc26, '7.1.0') >= 2);
 $readme26 = (string)file_get_contents($root . '/glpe-viewer/readme.txt');
-check('readme stable tag is 7.6.0', strpos($readme26, 'Stable tag: 7.6.0') !== false);
+check('readme stable tag is 7.6.1', strpos($readme26, 'Stable tag: 7.6.1') !== false);
 check('readme carries the 7.1.0 changelog entry', strpos($readme26, '= 7.1.0 =') !== false && strpos($readme26, 'موتور جعبه‌ای') !== false);
 
 // 26n. everything the shipped zip needs stays scanner-clean
@@ -2223,9 +2223,9 @@ check('purge notice wired', strpos($mainSrc28, 'res-purged') !== false);
 // 28j. uninstall + version markers
 check('uninstall reaps the cache option and directory', strpos($uninstall28, "'glpe_res_cache'") !== false && strpos($uninstall28, 'glpe-res-cache') !== false);
 check('main file version bumped to 7.3.0', substr_count($mainSrc28, '7.3.0') >= 2);
-check('readme stable tag is 7.6.0', strpos($readme27, 'Stable tag: 7.6.0') !== false);
+check('readme stable tag is 7.6.1', strpos($readme27, 'Stable tag: 7.6.1') !== false);
 check('readme carries the 7.3.0 changelog entry', strpos($readme27, '= 7.3.0 =') !== false);
-check('README badge and feature bullets updated', strpos($readmeMd27, 'version-7.6.0-blue') !== false && strpos($readmeMd27, 'v7.4.0') !== false);
+check('README badge and feature bullets updated', strpos($readmeMd27, 'version-7.6.1-blue') !== false && strpos($readmeMd27, 'v7.4.0') !== false);
 
 // 28k. the new surface stays scanner-clean
 $ship28 = [$resSrc28, $mainSrc28, $engineSrc28, $uninstall28];
@@ -2492,7 +2492,7 @@ check('uninstall reaps the session and cache tuning options', strpos($uninstall2
 
 // 31l. version + release markers
 check('main file version bumped to 7.4.0', substr_count($mainSrc28, '7.4.0') >= 2);
-check('readme stable tag is 7.6.0', strpos($readme27, 'Stable tag: 7.6.0') !== false);
+check('readme stable tag is 7.6.1', strpos($readme27, 'Stable tag: 7.6.1') !== false);
 check('readme carries the 7.4.0 changelog entry', strpos($readme27, '= 7.4.0 =') !== false);
 check('README carries the v7.4.0 feature bullets', substr_count($readmeMd27, 'v7.4.0') >= 3);
 
@@ -2588,7 +2588,7 @@ $mainSrc32 = (string)file_get_contents($root . '/glpe-viewer/glpe-viewer.php');
 $readme32 = (string)file_get_contents($root . '/glpe-viewer/readme.txt');
 $readmeMd32 = (string)file_get_contents($root . '/README.md');
 check('main file still records the phone-optimization heritage (7.5.0)', substr_count($mainSrc32, '7.5.0') >= 1);
-check('readme stable tag is 7.6.0', strpos($readme32, 'Stable tag: 7.6.0') !== false);
+check('readme stable tag is 7.6.1', strpos($readme32, 'Stable tag: 7.6.1') !== false);
 check('readme carries the 7.5.0 changelog entry', strpos($readme32, '= 7.5.0 =') !== false);
 check('README carries the v7.5.0 feature bullet', strpos($readmeMd32, 'v7.5.0') !== false);
 check('launcher URL fields sit at 16px so iOS never zooms', substr_count($mainSrc32, 'font-size: 16px; font-family: monospace') === 2);
@@ -2654,8 +2654,9 @@ check('the renderer service wires the three selection messages', strpos($vbsvcSr
 $mainSrc33 = (string)file_get_contents($root . '/glpe-viewer/glpe-viewer.php');
 $readme33 = (string)file_get_contents($root . '/glpe-viewer/readme.txt');
 $readmeMd33 = (string)file_get_contents($root . '/README.md');
-check('main file version bumped to 7.6.0', substr_count($mainSrc33, '7.6.0') >= 3);
-check('readme stable tag is 7.6.0', strpos($readme33, 'Stable tag: 7.6.0') !== false);
+check('main file version bumped to 7.6.1', substr_count($mainSrc33, '7.6.1') >= 2);
+check('main file still records the phone-polish heritage (7.6.0)', substr_count($mainSrc33, '7.6.0') >= 1);
+check('readme stable tag is 7.6.1', strpos($readme33, 'Stable tag: 7.6.1') !== false);
 check('readme carries the 7.6.0 changelog entry', strpos($readme33, '= 7.6.0 =') !== false);
 check('README carries the v7.6.0 feature bullet', strpos($readmeMd33, 'v7.6.0') !== false);
 
@@ -2663,6 +2664,55 @@ check('README carries the v7.6.0 feature bullet', strpos($readmeMd33, 'v7.6.0') 
 $hits33 = 0;
 foreach ([$vbsSrc33, $vbcSrc33, $vbsvcSrc33, $mainSrc33, (string)file_get_contents($root . '/glpe-viewer/includes/VbSandbox.php')] as $src33) { if (preg_match('#' . $guardPattern . '#i', $src33)) { $hits33++; } }
 check('phone-polish surfaces carry no scanner-flagged strings', $hits33 === 0);
+
+echo "\n== 34. Virtual Browser v7.6.1 — the service engine's selection copy (the picture channel stays pixels-only) ==\n";
+
+// 34a. the renderer service answers the copy question with the LIVE selection's text
+$vbsvc34 = (string)file_get_contents($root . '/glpe-viewer/vb/vb-service.js');
+check('the service owns a copy round that reads the live selection through the renderer', strpos($vbsvc34, 'async copy()') !== false && strpos($vbsvc34, 'Runtime.evaluate') !== false);
+check('the renderer is asked for its own document selection', strpos($vbsvc34, 'document.getSelection()') !== false);
+check('a busy page still answers (the empty answer rides)', strpos($vbsvc34, "v = String((r && r.result && r.result.value) || '');") !== false);
+check('the answer rides the same socket capped at 100000 chars', strpos($vbsvc34, "this.safeSend({ t: 'copysel', v: v.slice(0, 100000) })") !== false);
+check('the client copy question is wired into the message loop', strpos($vbsvc34, "case 'copy':") !== false && strpos($vbsvc34, 'session.copy().catch') !== false);
+
+// 34b. the visitor surface — the copy round-trip into THIS device's clipboard
+$vbc34 = (string)file_get_contents($root . '/glpe-viewer/includes/vb-client.js');
+check('the copy round-trip rides the shortcut as a genuine key pair first', strpos($vbc34, "send({ t: 'key', a: 'down', key: k, code: 'Key' + k.toUpperCase(), vk: vk, mods: 2, text: '' })") !== false && strpos($vbc34, "send({ t: 'key', a: 'up', key: k, code: 'Key' + k.toUpperCase(), vk: vk, mods: 2 })") !== false);
+check('the cut variant rides the same round (the deletion belongs to the destination)', strpos($vbc34, "var k = cut ? 'x' : 'c', vk = cut ? 88 : 67;") !== false);
+check('the selected text lands through the visitor clipboard write with a legacy fallback', strpos($vbc34, 'navigator.clipboard.writeText(text).then') !== false && strpos($vbc34, "ok = document.execCommand('copy');") !== false);
+check('the pending round times out honestly (5s, Persian notice)', strpos($vbc34, 'پاسخ کپی از میزبان نرسید') !== false && strpos($vbc34, '}, 5000);') !== false);
+check('the copysel answer resolves the pending round exactly once', strpos($vbc34, "case 'copysel':") !== false && strpos($vbc34, 'copyCb = null;') !== false);
+check('the desktop shortcut is intercepted into the same round', strpos($vbc34, "e.key === 'c' || e.key === 'C' || e.key === 'x' || e.key === 'X'") !== false && strpos($vbc34, 'copySelectionToVisitor(e.key === ' . "'x' || e.key === 'X');") !== false);
+
+// 34c. the surface's own selection menu (what the release of a word-selection opens)
+check('the release of a touch selection opens the copy menu over the selection', strpos($vbc34, "setTimeout(function () {\n          if (root && !closing) showSelMenu(p.x, p.y);\n        }, 140);") !== false);
+check('the menu carries the three Persian affordances', strpos($vbc34, "selMenuItem(selMenu, 'کپی (Ctrl+C)'") !== false && strpos($vbc34, "selMenuItem(selMenu, 'چسباندن (Ctrl+V)'") !== false && strpos($vbc34, "selMenuItem(selMenu, 'انتخاب همه (Ctrl+A)'") !== false);
+check('paste reads the visitor clipboard and rides it as text into the renderer', strpos($vbc34, 'function pasteFromVisitor()') !== false && strpos($vbc34, "send({ t: 'text', v: String(t).slice(0, 5000) });") !== false);
+check('select-all rides the renderer as the genuine shortcut', strpos($vbc34, 'function selectAllInRenderer()') !== false && strpos($vbc34, "send({ t: 'key', a: 'down', key: 'a', code: 'KeyA', vk: 65, mods: 2, text: '' })") !== false);
+check('the menu clamps inside the stage and dismisses on fresh gestures', strpos($vbc34, 'function showSelMenu(cx, cy)') !== false && substr_count($vbc34, 'hideSelMenu();') >= 5);
+check('a new document drops the stale selection menu', strpos($vbc34, "hideSelMenu(); // a new document drops the stale selection's menu") !== false);
+check('the teardown reaps the toast, the menu, and the pending round', strpos($vbc34, 'if (copyT) { clearTimeout(copyT); copyT = null; }') !== false && strpos($vbc34, 'toastEl = null;') !== false);
+check('both engine surfaces keep the status pill off the gesture path', strpos($vbc34, 'text-overflow:ellipsis;pointer-events:none;') !== false && strpos((string)file_get_contents($root . '/glpe-viewer/includes/vb-sandbox.js'), 'text-overflow:ellipsis;pointer-events:none;') !== false);
+
+// 34d. the e2e suite proves the round live (clipboard granted, words read back)
+$e2e34 = (string)file_get_contents($root . '/tools/e2e-mobile-service.js');
+check('the service e2e exercises the copy round against the real clipboard', strpos($e2e34, "grantPermissions(['clipboard-read', 'clipboard-write'])") !== false && strpos($e2e34, '#__glpe_vb_selmenu') !== false);
+check('the service e2e proves the LIVE selection text landed in this device', strpos($e2e34, "navigator.clipboard.readText().catch") !== false && strpos($e2e34, 'words.some') !== false);
+check('the service e2e re-opens and dismisses the menu deterministically', strpos($e2e34, 'a second selection release reopens the copy menu') !== false && strpos($e2e34, 'a tap on the picture dismisses the open copy menu') !== false);
+
+// 34e. version + release markers
+$main34 = (string)file_get_contents($root . '/glpe-viewer/glpe-viewer.php');
+$readme34 = (string)file_get_contents($root . '/glpe-viewer/readme.txt');
+$readmeMd34 = (string)file_get_contents($root . '/README.md');
+check('main file version is 7.6.1', strpos($main34, "define('GLPE_VERSION', '7.6.1');") !== false);
+check('readme stable tag is 7.6.1 with the 7.6.1 changelog entry', strpos($readme34, 'Stable tag: 7.6.1') !== false && strpos($readme34, '= 7.6.1 =') !== false);
+check('readme keeps the 7.6.0 line description untouched', strpos($readme34, '= 7.6.0 =') !== false);
+check('README carries the v7.6.1 feature bullet and the badge', strpos($readmeMd34, 'v7.6.1') !== false && strpos($readmeMd34, 'version-7.6.1-blue') !== false);
+
+// 34f. the changed surfaces stay scanner-clean
+$hits34 = 0;
+foreach ([$vbsvc34, $vbc34, $main34, $e2e34] as $src34) { if (preg_match('#' . $guardPattern . '#i', $src34)) { $hits34++; } }
+check('copy-round surfaces carry no scanner-flagged strings', $hits34 === 0);
 
 echo "\n== RESULT: $pass passed, $fail failed ==\n";
 exit($fail > 0 ? 1 : 0);

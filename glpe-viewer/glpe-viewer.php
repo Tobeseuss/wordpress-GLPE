@@ -3,7 +3,7 @@
  * Plugin Name: GLPE Viewer — Remote Page Display
  * Plugin URI: https://github.com/Tobeseuss/wordpress-GLPE
  * Description: نمایش سریع و امن صفحات وب دلخواه داخل سایت شما با کدگذاری کامل تبادلات، بازنویسی خودکار پیوندها، سبک بارگذاری کم‌مصرف و نوار ناوبری شناور. مناسب هاست‌های اشتراکی و رایگان.
- * Version: 7.6.0
+ * Version: 7.6.1
  * Author: Tobeseuss
  * License: MIT
  * Text Domain: glpe-viewer
@@ -13,7 +13,7 @@ if (!defined('ABSPATH')) {
     exit; // Prevent direct access
 }
 
-define('GLPE_VERSION', '7.6.0');
+define('GLPE_VERSION', '7.6.1');
 define('GLPE_DIR', plugin_dir_path(__FILE__));
 define('GLPE_URL', plugin_dir_url(__FILE__));
 
@@ -115,7 +115,11 @@ if (file_exists(GLPE_DIR . 'includes/VbDl.php')) {
 // echo leaves the ground unselected); desktop-shaped destinations adopt a
 // WIDE session geometry through one more 'rs' ride and shrink visually to
 // fit; and the soft keyboard's height-only shrink never rides as a
-// rotation. Still no new server component.
+// rotation. The service engine's selection now copies too: the release
+// opens the visitor surface's own copy/paste menu over the selection and
+// desktop Ctrl+C/X fetch the renderer's live selection through the
+// 'copy'/'copysel' socket round (vb-service.js answers from the renderer;
+// the picture channel stays pixels-only). Still no new server component.
 // Remote-diagnostics API (v6.3.0): optional by design — a missing file only
 // removes the diag card + endpoint, never the site.
 if (file_exists(GLPE_DIR . 'includes/DiagApi.php')) {

@@ -198,7 +198,7 @@
     btnClose: 'width:34px;height:34px;border-radius:10px;border:1px solid #7f1d1d;background:#450a0a;color:#fecaca;font-size:15px;cursor:pointer;line-height:1;flex:none;',
     input: 'flex:1;min-width:200px;padding:9px 12px;background:#0f172a;border:1px solid #334155;border-radius:10px;color:#f8fafc;font-size:12px;font-family:monospace;outline:none;direction:ltr;text-align:left;',
     stage: 'flex:1;position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;background:#000;',
-    pill: 'position:absolute;top:10px;right:12px;background:rgba(15,23,42,0.85);border:1px solid #334155;color:#94a3b8;border-radius:9999px;padding:4px 12px;font-size:11px;line-height:1.8;z-index:6;max-width:70%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;',
+    pill: 'position:absolute;top:10px;right:12px;background:rgba(15,23,42,0.85);border:1px solid #334155;color:#94a3b8;border-radius:9999px;padding:4px 12px;font-size:11px;line-height:1.8;z-index:6;max-width:70%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;',
     foot: 'display:flex;align-items:center;gap:14px;padding:8px 14px;background:#1e293b;border-top:1px solid #334155;color:#94a3b8;font-size:11px;flex:none;flex-wrap:wrap;',
     footCompact: 'display:flex;align-items:center;gap:10px;padding:5px 10px;background:#1e293b;border-top:1px solid #334155;color:#94a3b8;font-size:10px;flex:none;white-space:nowrap;overflow:hidden;',
     frame: 'border:0;background:#fff;display:block;flex:none;',
